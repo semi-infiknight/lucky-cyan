@@ -42,7 +42,16 @@ An Inkue audio engine reopen withdraws active file Audio cues that used this set
 3. At a low listening level, play a clip with bass and treble through **Backstage Filter**. Compare it with the same clip on a dry patch reaching the same hardware channel. Start two Audio cues on **Backstage Filter** together and compare the combined output with the dry patch still playing. The filter works on the sum of the two filtered cues.
 4. Stop the patch’s file Audio cues before editing the chain. Save and reopen the workspace to verify the settings. To check routing loss, disconnect the interface with playback stopped and try GO. The processed cue should stay held.
 
-The named main output can play up to eight processed patches at once, each with up to eight native effects. The device can use up to 32 hardware channels and 4,096 frames per audio block. Cue effects run before patch routing. Each patch sums its own file Audio by hardware channel, applies its Output FX, and then contributes to the device master. Use a dry patch and a dedicated hardware channel for LTC. Video soundtracks, Mic and LTC keep their dry paths. Third-party plug-ins and per-cue output effects require separate support. [QLab Audio Output Patch Editor](https://qlab.app/docs/v5/audio/audio-output-patch-editor/)
+The named main output can play up to eight processed patches at once, each with up to eight native device effects. The device can use up to 32 hardware channels and 4,096 frames per audio block. Cue inserts run before patch routing. Each patch sums its own File Audio by hardware channel, applies its Output FX, and then contributes to the device master. Use a dry patch and a dedicated hardware channel for LTC. Video soundtracks, Mic and LTC keep their dry paths. Third-party plug-ins require separate support. [QLab Audio Output Patch Editor](https://qlab.app/docs/v5/audio/audio-output-patch-editor/)
+
+## Filter one cue output before the patch sums it
+
+1. On a rehearsal patch, select the named main audio device and enable **Require named device for Audio GO**. Enter the same hardware channel twice, such as `1, 1`, to route two cue outputs to one speaker. Assign two File Audio cues to this patch.
+2. Use the **Levels** matrix to route a low tone to cue output 1 and a second signal to cue output 2. Start each cue separately to check the routing. Stop both.
+3. In **Preferences → Audio → Output Patches**, expand **Cue Output FX** and select cue output 1. Add a high-pass filter and set it to 600 Hz. Start both cues and check that the low tone is reduced while the second signal remains audible on the shared speaker.
+4. Save and reopen the workspace. Stop both cues before changing the chain or its routing. Try cue output 2 in the FX selector to program a separate chain.
+
+Cue Output FX support up to 32 logical outputs on a processed patch, with up to eight ordered native filters in each chain. They run after the File Audio cue's Levels matrix and before its cue outputs are mapped to hardware channels. **Output FX** apply to the summed hardware channels afterward. [QLab Cue Outputs and Patch Routing](https://reference.qlab.app/docs/v5/audio/audio-output-patch-editor/)
 
 To compare two chains on one device, give a music patch a low-pass filter and a dialogue patch a high-pass filter. Select the same named hardware output for both patches and route a File Audio cue through each. Play them together, then pause and resume the music while the dialogue stays live. Change patch effects after stopping the cues on that patch.
 

@@ -53,7 +53,7 @@ use commands::{
     device_cmds::{
         get_output_patches, list_input_devices, list_output_devices, refresh_devices,
         open_mixer_window, remove_output_patch, set_default_output_patch, set_output_patch,
-        set_output_patch_effects, set_output_patch_require_device,
+        set_cue_output_effects, set_output_patch_effects, set_output_patch_require_device,
         set_output_patch_gain,
     },
     agent_cmds::{agent_status, agent_connect, agent_disconnect, agent_arm, agent_decide, agent_review_connect, agent_review_disconnect, get_cue_monitor_snapshot, set_agent_performance_lock},
@@ -714,6 +714,7 @@ pub fn run() {
             set_output_patch,
             set_output_patch_require_device,
             set_output_patch_effects,
+            set_cue_output_effects,
             remove_output_patch,
             set_default_output_patch,
             set_output_patch_gain,

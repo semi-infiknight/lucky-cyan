@@ -478,7 +478,8 @@ impl AudioCue {
         // channel indices to the voice's L/R output slots and target its
         // device (the engine opens an aux stream for non-main devices).
         let mut patch_device: Option<String> = None;
-        if let Some(patch) = context.resolve_patch(self.output_patch_id) {
+        let patch = context.resolve_patch(self.output_patch_id);
+        if let Some(patch) = patch {
             voice.output_patch_id = Some(patch.id);
             if let Some(&ch_l) = patch.channels.first() {
                 voice.out_l = ch_l as usize;
@@ -505,10 +506,11 @@ impl AudioCue {
                 "The required output changed during Pre-Wait. Check the Output Patch and retry GO."
             );
         }
-        if let Some(patch) = context.resolve_patch(self.output_patch_id) {
+        let mix_channels = patch.map(|patch| patch.cue_mixer_channels()).unwrap_or_default();
+        if let Some(patch) = patch {
             if voice.named_output.is_some() && super::output_trim::OutputTrim::valid_channels(&patch.channels) {
                 let gains = self.output_trim.as_ref().map_or_else(Vec::new, |trim| trim.linear_levels());
-                voice = voice.with_output_trims(&patch.channels, &gains);
+                voice = voice.with_output_trims(&mix_channels, &gains);
             }
         }
 
@@ -516,11 +518,7 @@ impl AudioCue {
         // so a matrix column addresses the patch's channel, not a raw device
         // one.  Written before submission — the RT callback only reads it.
         if let Some(spec) = &self.level_matrix {
-            let patch_channels: Vec<u16> = context
-                .resolve_patch(self.output_patch_id)
-                .map(|p| p.channels.clone())
-                .unwrap_or_default();
-            if let Some(matrix) = build_level_matrix(spec, &patch_channels, self.matrix_mirror_mono) {
+            if let Some(matrix) = build_level_matrix(spec, &mix_channels, self.matrix_mirror_mono) {
                 // SAFETY: written once, before play_voice_routed hands the
                 // voice to the RT thread.
                 voice.inner.level_matrix.update(|_| Some(matrix));

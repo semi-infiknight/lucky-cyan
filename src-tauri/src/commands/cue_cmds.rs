@@ -1180,13 +1180,24 @@ pub fn apply_cue_properties(
     let mut edited = registry.from_json(json).map_err(|e| e.to_string())?;
     let matrix_changed = ["level_matrix", "point_mix", "matrix_mirror_mono", "output_patch_id"]
         .iter().any(|key| properties.get(*key).is_some());
+    let patch = edited.output_patch_id().or(default_patch_id)
+        .and_then(|id| ws.output_patches.iter().find(|patch| patch.id == id));
     if matrix_changed {
         if let Some(voice) = old.playing_voice_id() {
-            let patch = edited.output_patch_id().or(default_patch_id)
-                .and_then(|id| ws.output_patches.iter().find(|patch| patch.id == id));
             check_live_matrix_patch(audio, voice, patch)?;
         }
     }
+    let mix_channels = if matrix_changed {
+        patch.map(|patch| {
+            if edited.cue_type() == CueType::Audio {
+                patch.cue_mixer_channels()
+            } else {
+                std::borrow::Cow::Borrowed(patch.channels.as_slice())
+            }
+        }).unwrap_or_default().into_owned()
+    } else {
+        Vec::new()
+    };
     let mut output_trim_update = None;
     if properties.get("output_trim").is_some() {
         use crate::cue::audio_cue::AudioCue;
@@ -1246,11 +1257,8 @@ pub fn apply_cue_properties(
                 let _ = audio.set_voice_pan(voice, params.pan);
             }
             if matrix_changed {
-                let channels = edited.output_patch_id().or(default_patch_id)
-                    .and_then(|id| patch_channels_by_id.iter().find(|(pid, _)| *pid == id))
-                    .map(|(_, channels)| channels.as_slice()).unwrap_or_default();
                 let matrix = params.level_matrix.as_ref().and_then(|spec|
-                    crate::cue::audio_cue::build_level_matrix(spec, channels, params.matrix_mirror_mono));
+                    crate::cue::audio_cue::build_level_matrix(spec, &mix_channels, params.matrix_mirror_mono));
                 let _ = audio.set_voice_level_matrix(voice, matrix.as_ref());
             }
         }
@@ -1562,7 +1570,13 @@ pub fn set_live_crosspoint(
         .or(ws.default_output_patch_id)
         .and_then(|pid| ws.output_patches.iter().find(|p| p.id == pid));
     check_live_matrix_patch(state.audio_engine.as_ref(), params.voice_id, patch)?;
-    let patch_channels = patch.map(|patch| patch.channels.as_slice()).unwrap_or_default();
+    let patch_channels = patch.map(|patch| {
+        if cue.cue_type() == CueType::Audio {
+            patch.cue_mixer_channels()
+        } else {
+            std::borrow::Cow::Borrowed(patch.channels.as_slice())
+        }
+    }).unwrap_or_default();
     let physical = if patch_channels.is_empty() {
         u16::from(output)
     } else {

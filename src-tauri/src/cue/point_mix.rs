@@ -314,10 +314,11 @@ impl MapMotionRun {
         let mut levels = live.level_matrix.ok_or("Apply the map before starting the Audio cue.")?;
         let device = map.patch.device_id.as_deref().filter(|id| !id.is_empty())
             .ok_or("Calibrate a named output device for movement.")?;
-        let channels = &map.patch.channels;
+        let patch = context.resolve_patch(Some(patch_id)).ok_or("The calibrated patch is missing.")?;
+        let channels = patch.cue_mixer_channels();
         point.source = start.clone();
         point.apply(&mut levels, channels.len())?;
-        let expected = super::audio_cue::build_level_matrix(&levels, channels, live.matrix_mirror_mono)
+        let expected = super::audio_cue::build_level_matrix(&levels, &channels, live.matrix_mirror_mono)
             .ok_or("The starting route has no matrix.")?;
         let owner = Uuid::new_v4();
         if !context.audio_engine.claim_map_motion(live.voice_id, device, owner, &expected) {
@@ -336,7 +337,8 @@ impl MapMotionRun {
         if !Self::calibration_matches(context, map, self.patch_id) { return false; }
         self.point.source = self.start.toward(&self.end, progress);
         if self.point.apply(&mut self.levels, map.patch.channels.len()).is_err() { return false; }
-        let Some(matrix) = super::audio_cue::build_level_matrix(&self.levels, &map.patch.channels, self.mirror_mono) else {
+        let Some(patch) = context.resolve_patch(Some(self.patch_id)) else { return false };
+        let Some(matrix) = super::audio_cue::build_level_matrix(&self.levels, &patch.cue_mixer_channels(), self.mirror_mono) else {
             return false;
         };
         context.audio_engine.update_map_motion(self.voice, map.patch.device_id.as_deref().unwrap_or_default(), self.owner, matrix)

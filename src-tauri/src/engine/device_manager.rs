@@ -55,6 +55,15 @@ pub struct OutputPatch {
     /// Ordered effects applied to the sum of File Audio on this patch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) audio_effects: Vec<CueEffect>,
+    /// Ordered insert chains indexed by logical cue output, before hardware routing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) cue_output_effects: Vec<CueOutputEffects>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct CueOutputEffects {
+    pub(crate) output: usize,
+    pub(crate) effects: Vec<CueEffect>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -66,8 +75,9 @@ fn is_false(value: &bool) -> bool {
 pub struct NamedOutput {
     pub(super) patch_id: OutputPatchId,
     pub device_id: String,
-    channels: Vec<u16>,
+    pub(super) channels: Vec<u16>,
     pub(crate) audio_effects: Vec<CueEffect>,
+    pub(super) cue_output_effects: Vec<CueOutputEffects>,
 }
 
 impl NamedOutput {
@@ -80,7 +90,11 @@ impl NamedOutput {
     }
 
     pub(crate) fn has_audio_effects(&self) -> bool {
-        self.audio_effects.iter().any(|effect| effect.processes_audio())
+        self.has_cue_output_effects() || self.audio_effects.iter().any(|effect| effect.processes_audio())
+    }
+
+    pub(super) fn has_cue_output_effects(&self) -> bool {
+        has_cue_output_effects(&self.cue_output_effects)
     }
 }
 
@@ -96,11 +110,13 @@ impl OutputPatch {
             gain_db: 0.0,
             require_named_device: false,
             audio_effects: Vec::new(),
+            cue_output_effects: Vec::new(),
         }
     }
 
     pub fn named_output(&self) -> Result<Option<NamedOutput>, String> {
         validate_effects(&self.audio_effects).map_err(|error| format!("Output Patch “{}”. {error}", self.name))?;
+        self.validate_cue_output_effects()?;
         if !self.require_named_device {
             if self.has_audio_effects() {
                 return Err(format!("Enable Require named device for Audio GO on Output Patch “{}” before using its effects.", self.name));
@@ -123,11 +139,39 @@ impl OutputPatch {
             device_id: self.device_id.clone(),
             channels: self.channels.clone(),
             audio_effects: self.audio_effects.clone(),
+            cue_output_effects: self.cue_output_effects.clone(),
         }))
     }
 
     pub(crate) fn has_audio_effects(&self) -> bool {
-        self.audio_effects.iter().any(|effect| effect.processes_audio())
+        has_cue_output_effects(&self.cue_output_effects) || self.audio_effects.iter().any(|effect| effect.processes_audio())
+    }
+
+    /// File Audio matrices address distinct patch outputs when cue-output FX are active.
+    pub(crate) fn cue_mixer_channels(&self) -> std::borrow::Cow<'_, [u16]> {
+        if has_cue_output_effects(&self.cue_output_effects) {
+            std::borrow::Cow::Owned(self.channels.iter().enumerate().map(|(index, _)| index as u16).collect())
+        } else {
+            std::borrow::Cow::Borrowed(&self.channels)
+        }
+    }
+
+    pub(crate) fn validate_cue_output_effects(&self) -> Result<(), String> {
+        use super::patch_effects::MAX_PATCH_EFFECT_CHANNELS as LIMIT;
+        if !self.cue_output_effects.is_empty() && self.channels.len() > LIMIT {
+            return Err(format!("Cue Output FX support patches with up to {LIMIT} cue outputs."));
+        }
+        let mut used = [false; LIMIT];
+        for chain in &self.cue_output_effects {
+            if chain.output >= self.channels.len() || chain.output >= LIMIT {
+                return Err("A Cue Output FX chain refers to an output that is no longer in the patch.".into());
+            }
+            if std::mem::replace(&mut used[chain.output], true) {
+                return Err("Each cue output can have one ordered FX chain.".into());
+            }
+            validate_effects(&chain.effects).map_err(|error| format!("Cue output {}. {error}", chain.output + 1))?;
+        }
+        Ok(())
     }
 
     /// Returns whether live audio routing needs to be rebuilt.
@@ -142,6 +186,10 @@ impl OutputPatch {
         }
         reroute
     }
+}
+
+fn has_cue_output_effects(chains: &[CueOutputEffects]) -> bool {
+    chains.iter().any(|chain| chain.effects.iter().any(|effect| effect.processes_audio()))
 }
 
 /// Manages device enumeration.

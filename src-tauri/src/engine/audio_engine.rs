@@ -2151,7 +2151,6 @@ fn fill_buffer(
     // Per-Output-Patch peaks, indexed by Voice::patch_slot (fixed-size — no
     // allocation in the RT callback).
     let mut patch_peaks = [0.0_f32; PATCH_VU_SLOTS * 2];
-    let output_samples = output.len();
     let mut patch_blocks: [Option<ActivePatchBlock<'_>>; MAX_PROCESSED_PATCHES] = [const { None }; MAX_PROCESSED_PATCHES];
 
     for voice in voices_guard.iter() {
@@ -2188,7 +2187,7 @@ fn fill_buffer(
                             // a dense prefix, so each bus is borrowed at most once.
                             let block = unsafe { &mut *bus.state.get() };
                             let fits = output_period.load(std::sync::atomic::Ordering::Relaxed) as usize
-                                <= patch_effects::MAX_PATCH_EFFECT_FRAMES && block.begin(output_samples);
+                                <= patch_effects::MAX_PATCH_EFFECT_FRAMES && block.begin(frames);
                             ActivePatchBlock { bus, block, fits, rendered: false }
                         }))
                 }),
@@ -2254,11 +2253,17 @@ fn fill_buffer(
             continue;
         }
 
-        let output = match (voice.patch_effects.as_deref(), patch_block) {
-            (None, _) => &mut *output,
+        let (output, channels, left, right) = match (voice.patch_effects.as_deref(), patch_block) {
+            (None, _) => (&mut *output, channels, voice.out_l, voice.out_r),
             (Some(_), Some(active)) if active.fits => {
                 active.rendered = true;
-                active.block.samples(output_samples)
+                let mix_channels = active.block.channels();
+                let (left, right) = if active.block.uses_cue_outputs() {
+                    (0, usize::from(mix_channels > 1))
+                } else {
+                    (voice.out_l, voice.out_r)
+                };
+                (active.block.samples(frames), mix_channels, left, right)
             }
             (Some(_), _) => {
                 voice.set_stopped();
@@ -2469,14 +2474,14 @@ fn fill_buffer(
                 let sample_l = input_frame[0];
                 let sample_r = if source_inputs > 1 { input_frame[1] } else { sample_l };
                 let trim_at = |channel| output_gains.and_then(|gains| gains.get(channel)).copied().unwrap_or(1.0) as f32;
-                let out_l = sample_l * gain_l * fade_gain * trim_at(voice.out_l);
-                let out_r = sample_r * gain_r * fade_gain * trim_at(voice.out_r);
+                let out_l = sample_l * gain_l * fade_gain * trim_at(left);
+                let out_r = sample_r * gain_r * fade_gain * trim_at(right);
 
                 // Route to the per-voice output channels (from Output Patch).
                 // Bounds-check at the sample level keeps the RT callback safe even
                 // if the patch references a channel the device does not have.
-                if voice.out_l < channels { output[out_base + voice.out_l] += out_l; }
-                if voice.out_r < channels { output[out_base + voice.out_r] += out_r; }
+                if left < channels { output[out_base + left] += out_l; }
+                if right < channels { output[out_base + right] += out_r; }
 
                 voice_peak_l = voice_peak_l.max(out_l.abs());
                 voice_peak_r = voice_peak_r.max(out_r.abs());
@@ -2853,6 +2858,40 @@ mod tests {
         assert!(output[0] > 0.30);
         assert!((output[2046] - 0.20).abs() < 1e-5);
         assert!(output.iter().skip(1).step_by(2).all(|&sample| sample == 0.0));
+    }
+
+    #[test]
+    fn cue_output_effects_run_before_two_patch_outputs_sum_on_one_hardware_channel() {
+        use super::super::{device_manager::{CueOutputEffects, OutputPatch}, voice::LevelMatrix};
+        use std::sync::atomic::AtomicU32;
+
+        let mut patch = OutputPatch::new("Stage", "hw:CARD=Stage", vec![1, 1]);
+        patch.require_named_device = true;
+        patch.cue_output_effects.push(CueOutputEffects { output: 0, effects: vec![
+            CueEffect::HighPass { id: Uuid::new_v4(), enabled: true, frequency_hz: 600.0 },
+        ] });
+        assert_eq!(patch.cue_mixer_channels().as_ref(), &[0, 1]);
+        let saved = serde_json::to_value(&patch).unwrap();
+        let reopened: OutputPatch = serde_json::from_value(saved).unwrap();
+        let route = reopened.named_output().unwrap().unwrap();
+        let bus = Arc::new(PatchBus::new(route, 2, 48_000).unwrap());
+        let wet = filtered_stage_voice(0.35, bus.clone(), 2048);
+        let dry = filtered_stage_voice(0.20, bus, 2048);
+        let mut matrix = LevelMatrix::default();
+        matrix.set(0, 1, 1.0);
+        dry.inner.level_matrix.update(|_| Some(matrix));
+
+        let pool = ArcSwap::from_pointee(vec![wet, dry]);
+        let feeds = Arc::new(Mutex::new(Vec::new()));
+        let (_, mut commands) = HeapRb::new(16).split();
+        let (mut status, _) = HeapRb::new(16).split();
+        let master = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
+        let period = Arc::new(AtomicU32::new(1024));
+        let mut output = [0.0; 2048];
+        fill_buffer(audio_clock_us(), &mut output, 2, 48_000, &pool, &feeds, &mut commands, &mut status, &master, &period);
+        assert!(output[1] > 0.50, "both cue outputs enter the device output: {}", output[1]);
+        assert!((output[2047] - 0.20).abs() < 1e-5, "the unaffected cue output stays dry");
+        assert!(output.iter().step_by(2).all(|&sample| sample == 0.0));
     }
 
     #[test]

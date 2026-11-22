@@ -559,6 +559,8 @@ export const setOutputPatchRequireDevice = (workspaceId: string, patchId: string
   invoke<void>("set_output_patch_require_device", { workspaceId, patchId, requireNamedDevice });
 export const setOutputPatchEffects = (workspaceId: string, patchId: string, audioEffects: CueEffect[]) =>
   invoke<void>("set_output_patch_effects", { workspaceId, patchId, audioEffects });
+export const setCueOutputEffects = (workspaceId: string, patchId: string, output: number, effects: CueEffect[]) =>
+  invoke<void>("set_cue_output_effects", { workspaceId, patchId, output, effects });
 export const openMixerWindow = () => invoke<void>("open_mixer_window");
 export const setDefaultOutputPatch = (patchId: string | null) =>
   invoke<void>("set_default_output_patch", { patchId });

@@ -10,6 +10,7 @@ import {
   getOutputPatchTable,
   setOutputPatch,
   setOutputPatchEffects,
+  setCueOutputEffects,
   setOutputPatchRequireDevice,
   removeOutputPatch,
   setDefaultOutputPatch,
@@ -63,6 +64,7 @@ export function OutputPatchesPanel({ backend }: { backend?: string }) {
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [channelText, setChannelText] = useState<Record<string, string>>({});
   const [savingEffects, setSavingEffects] = useState(false);
+  const [effectOutputs, setEffectOutputs] = useState<Record<string, number>>({});
   const [patchError, setPatchError] = useState<{ id: string; message: string }>();
 
   const reload = () =>
@@ -154,12 +156,13 @@ export function OutputPatchesPanel({ backend }: { backend?: string }) {
     await reload();
   };
 
-  const saveEffects = async (id: string, effects: CueEffect[]) => {
+  const saveEffects = async (id: string, effects: CueEffect[], output?: number) => {
     if (!workspaceId || savingEffects) return;
     setSavingEffects(true);
     setPatchError(undefined);
     try {
-      await setOutputPatchEffects(workspaceId, id, effects);
+      if (output === undefined) await setOutputPatchEffects(workspaceId, id, effects);
+      else await setCueOutputEffects(workspaceId, id, output, effects);
       await reload();
     } catch (e) {
       setPatchError({ id, message: String(e) });
@@ -189,6 +192,8 @@ export function OutputPatchesPanel({ backend }: { backend?: string }) {
         const deviceMissing = !devices.some((d) => d.id === patch.device_id);
         const device = devices.find(d => d.id === patch.device_id);
         const channelCount = Math.min(128, patch.channels.length || device?.channels || patch.channel_names?.length || 2);
+        const effectOutput = Math.max(0, Math.min(effectOutputs[patch.id] ?? 0, patch.channels.length - 1));
+        const cueEffects = patch.cue_output_effects?.find(entry => entry.output === effectOutput)?.effects ?? [];
         return (
         <div
           key={patch.id}
@@ -280,6 +285,25 @@ export function OutputPatchesPanel({ backend }: { backend?: string }) {
               <OrderedAudioEffects effects={patch.audio_effects ?? []} onChange={effects => void saveEffects(patch.id, effects)} />
             </fieldset>
           </details>
+          {!!patch.channels.length && patch.channels.length <= 32 && (
+            <details style={{ gridColumn: "2 / -1", fontSize: 12 }}>
+              <summary>Cue Output FX</summary>
+              <p>Filters one File Audio cue output before device routing. Stop this patch’s Audio cues before editing.</p>
+              <fieldset disabled={savingEffects || patch.dirty} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+                <Select aria-label={`Cue output for effects on ${patch.name}`} value={String(effectOutput)}
+                  onChange={event => setEffectOutputs({ ...effectOutputs, [patch.id]: Number(event.target.value) })}>
+                  {patch.channels.map((channel, index) => (
+                    <option key={index} value={index}>
+                      {patch.channel_names?.[index] || `Cue output ${index + 1}`} · HW {channel + 1}
+                      {patch.cue_output_effects?.some(entry => entry.output === index) ? " · FX" : ""}
+                    </option>
+                  ))}
+                </Select>
+                <OrderedAudioEffects effects={cueEffects}
+                  onChange={effects => void saveEffects(patch.id, effects, effectOutput)} />
+              </fieldset>
+            </details>
+          )}
           <details style={{ gridColumn: "2 / -1", fontSize: 12 }}>
             <summary>Channel names</summary>
             {Array.from({ length: channelCount }, (_, index) => (

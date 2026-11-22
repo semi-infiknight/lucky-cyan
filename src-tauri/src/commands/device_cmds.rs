@@ -8,7 +8,7 @@ use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
 
 use crate::{
-    engine::{audio_input, cue_effects::{validate_effects, CueEffect}, device_manager::{DeviceInfo, OutputPatch}},
+    engine::{audio_input, cue_effects::{validate_effects, CueEffect}, device_manager::{CueOutputEffects, DeviceInfo, OutputPatch}},
     state::AppState,
 };
 
@@ -145,6 +145,7 @@ pub fn set_output_patch(
         Some(existing) => {
             let mut updated = existing.clone();
             let reroute = updated.update_definition(name, device_id, channels, channel_names);
+            if reroute { updated.validate_cue_output_effects()?; }
             if reroute && updated.has_audio_effects() {
                 if state.audio_engine.patch_has_active_audio(id)? {
                     return Err("Stop File Audio using this patch before changing its effects route.".into());
@@ -219,24 +220,60 @@ pub(crate) fn set_output_patch_effects(
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     validate_effects(&audio_effects)?;
+    edit_output_patch_effects(&state, &app_handle, workspace_id, patch_id, |patch| {
+        patch.audio_effects = audio_effects;
+        Ok(())
+    })
+}
+
+#[tauri::command]
+pub(crate) fn set_cue_output_effects(
+    workspace_id: Uuid,
+    patch_id: Uuid,
+    output: usize,
+    effects: Vec<CueEffect>,
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    validate_effects(&effects)?;
+    edit_output_patch_effects(&state, &app_handle, workspace_id, patch_id, |patch| {
+        if output >= patch.channels.len() {
+            return Err("Select a cue output in this patch.".into());
+        }
+        patch.cue_output_effects.retain(|entry| entry.output != output);
+        if !effects.is_empty() {
+            patch.cue_output_effects.push(CueOutputEffects { output, effects });
+            patch.cue_output_effects.sort_by_key(|entry| entry.output);
+        }
+        patch.validate_cue_output_effects()
+    })
+}
+
+fn edit_output_patch_effects(
+    state: &AppState,
+    app_handle: &tauri::AppHandle,
+    workspace_id: Uuid,
+    patch_id: Uuid,
+    edit: impl FnOnce(&mut OutputPatch) -> Result<(), String>,
+) -> Result<(), String> {
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
     if ws.instance_id != workspace_id {
         return Err("The workspace changed. Review its Output Patches before editing.".into());
     }
     let patch = ws.output_patches.iter_mut().find(|patch| patch.id == patch_id)
         .ok_or_else(|| format!("Output patch {patch_id} not found"))?;
-    if patch.audio_effects == audio_effects {
+    let mut updated = patch.clone();
+    edit(&mut updated)?;
+    if patch.audio_effects == updated.audio_effects && patch.cue_output_effects == updated.cue_output_effects {
         return Ok(());
     }
     if state.audio_engine.patch_has_active_audio(patch_id)? {
         return Err("Stop File Audio using this patch before editing its effects.".into());
     }
-    let mut updated = patch.clone();
-    updated.audio_effects = audio_effects;
     if updated.has_audio_effects() {
         updated.named_output()?;
     }
-    patch.audio_effects = updated.audio_effects;
+    *patch = updated;
     ws.mark_modified();
     drop(ws);
     let _ = app_handle.emit("output-patches-changed", ());

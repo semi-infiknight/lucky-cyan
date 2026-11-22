@@ -780,6 +780,8 @@ export interface OutputPatch {
   require_named_device?: boolean;
   /** Native effects on the summed File Audio output of this patch. */
   audio_effects?: CueEffect[];
+  /** File Audio effects on logical patch outputs before device routing. */
+  cue_output_effects?: Array<{ output: number; effects: CueEffect[] }>;
 }
 
 /** A named live-audio input mapping (Mic Cues). Mirror of OutputPatch, stored in the workspace. */
