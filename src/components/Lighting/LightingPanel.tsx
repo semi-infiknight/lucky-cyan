@@ -113,7 +113,7 @@ export function LightingPanel({ onClose, showMode = false, blackout, onBlackoutC
 
         {/* Fixtures */}
         <Section title="Fixtures (patch)">
-          <FixturePatch />
+          {workspaceId && <FixturePatch key={workspaceId} workspaceId={workspaceId} />}
         </Section>
 
         {/* Groups */}

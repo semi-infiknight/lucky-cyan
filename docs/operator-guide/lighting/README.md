@@ -21,6 +21,12 @@ Front = 70
 
 Preview and Replace update cue data only. The dashboard and test channel in **Live controls**, the patch’s **Identify** button and the **Blackout** control operate the live engine immediately. **Output monitor** shows the current universe values.
 
+## Reuse a fixture profile in another workspace
+
+1. In a rehearsal copy, open **DMX → Patch** and add **Moving Head 16-bit (8ch)**. Open **Profile**, give it a distinct model and mode, and save the profile. Reopen **Profile** and choose **Export saved profile…**. Save `Tour moving head.inkue-fixture`.
+2. Open a second rehearsal workspace. Choose **DMX → Patch → Import profile…** and select the file. Check the selected name, mode and footprint. Choose a free universe and start address, then use **Patch fixture**. Import and patch prepare fixture data without sending DMX. The selected profile can be patched again at another free address.
+3. Open the new fixture’s **Profile** and verify the roles and both addresses on each 16-bit row. Try patching the same profile at an already used address to see the conflict. Save and reopen the workspace to confirm the new fixture carries its own copy of the definition. The format carries channel roles, defaults, and adjacent coarse and fine slots. It omits fixture addresses, group membership and cue targets. [QLab Light Library](https://qlab.app/docs/v5/lighting/light-library/)
+
 ## Program a CMY filter look
 
 1. Disconnect the venue outputs or use a rehearsal copy with universe outputs disabled. In **DMX → Patch**, add the **CMY (3ch)** template for an offline example at universe 4, address 201. For a venue fixture, compare its profile with the manufacturer’s chart. Assign one explicit **cyan**, **magenta** and **yellow** role each to the fixture’s subtractive channels and save the profile.

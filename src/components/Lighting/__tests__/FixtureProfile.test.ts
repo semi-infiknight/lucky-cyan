@@ -26,6 +26,20 @@ describe("fixture profiles", () => {
     }
   });
 
+  it("shows the adjacent fine address and exposes export of the saved layout", () => {
+    const fixture: PatchedFixture = {
+      id: "head", label: "Back light", universe: 7, base_address: 48,
+      fixture_type: { name: "Moving head", parameters: [
+        { name: "Pan", kind: "pan", width: "Bit16", channel_offset: 2, default: .5 },
+      ] },
+    };
+    const html = renderToStaticMarkup(createElement(FixtureProfile, {
+      fixture, save: async () => {}, exportSaved: async () => {}, close() {},
+    }));
+    expect(html).toContain("<td>50–51</td>");
+    expect(html).toContain("Export saved profile…");
+  });
+
   it("resolves one explicit CMY triplet without including the dimmer or guessing channel names", () => {
     const fixture: PatchedFixture = { id: "cmy", label: "Filter wash", universe: 2, base_address: 115,
       fixture_type: { name: "Example", parameters: [

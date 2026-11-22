@@ -4,17 +4,20 @@
 //! The live monitor is event-driven (`dmx-monitor`, emitted from `lib.rs`); the
 //! `dmx_get_snapshot` command is only a one-shot fallback for initial paint.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::io::Read;
+use std::path::Path;
 use std::sync::MutexGuard;
 use tauri::{Emitter, State};
 use uuid::Uuid;
 
 use crate::cue::light_cue::ParamTarget;
 use crate::engine::dmx_engine::{ChannelWidth, DmxChannelLevel, DmxSnapshot};
-use crate::engine::dmx_sink::UniverseOutput;
+use crate::engine::dmx_sink::{UniverseOutput, DMX_UNIVERSE_SIZE};
 use crate::engine::fixture::{
-    builtin_fixture_types, check_color_patch, find_conflicts, FixtureColorChannels,
-    FixtureColorModel, FixtureConflict, FixtureGroup, FixtureType, PatchedChannel, PatchedFixture,
+    builtin_fixture_types, check_color_patch, decode_fixture_profile, encode_fixture_profile, find_conflicts,
+    fixture_spans_overlap, validate_fixture_profile, FixtureColorChannels, FixtureColorModel,
+    FixtureConflict, FixtureGroup, FixtureType, PatchedChannel, PatchedFixture,
 };
 use crate::engine::DmxEngine;
 use crate::show::Workspace;
@@ -124,6 +127,121 @@ pub fn list_builtin_fixture_types() -> Vec<FixtureType> {
 pub fn list_fixtures(state: State<'_, AppState>) -> Result<Vec<PatchedFixture>, String> {
     let ws = state.workspace.lock().map_err(|e| e.to_string())?;
     Ok(ws.fixtures.clone())
+}
+
+#[derive(Serialize)]
+pub struct FixturePatchState {
+    fixtures: Vec<PatchedFixture>,
+    conflicts: Vec<FixtureConflict>,
+}
+
+/// Read a single patch snapshot for the workspace that opened the patch panel.
+#[tauri::command]
+pub fn load_fixture_patch(workspace_id: Uuid, state: State<'_, AppState>) -> Result<FixturePatchState, String> {
+    let ws = lock_dashboard(&state, workspace_id)?;
+    Ok(FixturePatchState { fixtures: ws.fixtures.clone(), conflicts: find_conflicts(&ws.fixtures) })
+}
+
+const MAX_PROFILE_BYTES: usize = 512 * 1024;
+
+fn fixture_profile_path(path: &str) -> Result<&Path, String> {
+    let path = Path::new(path);
+    if !path.extension().and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("inkue-fixture"))
+    {
+        return Err("Choose an Inkue profile ending in .inkue-fixture.".into());
+    }
+    Ok(path)
+}
+
+/// Return a reusable profile definition without changing the patch.
+#[tauri::command(async)]
+pub fn read_fixture_profile(path: String) -> Result<FixtureType, String> {
+    let path = fixture_profile_path(&path)?;
+    let metadata = std::fs::metadata(path).map_err(|error| format!("Could not open fixture profile: {error}"))?;
+    if !metadata.is_file() {
+        return Err("Choose a fixture profile file.".into());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take((MAX_PROFILE_BYTES + 1) as u64).read_to_end(&mut bytes))
+        .map_err(|error| format!("Could not open fixture profile: {error}"))?;
+    if bytes.len() > MAX_PROFILE_BYTES {
+        return Err("The fixture profile exceeds 512 KiB.".into());
+    }
+    decode_fixture_profile(&bytes)
+}
+
+/// Export the exact saved profile that the patch editor displayed.
+#[tauri::command(async)]
+pub fn export_fixture_profile(
+    path: String,
+    workspace_id: Uuid,
+    fixture_id: Uuid,
+    expected: FixtureType,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let path = fixture_profile_path(&path)?;
+    let profile = {
+        let ws = lock_dashboard(&state, workspace_id)?;
+        let fixture = ws.fixtures.iter().find(|fixture| fixture.id == fixture_id)
+            .ok_or("The fixture is no longer patched.")?;
+        if fixture.fixture_type != expected {
+            return Err("The saved profile changed. Reopen it before exporting.".into());
+        }
+        fixture.fixture_type.clone()
+    };
+    let bytes = encode_fixture_profile(&profile)?;
+    if bytes.len() > MAX_PROFILE_BYTES {
+        return Err("The fixture profile exceeds 512 KiB.".into());
+    }
+    crate::recovery::write_document(path, &bytes).map_err(|error| format!("Could not save fixture profile: {error}"))
+}
+
+#[derive(Deserialize)]
+pub struct ImportedFixturePatch {
+    workspace_id: Uuid,
+    label: String,
+    universe: u16,
+    base_address: u16,
+    profile: FixtureType,
+}
+
+fn apply_imported_fixture(ws: &mut Workspace, edit: ImportedFixturePatch) -> Result<PatchedFixture, String> {
+    check_dashboard_workspace(ws, edit.workspace_id)?;
+    validate_fixture_profile(&edit.profile)?;
+    if edit.label.trim().is_empty() {
+        return Err("Name the fixture before patching it.".into());
+    }
+    if !(1..=63_999).contains(&edit.universe) {
+        return Err("Choose a universe from 1 to 63999.".into());
+    }
+    let last_address = edit.base_address.checked_add(edit.profile.footprint() - 1);
+    if edit.base_address == 0 || !last_address.is_some_and(|last| usize::from(last) <= DMX_UNIVERSE_SIZE) {
+        return Err("The fixture must fit within DMX addresses 1–512.".into());
+    }
+
+    let fixture = PatchedFixture::new(edit.label.trim(), edit.universe, edit.base_address, edit.profile);
+    if let Some(other) = ws.fixtures.iter().find(|other| fixture_spans_overlap(other, &fixture)) {
+        return Err(format!("This fixture overlaps {} on universe {}.", other.label, fixture.universe));
+    }
+    ws.fixtures.push(fixture.clone());
+    ws.mark_modified();
+    Ok(fixture)
+}
+
+/// Patch an imported definition at a confirmed free address with a fresh fixture identity.
+#[tauri::command]
+pub fn patch_imported_fixture(
+    edit: ImportedFixturePatch,
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<PatchedFixture, String> {
+    let mut ws = state.workspace.lock().map_err(|error| error.to_string())?;
+    let fixture = apply_imported_fixture(&mut ws, edit)?;
+    drop(ws);
+    let _ = app_handle.emit("workspace-modified", ());
+    Ok(fixture)
 }
 
 /// Patch a new fixture from a type at the given address.  Returns the created fixture.
@@ -256,7 +374,7 @@ fn lock_dashboard(state: &AppState, workspace_id: Uuid) -> Result<MutexGuard<'_,
 
 fn check_dashboard_workspace(ws: &Workspace, workspace_id: Uuid) -> Result<(), String> {
     if ws.instance_id != workspace_id {
-        return Err("Workspace changed. Refresh the Dashboard to use the current show.".into());
+        return Err("Workspace changed. Reopen the lighting desk for the current show.".into());
     }
     Ok(())
 }
@@ -500,6 +618,37 @@ pub fn remove_fixture_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn applying_an_imported_definition_creates_a_unique_patch_only_at_a_free_address() {
+        let mut ws = Workspace::new("Profile rehearsal");
+        let owner = ws.instance_id();
+        let profile = builtin_fixture_types().into_iter()
+            .find(|profile| profile.name.starts_with("Moving Head 16-bit")).unwrap();
+        let original = PatchedFixture::new("Original", 3, 1, profile.clone());
+        let original_id = original.id;
+        ws.fixtures.push(original);
+        let initial_revision = ws.revision;
+        let edit = |workspace_id, universe, base_address| ImportedFixturePatch {
+            workspace_id, universe, base_address, profile: profile.clone(), label: "New copy".into(),
+        };
+
+        assert!(apply_imported_fixture(&mut ws, edit(Uuid::new_v4(), 3, 20)).is_err());
+        assert!(apply_imported_fixture(&mut ws, edit(owner, 0, 20)).is_err());
+        assert!(apply_imported_fixture(&mut ws, edit(owner, 3, 0)).is_err());
+        assert!(apply_imported_fixture(&mut ws, edit(owner, 3, 511)).is_err());
+        assert!(apply_imported_fixture(&mut ws, edit(owner, 3, 8)).is_err());
+        assert_eq!(ws.fixtures.len(), 1);
+        assert_eq!(ws.revision, initial_revision);
+
+        let placed = apply_imported_fixture(&mut ws, edit(owner, 3, 9)).unwrap();
+        assert_ne!(placed.id, original_id);
+        assert_eq!(placed.fixture_type, profile);
+        assert_eq!(placed.address_span(), Some((9, 16)));
+        assert_eq!(ws.fixtures[0].id, original_id);
+        assert_eq!(ws.fixtures[0].address_span(), Some((1, 8)));
+        assert_eq!(ws.revision, initial_revision + 1);
+    }
 
     #[test]
     fn old_dashboard_cannot_apply_color_to_a_reopened_patch_with_identical_fixtures() {

@@ -72,6 +72,25 @@ describe("command wrappers forward the correct name + args", () => {
     ]);
   });
 
+  it("reads, exports and patches fixture profiles with the correct desk and definition", async () => {
+    const profile = { name: "Pan pair", parameters: [
+      { name: "Pan", kind: "pan", width: "Bit16", channel_offset: 1, default: .5 },
+    ] } as const;
+    const definition = { ...profile, parameters: [...profile.parameters] };
+    const path = "/shows/pan.inkue-fixture";
+    const edit = { workspace_id: "show", label: "Head", universe: 3, base_address: 48, profile: definition };
+    await cmd.loadFixturePatch("show");
+    await cmd.readFixtureProfile(path);
+    await cmd.exportFixtureProfile(path, "show", "head-source", definition);
+    await cmd.patchImportedFixture(edit);
+    expect(invokeMock.mock.calls.slice(-4)).toEqual([
+      ["load_fixture_patch", { workspaceId: "show" }],
+      ["read_fixture_profile", { path }],
+      ["export_fixture_profile", { path, workspaceId: "show", fixtureId: "head-source", expected: definition }],
+      ["patch_imported_fixture", { edit }],
+    ]);
+  });
+
   it("applies a Playlist trigger against the displayed workspace, list and prior value", async () => {
     const expected = { workspace_id: "show", list_id: "list", trigger: "ignore" } as const;
     await cmd.setPlaylistSecondTrigger("playlist", expected, "previous");

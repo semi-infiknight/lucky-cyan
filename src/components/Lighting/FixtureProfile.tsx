@@ -8,9 +8,10 @@ const roles: ParamKind[] = [
 ];
 const roleLabels: Partial<Record<ParamKind, string>> = { hsi_intensity: "HSI intensity", hsv_value: "HSV value" };
 
-export function FixtureProfile({ fixture, save, close }: {
+export function FixtureProfile({ fixture, save, exportSaved, close }: {
   fixture: PatchedFixture;
   save: (profile: FixtureType) => Promise<void>;
+  exportSaved?: () => Promise<void>;
   close: () => void;
 }) {
   const [draft, setDraft] = useState(fixture.fixture_type);
@@ -33,6 +34,18 @@ export function FixtureProfile({ fixture, save, close }: {
       setBusy(false);
     }
   }
+  async function exportProfile() {
+    if (!exportSaved || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      await exportSaved();
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
   return <section className="fixture-profile" aria-label={`Fixture profile for ${fixture.label}`}>
     <fieldset disabled={busy}>
       <legend>{fixture.label} · profile</legend>
@@ -43,7 +56,8 @@ export function FixtureProfile({ fixture, save, close }: {
       </div>
       <table><thead><tr><th>Address</th><th>Parameter</th><th>Width</th><th>Control role</th></tr></thead>
         <tbody>{draft.parameters.map((p, i) => <tr key={i}>
-          <td>{fixture.base_address + p.channel_offset}</td><td>{p.name}</td>
+          <td>{fixture.base_address + p.channel_offset}
+            {p.width === "Bit16" && `–${fixture.base_address + p.channel_offset + 1}`}</td><td>{p.name}</td>
           <td>{p.width === "Bit16" ? "16 bit" : "8 bit"}</td>
           <td><select aria-label={`Control role for ${p.name}`} value={p.kind} onChange={e => updateRole(i, e.target.value as ParamKind)}>
             {roles.map(role => <option key={role} value={role}>{roleLabels[role] ?? role}</option>)}
@@ -52,7 +66,9 @@ export function FixtureProfile({ fixture, save, close }: {
       </table>
       <p>Assign red, green and blue to link additive channels to the color picker. Repeated RGB roles move together. Assign one cyan, magenta and yellow for CMY. For HSI or HSV, assign one hue, one saturation and one matching HSI intensity or HSV value. Use intensity for a separate master dimmer.</p>
       <div className="fixture-profile-actions">
-        <button onClick={apply} disabled={!draft.name.trim()}>Save profile</button><button onClick={close}>Cancel</button>
+        <button type="button" onClick={apply} disabled={!draft.name.trim()}>Save profile</button>
+        {exportSaved && <button type="button" onClick={exportProfile}>Export saved profile…</button>}
+        <button type="button" onClick={close}>Cancel</button>
         {error && <span role="alert">{error}</span>}
       </div>
     </fieldset>

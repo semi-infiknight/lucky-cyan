@@ -4,12 +4,15 @@
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   addFixture,
   dmxTestFixture,
-  getFixtureConflicts,
+  exportFixtureProfile,
   listBuiltinFixtureTypes,
-  listFixtures,
+  loadFixturePatch,
+  patchImportedFixture,
+  readFixtureProfile,
   removeFixture,
   updateFixture,
 } from "../../lib/commands";
@@ -18,13 +21,15 @@ import { FixtureProfile } from "./FixtureProfile";
 import { Select } from "../common/Select";
 import { DragNumber } from "../common/DragNumber";
 
+const PROFILE_EXTENSION = "inkue-fixture";
+const profileFilter = { name: "Inkue Fixture Profile", extensions: [PROFILE_EXTENSION] };
 const widthChannels = (w: ChannelWidth) => (w === "Bit16" ? 2 : 1);
 
 function footprint(t: FixtureType): number {
   return t.parameters.reduce((max, p) => Math.max(max, p.channel_offset + widthChannels(p.width)), 0);
 }
 
-export function FixturePatch() {
+export function FixturePatch({ workspaceId }: { workspaceId: string }) {
   const [fixtures, setFixtures] = useState<PatchedFixture[]>([]);
   const [types, setTypes] = useState<FixtureType[]>([]);
   const [conflicts, setConflicts] = useState<FixtureConflict[]>([]);
@@ -33,18 +38,22 @@ export function FixturePatch() {
   identifyingRef.current = identifying;
 
   const [profileId, setProfileId] = useState<string | null>(null);
-  const [newTypeIdx, setNewTypeIdx] = useState(0);
+  const [newTypeIdx, setNewTypeIdx] = useState<number | "imported">(0);
+  const [importedProfile, setImportedProfile] = useState<FixtureType | null>(null);
+  const [patchBusy, setPatchBusy] = useState(false);
+  const [patchError, setPatchError] = useState("");
   const [newUniverse, setNewUniverse] = useState(1);
   const [newAddress, setNewAddress] = useState(1);
 
   const refresh = useCallback(async () => {
-    setFixtures(await listFixtures());
-    setConflicts(await getFixtureConflicts());
-  }, []);
+    const patch = await loadFixturePatch(workspaceId);
+    setFixtures(patch.fixtures);
+    setConflicts(patch.conflicts);
+  }, [workspaceId]);
 
   useEffect(() => {
     listBuiltinFixtureTypes().then(setTypes).catch(console.error);
-    refresh().catch(console.error);
+    refresh().catch(error => setPatchError(String(error)));
     // Turn any active identify off when the panel closes.
     return () => {
       if (identifyingRef.current) dmxTestFixture(identifyingRef.current, false).catch(() => {});
@@ -54,17 +63,58 @@ export function FixturePatch() {
   const conflictIds = new Set(conflicts.flatMap((c) => [c.fixture_a, c.fixture_b]));
 
   const handleAdd = async () => {
-    const t = types[newTypeIdx];
+    if (patchBusy) return;
+    const t = newTypeIdx === "imported" ? importedProfile : types[newTypeIdx];
     if (!t) return;
-    // Unique default label so two fixtures of the same type are distinguishable
-    // (e.g. "RGB 1", "RGB 2"); the operator renames as needed.
-    const base = t.name.split(" ")[0];
-    const n = fixtures.filter((f) => f.label.startsWith(base)).length + 1;
-    await addFixture(`${base} ${n}`, newUniverse, newAddress, t).catch(console.error);
-    // Auto-advance the next start address by this fixture's footprint.
-    setNewAddress(Math.min(512, newAddress + footprint(t)));
-    await refresh();
+    // Give repeated copies distinguishable labels until the operator renames them.
+    const base = t.name.trim().split(/\s+/)[0];
+    let n = 1;
+    const labels = new Set(fixtures.map(fixture => fixture.label));
+    while (labels.has(`${base} ${n}`)) n += 1;
+    const label = `${base} ${n}`;
+
+    setPatchBusy(true);
+    setPatchError("");
+    try {
+      if (newTypeIdx === "imported") {
+        await patchImportedFixture({ workspace_id: workspaceId, label, universe: newUniverse,
+          base_address: newAddress, profile: t });
+      } else {
+        await addFixture(label, newUniverse, newAddress, t);
+      }
+      setNewAddress(Math.min(512, newAddress + footprint(t)));
+      await refresh();
+    } catch (error) {
+      setPatchError(String(error));
+    } finally {
+      setPatchBusy(false);
+    }
   };
+
+  const importProfile = async () => {
+    if (patchBusy) return;
+    setPatchBusy(true);
+    setPatchError("");
+    try {
+      const path = await openDialog({ multiple: false, filters: [profileFilter] });
+      if (typeof path !== "string") return;
+      setImportedProfile(await readFixtureProfile(path));
+      setNewTypeIdx("imported");
+    } catch (error) {
+      setPatchError(String(error));
+    } finally {
+      setPatchBusy(false);
+    }
+  };
+
+  async function exportProfile(fixture: PatchedFixture) {
+    const name = fixture.fixture_type.name.replace(/[<>:"/\\|?*]/g, "_");
+    const suffix = "." + PROFILE_EXTENSION;
+    const path = await saveDialog({ filters: [profileFilter], defaultPath: (name || "Fixture profile") + suffix });
+    if (typeof path !== "string") return;
+    await exportFixtureProfile(path.toLowerCase().endsWith(suffix) ? path : path + suffix,
+      workspaceId, fixture.id, fixture.fixture_type);
+  }
 
   const commit = async (fixture: PatchedFixture, patch: Partial<PatchedFixture>) => {
     await updateFixture({ ...fixture, ...patch }).catch(console.error);
@@ -138,6 +188,7 @@ export function FixturePatch() {
             <button style={smallBtn} onClick={() => handleRemove(f.id)} title="Remove">✕</button>
           </div>
           {profileId === f.id && <FixtureProfile fixture={f} close={() => setProfileId(null)}
+            exportSaved={() => exportProfile(f)}
             save={async fixture_type => { await updateFixture({ ...f, fixture_type }); await refresh(); }} />}
           </Fragment>
         );
@@ -155,25 +206,39 @@ export function FixturePatch() {
       <div style={{ ...rowStyle, marginTop: 4, background: "var(--wc-bg-app)" }}>
         <Select
           style={{ ...selStyle, flex: 1, minWidth: 0 }}
+          aria-label="Fixture profile to patch"
           value={newTypeIdx}
-          onChange={(e) => setNewTypeIdx(Number(e.target.value))}
+          disabled={patchBusy}
+          onChange={(e) => setNewTypeIdx(e.target.value === "imported" ? "imported" : Number(e.target.value))}
         >
           {types.map((t, i) => (
             <option key={i} value={i}>{t.name}</option>
           ))}
+          {importedProfile && <option value="imported">{importedProfile.name} · imported</option>}
         </Select>
         <label style={lblStyle}>U</label>
         <DragNumber
+          aria-label="New fixture universe"
           style={{ ...numStyle, width: 42 }} min={1} max={63999} value={newUniverse}
           onChange={(e) => setNewUniverse(Number(e.target.value))}
         />
         <label style={lblStyle}>@</label>
         <DragNumber
+          aria-label="New fixture start address"
           style={{ ...numStyle, width: 48 }} min={1} max={512} value={newAddress}
           onChange={(e) => setNewAddress(Number(e.target.value))}
         />
-        <button style={{ ...smallBtn, color: "#a855f7" }} onClick={handleAdd}>+ add</button>
+        <button type="button" style={{ ...smallBtn, color: "#a855f7" }} disabled={patchBusy}
+          onClick={handleAdd}>{newTypeIdx === "imported" ? "Patch fixture" : "+ add"}</button>
       </div>
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+        <button type="button" style={smallBtn} disabled={patchBusy} onClick={importProfile}>Import profile…</button>
+        {importedProfile && newTypeIdx === "imported" && <small role="status" style={{ color: "var(--wc-text-secondary)" }}>
+          {[importedProfile.manufacturer, importedProfile.mode, `${footprint(importedProfile)} channels`]
+            .filter(Boolean).join(" · ")}
+        </small>}
+      </div>
+      {patchError && <p role="alert">{patchError}</p>}
     </div>
   );
 }

@@ -666,6 +666,15 @@ export const dmxGetSnapshot = () => invoke<DmxUniverseSnapshot[]>("dmx_get_snaps
 export const listBuiltinFixtureTypes = () =>
   invoke<FixtureType[]>("list_builtin_fixture_types");
 export const listFixtures = () => invoke<PatchedFixture[]>("list_fixtures");
+export const loadFixturePatch = (workspaceId: string) =>
+  invoke<{ fixtures: PatchedFixture[]; conflicts: FixtureConflict[] }>("load_fixture_patch", { workspaceId });
+export const readFixtureProfile = (path: string) => invoke<FixtureType>("read_fixture_profile", { path });
+export const exportFixtureProfile = (path: string, workspaceId: string, fixtureId: string, expected: FixtureType) =>
+  invoke<void>("export_fixture_profile", { path, workspaceId, fixtureId, expected });
+export const patchImportedFixture = (edit: {
+  workspace_id: string; label: string; universe: number; base_address: number; profile: FixtureType;
+}) => invoke<PatchedFixture>("patch_imported_fixture", { edit });
+
 export const addFixture = (
   label: string,
   universe: number,

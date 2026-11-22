@@ -87,7 +87,7 @@ impl ParamKind {
 
 /// One controllable parameter of a fixture, at a fixed offset from the
 /// fixture's base address.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixtureParam {
     /// What this parameter controls.
     pub kind: ParamKind,
@@ -103,7 +103,7 @@ pub struct FixtureParam {
 }
 
 /// The channel layout of a kind of lighting instrument.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixtureType {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub manufacturer: String,
@@ -121,10 +121,82 @@ impl FixtureType {
     pub fn footprint(&self) -> u16 {
         self.parameters
             .iter()
-            .map(|p| p.channel_offset + width_channels(p.width))
+            .map(|p| p.channel_offset.saturating_add(width_channels(p.width)))
             .max()
             .unwrap_or(0)
     }
+}
+
+const PROFILE_FILE_KIND: &str = "inkue_fixture_profile";
+const PROFILE_FILE_VERSION: u32 = 1;
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FixtureProfileDocument {
+    kind: String,
+    version: u32,
+    profile: FixtureType,
+}
+
+/// Validate the layout independently of the destination universe or address.
+pub(crate) fn validate_fixture_profile(profile: &FixtureType) -> Result<(), String> {
+    if profile.name.trim().is_empty() || profile.parameters.is_empty() {
+        return Err("A fixture profile needs a name and at least one parameter.".into());
+    }
+    let mut slots = [false; DMX_UNIVERSE_SIZE];
+    for parameter in &profile.parameters {
+        if parameter.name.trim().is_empty() {
+            return Err("Every fixture parameter needs a name.".into());
+        }
+        if !parameter.default.is_finite() || !(0.0..=1.0).contains(&parameter.default) {
+            return Err(format!("{} has a default outside 0–1.", parameter.name));
+        }
+        let first = usize::from(parameter.channel_offset);
+        let limit = first + usize::from(width_channels(parameter.width));
+        let range = slots.get_mut(first..limit)
+            .ok_or_else(|| format!("{} extends beyond channel 512.", parameter.name))?;
+        if range.iter().any(|used| *used) {
+            return Err(format!("{} overlaps another coarse or fine channel.", parameter.name));
+        }
+        range.fill(true);
+    }
+    Ok(())
+}
+
+pub(crate) fn encode_fixture_profile(profile: &FixtureType) -> Result<Vec<u8>, String> {
+    validate_fixture_profile(profile)?;
+    serde_json::to_vec_pretty(&FixtureProfileDocument {
+        kind: PROFILE_FILE_KIND.to_owned(),
+        version: PROFILE_FILE_VERSION,
+        profile: profile.clone(),
+    }).map_err(|error| error.to_string())
+}
+
+/// Use the portable file's strict shape without changing legacy workspace decoding.
+pub(crate) fn decode_fixture_profile(bytes: &[u8]) -> Result<FixtureType, String> {
+    let file: FixtureProfileDocument = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Could not read fixture profile: {error}"))?;
+    if file.kind != PROFILE_FILE_KIND || file.version != PROFILE_FILE_VERSION {
+        return Err("Choose a supported Inkue fixture profile file.".into());
+    }
+    let raw: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Could not check fixture profile fields: {error}"))?;
+    let layout = &raw["profile"];
+    check_profile_fields(layout, &["name", "manufacturer", "mode", "parameters"])?;
+    let parameters = layout["parameters"].as_array().ok_or("Profile parameters must be a list.")?;
+    for parameter in parameters {
+        check_profile_fields(parameter, &["kind", "name", "channel_offset", "width", "default"])?;
+    }
+    validate_fixture_profile(&file.profile)?;
+    Ok(file.profile)
+}
+
+fn check_profile_fields(value: &serde_json::Value, fields: &[&str]) -> Result<(), String> {
+    let object = value.as_object().ok_or("The fixture profile contains an invalid object.")?;
+    if let Some(field) = object.keys().find(|key| !fields.contains(&key.as_str())) {
+        return Err(format!("Unsupported fixture profile field: {field}."));
+    }
+    Ok(())
 }
 
 /// A fixture placed at a DMX address in the workspace patch.
@@ -211,7 +283,7 @@ impl PatchedFixture {
         if footprint == 0 {
             return None;
         }
-        Some((self.base_address, self.base_address + footprint - 1))
+        Some((self.base_address, self.base_address.saturating_add(footprint - 1)))
     }
 
     /// Resolve a parameter index to its `(universe, zero-based channel, width)`
@@ -349,7 +421,7 @@ pub struct FixtureConflict {
 }
 
 /// Whether two fixtures share any DMX channel in the same universe.
-fn overlaps(a: &PatchedFixture, b: &PatchedFixture) -> bool {
+pub(crate) fn fixture_spans_overlap(a: &PatchedFixture, b: &PatchedFixture) -> bool {
     if a.universe != b.universe {
         return false;
     }
@@ -366,7 +438,7 @@ pub fn find_conflicts(fixtures: &[PatchedFixture]) -> Vec<FixtureConflict> {
         for j in (i + 1)..fixtures.len() {
             let a = &fixtures[i];
             let b = &fixtures[j];
-            if overlaps(a, b) {
+            if fixture_spans_overlap(a, b) {
                 conflicts.push(FixtureConflict {
                     fixture_a: a.id,
                     fixture_b: b.id,
@@ -498,6 +570,48 @@ mod tests {
 
     fn rgb() -> FixtureType {
         builtin_fixture_types().into_iter().find(|t| t.name.starts_with("RGB ")).unwrap()
+    }
+
+    #[test]
+    fn portable_definition_preserves_roles_offsets_widths_and_defaults() {
+        let mut profile = builtin_fixture_types().into_iter()
+            .find(|profile| profile.name.starts_with("Moving Head 16-bit")).unwrap();
+        profile.manufacturer = "Venue profile".into();
+        profile.mode = "Coarse followed by fine".into();
+        let bytes = encode_fixture_profile(&profile).unwrap();
+        assert_eq!(decode_fixture_profile(&bytes).unwrap(), profile);
+
+        let mut document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for key in ["id", "label", "universe", "base_address"] {
+            assert!(document["profile"].get(key).is_none());
+        }
+        document["profile"]["parameters"][0]["fine_channel_offset"] = serde_json::json!(7);
+        assert!(decode_fixture_profile(&serde_json::to_vec(&document).unwrap()).is_err());
+    }
+
+    #[test]
+    fn portable_definition_refuses_bad_ranges_and_coarse_fine_overlap() {
+        use ChannelWidth::{Bit16, Bit8};
+        use ParamKind::{Generic, Pan};
+        let mut profile = FixtureType {
+            name: "Two channels".into(), manufacturer: String::new(), mode: String::new(),
+            parameters: vec![
+                param(Pan, "Pan", 0, Bit16, 0.5),
+                param(Generic, "Other", 1, Bit8, 0.0),
+            ],
+        };
+        assert!(validate_fixture_profile(&profile).unwrap_err().contains("coarse or fine"));
+        profile.parameters[1].channel_offset = 2;
+        assert!(validate_fixture_profile(&profile).is_ok());
+        profile.parameters[0].channel_offset = 511;
+        assert!(validate_fixture_profile(&profile).unwrap_err().contains("512"));
+        profile.parameters[0].channel_offset = u16::MAX;
+        assert!(validate_fixture_profile(&profile).is_err());
+        profile.parameters[0].channel_offset = 0;
+        profile.parameters[0].default = f64::NAN;
+        assert!(encode_fixture_profile(&profile).is_err());
+        profile.parameters[0].default = 1.5;
+        assert!(encode_fixture_profile(&profile).is_err());
     }
 
     #[test]
