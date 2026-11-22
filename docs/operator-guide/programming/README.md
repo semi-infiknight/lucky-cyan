@@ -140,7 +140,16 @@ Load prepares Video and Image targets off-screen. Audio uses decoded file data a
 3. Press **GO** on the Audio cue or run a **Start** cue that targets it. The sound and progress begin at the loaded point using the cue's current Output Patch. Stop it and start it again to hear the saved opening.
 4. Load a time again and choose **Clear**. A Stop, Reset, or Stop All also clears the offset. Try changing the clip boundaries after loading. If the saved window changed, load the new time or clear it before using GO.
 
-Load to Time temporarily prepares only the selected cue. DSP starts with the chosen audio frame, so effects that depend on earlier audio have a fresh history. To save a repeatable File Audio entrance in the show, use a [programmed Load cue](#program-a-load-cue-for-a-repeatable-rehearsal-entrance). Timed Video and Group-sequence preparation remain open. [QLab Load to Time](https://qlab.app/docs/v5/tools/tools-menu/#load-to-time)
+Load to Time temporarily prepares only the selected cue. DSP starts with the chosen audio frame, so effects that depend on earlier audio have a fresh history. To save a repeatable File Audio entrance in the show, use a [programmed Load cue](#program-a-load-cue-for-a-repeatable-rehearsal-entrance). [QLab Load to Time](https://qlab.app/docs/v5/tools/tools-menu/#load-to-time)
+
+## Rehearse from partway through a Video cue
+
+1. Choose an armed, top-level Video cue with a visible cut and an audible marker. Let the desk finish checking the file. Use one pass with zero Pre-Wait and **Do Not Continue**. Turn off slices, **Silent Movie Speed**, and **Hold Last Frame**.
+2. In **Inspector → Time → Load to Time**, enter `3.000` and click **Load**. Confirm the cue shows **Loaded** and the existing stage picture and audio stay as they were. The offset is relative to the saved clip start. Use `-2.000` to count back from its end.
+3. Start the Video cue. The desk waits for the positioned frame before revealing the picture and releasing its soundtrack. Check both against the intended beat, then stop and start the cue again to verify the normal opening.
+4. For a repeatable rehearsal, add a **Load** cue, enable **Load at a specified time** and choose the Video cue as its target. Save the show, then run the Load and the target as separate calls. A change to the clip boundaries requires a fresh Load or **Clear**.
+
+The staged entrance applies to one start. Group and cue-sequence preparation remain open. [QLab Load to Time](https://qlab.app/docs/v5/tools/tools-menu/#load-to-time)
 
 ## Mark cues that have played
 

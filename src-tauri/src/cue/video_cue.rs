@@ -5,7 +5,7 @@
 //! The lifecycle (go / stop / pause / resume / pre-wait) mirrors [`AudioCue`]
 //! exactly, so the Transport and event loop need no special-casing.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -109,6 +109,7 @@ pub struct VideoCue {
     play_generation: u64,
     clock_run: Option<(Uuid, ClockRun)>,
     positioned_run: bool,
+    loaded_time: Option<LoadedVideoTime>,
     /// Prevents double-firing of Auto-Continue.
     auto_continue_fired: bool,
     /// Elapsed time accumulated before the most recent pause.
@@ -138,9 +139,16 @@ pub struct VideoCue {
     preloaded: bool,
 }
 
+#[derive(Clone, Copy)]
 struct PositionedEntry {
     source_ms: u64,
     elapsed: Duration,
+}
+
+struct LoadedVideoTime {
+    path: PathBuf,
+    clip: (Duration, Duration),
+    entry: PositionedEntry,
 }
 
 impl VideoCue {
@@ -184,6 +192,7 @@ impl VideoCue {
             play_generation: 0,
             clock_run: None,
             positioned_run: false,
+            loaded_time: None,
             auto_continue_fired: false,
             elapsed_before_pause: Duration::ZERO,
             action_elapsed_before_pause: Duration::ZERO,
@@ -452,30 +461,64 @@ impl VideoCue {
         }
     }
 
-    pub(crate) fn join_from_timecode(&mut self, elapsed: Duration, context: &CueContext) -> Result<bool> {
-        let Some(path) = self.file_path.as_ref() else { return Ok(false) };
-        if self.state != CueState::Standby || self.is_disabled || self.preloaded
-            || self.continue_mode != ContinueMode::DoNotContinue || !self.pre_wait.is_zero()
-            || self.loop_count != 0 || !self.slices.is_empty() || self.allow_silent_speed || self.hold_last_frame
-            || (self.decoded_samples.is_none() && self.silent_verified_for.as_ref() != Some(path))
-        {
-            return Ok(false);
-        }
-        let Some(duration) = self.cached_duration else { return Ok(false) };
+    fn positionable_clip(&self) -> Result<(&Path, (Duration, Duration))> {
+        anyhow::ensure!(self.state == CueState::Standby && !self.is_disabled && !self.preloaded,
+            "Stop and arm the Video cue before loading a time.");
+        anyhow::ensure!(self.continue_mode == ContinueMode::DoNotContinue && self.pre_wait.is_zero(),
+            "Load to Time requires zero Pre-Wait and Do Not Continue.");
+        anyhow::ensure!(self.loop_count == 0 && self.slices.is_empty() && !self.allow_silent_speed && !self.hold_last_frame,
+            "Use a Video clip that plays once without slices, Silent Movie Speed or Hold Last Frame.");
+        let path = self.file_path.as_deref().filter(|path| !path.as_os_str().is_empty())
+            .ok_or_else(|| anyhow!("Assign a Video file before loading a time."))?;
+        let duration = self.cached_duration
+            .filter(|_| self.decoded_samples.is_some() || self.silent_verified_for.as_deref() == Some(path))
+            .ok_or_else(|| anyhow!("Wait for the Video cue to finish loading its file and checking for a soundtrack."))?;
         let clip_in = self.start_time.unwrap_or_default();
         let clip_out = self.end_time.unwrap_or(duration).min(duration);
-        let Some(source) = clip_in.checked_add(elapsed) else { return Ok(false) };
-        let Ok(source_ms) = u64::try_from(source.as_nanos().div_ceil(1_000_000)) else { return Ok(false) };
-        if u128::from(source_ms) >= clip_out.as_millis() {
+        anyhow::ensure!(clip_in < clip_out, "Set a playable clip range before loading a time.");
+        Ok((path, (clip_in, clip_out)))
+    }
+
+    fn positioned_entry(clip: (Duration, Duration), source: Duration) -> Option<PositionedEntry> {
+        let source_ms = u64::try_from(source.as_nanos().div_ceil(1_000_000)).ok()?;
+        let source = Duration::from_millis(source_ms);
+        // The renderer applies in and out points at whole-millisecond precision.
+        (source >= clip.0 && u128::from(source_ms) < clip.1.as_millis()).then(|| PositionedEntry {
+            source_ms, elapsed: source - clip.0,
+        })
+    }
+
+    /// Stage one clip-relative entrance without starting an output or an audio voice.
+    pub fn load_to_time(&mut self, offset_ms: i64) -> Result<()> {
+        let (path, clip) = self.positionable_clip()?;
+        let offset = Duration::from_millis(offset_ms.unsigned_abs());
+        let source = if offset_ms < 0 { clip.1.checked_sub(offset) } else { clip.0.checked_add(offset) };
+        let entry = source.and_then(|source| Self::positioned_entry(clip, source))
+            .ok_or_else(|| anyhow!("Enter a time inside the saved clip range."))?;
+        self.loaded_time = Some(LoadedVideoTime { path: path.to_owned(), clip, entry });
+        Ok(())
+    }
+
+    fn checked_loaded_time(&self) -> Result<Option<PositionedEntry>> {
+        let Some(loaded) = &self.loaded_time else { return Ok(None) };
+        let (path, clip) = self.positionable_clip()?;
+        anyhow::ensure!(path == loaded.path && clip == loaded.clip,
+            "The Video clip changed. Reload its time or clear Load to Time before starting it.");
+        Ok(Some(loaded.entry))
+    }
+
+    pub(crate) fn join_from_timecode(&mut self, elapsed: Duration, context: &CueContext) -> Result<bool> {
+        if self.loaded_time.is_some() {
             return Ok(false);
         }
+        let Ok((_, clip)) = self.positionable_clip() else { return Ok(false) };
+        let Some(entry) = clip.0.checked_add(elapsed).and_then(|source| Self::positioned_entry(clip, source))
+        else { return Ok(false) };
         self.clock_run = None;
         self.play_generation = self.play_generation.wrapping_add(1);
         self.auto_continue_fired = false;
         self.state = CueState::Running;
-        self.start_action_or_reset(context, Some(PositionedEntry {
-            source_ms, elapsed: Duration::from_millis(source_ms).saturating_sub(clip_in),
-        }))?;
+        self.start_action_or_reset(context, Some(entry))?;
         Ok(true)
     }
 
@@ -563,7 +606,7 @@ impl ClockMediaCue for VideoCue {
 impl Cue for VideoCue {
     inherit_playback_fields!(
         state, started_at, action_started_at, active_voice_id, in_pre_wait,
-        play_generation, clock_run, positioned_run, silent_verified_for, auto_continue_fired, elapsed_before_pause,
+        play_generation, clock_run, positioned_run, loaded_time, silent_verified_for, auto_continue_fired, elapsed_before_pause,
         action_elapsed_before_pause, eof_fade_started, eof_audio_fade_started, preloading,
         preloaded,
         silent_speed_run,
@@ -586,7 +629,12 @@ impl Cue for VideoCue {
     fn color(&self) -> CueColor { self.color }
     fn set_color(&mut self, color: CueColor) { self.color = color; }
     fn is_disabled(&self) -> bool { self.is_disabled }
-    fn set_disabled(&mut self, d: bool) { self.is_disabled = d; }
+    fn set_disabled(&mut self, d: bool) {
+        self.is_disabled = d;
+        if d {
+            self.cancel_loaded_time();
+        }
+    }
     fn state(&self) -> CueState { self.state }
 
     // -----------------------------------------------------------------------
@@ -632,6 +680,7 @@ impl Cue for VideoCue {
         if self.state == CueState::Running {
             return Ok(()); // Ignore duplicate GO.
         }
+        let entry = self.checked_loaded_time()?;
         self.clock_run = None;
 
         let has_file = self.file_path.as_ref().is_some_and(|p| !p.as_os_str().is_empty());
@@ -657,11 +706,15 @@ impl Cue for VideoCue {
             return Ok(());
         }
 
-        self.start_action_or_reset(context, None)
+        self.start_action_or_reset(context, entry)?;
+        if self.cancel_loaded_time() {
+            context.request_cue_refresh();
+        }
+        Ok(())
     }
 
     fn preload(&mut self, context: &CueContext) -> Result<()> {
-        if matches!(self.state, CueState::Running | CueState::Paused) || self.preloaded {
+        if matches!(self.state, CueState::Running | CueState::Paused) || self.preloaded || self.loaded_time.is_some() {
             return Ok(());
         }
         let has_file = self.file_path.as_ref().is_some_and(|p| !p.as_os_str().is_empty());
@@ -687,6 +740,9 @@ impl Cue for VideoCue {
 
     fn stop(&mut self, context: &CueContext) -> Result<()> {
         self.clock_run = None;
+        if self.cancel_loaded_time() {
+            context.request_cue_refresh();
+        }
         crate::media_usage::end(self, "stop_requested");
         self.in_pre_wait = false;
 
@@ -782,6 +838,9 @@ impl Cue for VideoCue {
 
     fn hard_stop(&mut self, context: &CueContext) -> Result<()> {
         self.clock_run = None;
+        if self.cancel_loaded_time() {
+            context.request_cue_refresh();
+        }
         crate::media_usage::end(self, "hard_stop_requested");
         self.in_pre_wait = false;
 
@@ -804,6 +863,7 @@ impl Cue for VideoCue {
 
     fn reset(&mut self) -> Result<()> {
         self.clock_run = None;
+        self.cancel_loaded_time();
         crate::media_usage::end(self, "released");
         self.state = CueState::Standby;
         self.active_voice_id = None;
@@ -848,6 +908,14 @@ impl Cue for VideoCue {
 
     fn awaits_voice_completion(&self) -> bool {
         self.uses_silent_speed_clock() || (self.positioned_run && self.active_voice_id.is_some())
+    }
+
+    fn loaded_time_ms(&self) -> Option<u64> {
+        self.loaded_time.as_ref().map(|loaded| loaded.entry.elapsed.as_millis() as u64)
+    }
+
+    fn cancel_loaded_time(&mut self) -> bool {
+        self.loaded_time.take().is_some()
     }
 
     // -----------------------------------------------------------------------

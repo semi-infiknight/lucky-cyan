@@ -1303,6 +1303,56 @@ fn load_to_time_starts_unsliced_audio_once_at_the_trimmed_offset() {
 }
 
 #[test]
+fn load_to_time_starts_video_with_picture_and_paused_audio_at_the_same_clip_offset() {
+    use inkue_lib::cue::video_cue::VideoCue;
+
+    let registry = full_registry();
+    let mut video = VideoCue::new();
+    video.file_path = Some("rehearsal.mov".into());
+    video.start_time = Some(Duration::from_secs(1));
+    video.end_time = Some(Duration::from_secs(5));
+    video.set_runtime_duration(Duration::from_secs(6));
+    assert!(video.load_to_time(500).is_err(), "the soundtrack check must finish first");
+    video.accept_preloaded_audio(Arc::new(vec![0.0; 288_000]), 1, 48_000, Duration::from_secs(6));
+    let video_id = video.id();
+    let mut load = command(&registry, CueType::Load, vec![video_id]).serialize();
+    load["load_time_ms"] = serde_json::json!(-1250);
+    let load = registry.from_json(load).unwrap();
+    let load_id = load.id();
+    let mut list = list_of(vec![load, Box::new(video)]);
+    let (mut context, _events, calls) = recording_context();
+    let frames = common::record_audio_launch_positions(&mut context, &calls);
+    let mut transport = Transport::new(context.clone());
+
+    let result = transport.go(&mut list).unwrap();
+    assert_eq!(result.triggered, [load_id]);
+    assert!(result.prepared);
+    assert_eq!(list.get(&video_id).unwrap().loaded_time_ms(), Some(2750));
+    assert!(calls.lock().unwrap().is_empty(), "staging must keep both engines idle");
+    assert_eq!(transport.go(&mut list).unwrap().triggered, [video_id]);
+    assert_eq!(list.get(&video_id).unwrap().loaded_time_ms(), None);
+    assert_eq!(*frames.lock().unwrap(), [180_000]);
+    assert!(matches!(calls.lock().unwrap().as_slice(), [
+        EngineCall::AudioPlayPausedRouted { .. },
+        EngineCall::OutputShowContent { start_ms: Some(3750), positioned: true, preload: false, .. },
+    ]));
+
+    transport.hard_stop_cue(&mut list, &video_id).unwrap();
+    let video = (list.get_mut(&video_id).unwrap() as &mut dyn std::any::Any).downcast_mut::<VideoCue>().unwrap();
+    video.load_to_time(500).unwrap();
+    assert!(video.load_to_time(4000).is_err(), "clip end is exclusive");
+    assert_eq!(video.loaded_time_ms(), Some(500));
+    video.end_time = Some(Duration::from_secs(4));
+    assert!(video.go(&context).is_err(), "a changed clip requires a new entrance");
+    assert_eq!(*frames.lock().unwrap(), [180_000]);
+    assert!(video.cancel_loaded_time());
+    video.go(&context).unwrap();
+    assert_eq!(*frames.lock().unwrap(), [180_000, 48_000]);
+    assert!(matches!(calls.lock().unwrap().last(),
+        Some(EngineCall::OutputShowContent { start_ms: Some(1000), positioned: false, .. })));
+}
+
+#[test]
 fn a_timed_load_cue_prepares_exact_audio_silently_and_preserves_the_kickoff_point() {
     use inkue_lib::cue::audio_cue::AudioCue;
 

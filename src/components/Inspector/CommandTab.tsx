@@ -36,11 +36,11 @@ export function CommandTab({
         <NumberInput value={(cue.load_time_ms ?? 0) / 1000} step={0.001}
           min={-Number.MAX_SAFE_INTEGER / 1000} max={Number.MAX_SAFE_INTEGER / 1000}
           ariaLabel="Load seconds from clip start" onCommit={seconds => onSave({ load_time_ms: Math.round(seconds * 1000) })} />
-        <p>Negative values count back from the clip end. Choose one top-level File Audio cue.</p>
+        <p>Negative values count back from the clip end. Choose one top-level File Audio or Video cue.</p>
       </ToggleRow>}
 
       <CueTargetPicker
-        allCues={timedLoad ? allCues.filter(c => c.cue_type === "audio") : allCues}
+        allCues={timedLoad ? allCues.filter(c => c.cue_type === "audio" || c.cue_type === "video") : allCues}
         filterTypes={retarget ? ["stop", "devamp", ...COMMAND_CUE_TYPES.map(c => c.type)] : undefined}
         selfId={cue.id}
         selectedIds={targetIds}

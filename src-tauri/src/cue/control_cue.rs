@@ -177,7 +177,7 @@ impl ControlCue {
             return Ok((id, offset));
         }
         let [target] = self.target_cue_ids.as_slice() else {
-            anyhow::bail!("Select one top-level File Audio cue for a Load Time.");
+            anyhow::bail!("Select one top-level File Audio or Video cue for a Load Time.");
         };
         Ok((*target, offset))
     }

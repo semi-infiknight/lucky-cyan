@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { loadAudioToTime } from "../../lib/commands";
+import { loadMediaToTime } from "../../lib/commands";
 import type { CueSummary } from "../../lib/types";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { inputStyle, Section } from "./Field";
 
-export function LoadAudioTime({ cue }: { cue: CueSummary }) {
+export function LoadMediaTime({ cue }: { cue: CueSummary }) {
   const workspaceId = useWorkspaceStore(s => s.workspaceInfo?.instance_id);
   const listId = useWorkspaceStore(s => s.activeCueListId);
   const topLevel = useWorkspaceStore(s => s.cues.some(row => row.id === cue.id));
@@ -24,7 +24,7 @@ export function LoadAudioTime({ cue }: { cue: CueSummary }) {
     setBusy(true);
     setError("");
     try {
-      await loadAudioToTime(workspaceId, listId, cue.id, next);
+      await loadMediaToTime(workspaceId, listId, cue.id, next);
     } catch (cause) {
       setError(String(cause));
     } finally {

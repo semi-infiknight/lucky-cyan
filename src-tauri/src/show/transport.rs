@@ -29,6 +29,17 @@ use crate::engine::timecode_types::TcOnStop;
 /// chain (e.g. Goto routing back into itself) spinning forever.
 const MAX_CHAIN_STEPS: u32 = 1000;
 
+pub(crate) fn stage_media_load_time(cue: &mut dyn Cue, offset_ms: i64) -> Result<()> {
+    let cue = cue as &mut dyn Any;
+    if let Some(audio) = cue.downcast_mut::<AudioCue>() {
+        audio.load_to_time(offset_ms)
+    } else if let Some(video) = cue.downcast_mut::<VideoCue>() {
+        video.load_to_time(offset_ms)
+    } else {
+        Err(anyhow!("Select one top-level File Audio or Video cue for a Load Time."))
+    }
+}
+
 /// Result returned by [`Transport::go`].
 #[derive(Default)]
 pub struct GoResult {
@@ -413,10 +424,9 @@ impl Transport {
         let load = list.get_mut(&cue_id).ok_or_else(|| anyhow!("Timed Load cue no longer exists."))?;
         load.reset()?;
         let (target, offset) = request?;
-        let audio = list.get_mut(&target)
-            .and_then(|cue| (cue as &mut dyn Any).downcast_mut::<AudioCue>())
-            .ok_or_else(|| anyhow!("Select one top-level File Audio cue for a Load Time."))?;
-        audio.load_to_time(offset)?;
+        let target = list.get_mut(&target)
+            .ok_or_else(|| anyhow!("Select one top-level File Audio or Video cue for a Load Time."))?;
+        stage_media_load_time(target, offset)?;
         let load = list.get_mut(&cue_id)
             .and_then(|cue| (cue as &mut dyn Any).downcast_mut::<ControlCue>())
             .ok_or_else(|| anyhow!("Timed Load cue no longer exists."))?;

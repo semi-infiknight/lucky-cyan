@@ -8,7 +8,7 @@ import { cueTimeline } from "../../lib/timeline";
 import { DragNumber } from "../common/DragNumber";
 import { resetSilentSpeed } from "../../lib/commands";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
-import { LoadAudioTime } from "./LoadAudioTime";
+import { LoadMediaTime } from "./LoadMediaTime";
 
 const LOOP_INFINITE = 4294967295; // u32::MAX
 
@@ -54,8 +54,8 @@ export function TimeTab({
         />
       )}
 
-      {isAudio && cue.file_path && selectedCue && (
-        <LoadAudioTime key={selectedCue.id} cue={selectedCue} />
+      {(isAudio || isVideo) && cue.file_path && selectedCue && (
+        <LoadMediaTime key={selectedCue.id} cue={selectedCue} />
       )}
 
       {isWait && (

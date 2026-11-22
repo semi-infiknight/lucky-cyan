@@ -6,12 +6,11 @@ use tauri::{Emitter, State};
 
 use crate::{
     cue::{
-        audio_cue::AudioCue,
         context::{CueContext, CueEvent},
         traits::Cue,
         types::{CueId, CueState, CueType},
     },
-    show::{cue_list::CueList, transport::Transport, undo_stack::UndoHistory, Workspace},
+    show::{cue_list::CueList, transport::{stage_media_load_time, Transport}, undo_stack::UndoHistory, Workspace},
     state::AppState,
 };
 
@@ -659,9 +658,9 @@ pub fn seek_cue(
     Ok(())
 }
 
-/// Set or clear the next entrance of one idle File Audio cue on the local desk.
+/// Set or clear the next entrance of one idle File Audio or Video cue on the local desk.
 #[tauri::command]
-pub fn load_audio_to_time(
+pub fn load_media_to_time(
     workspace_id: uuid::Uuid,
     list_id: uuid::Uuid,
     cue_id: CueId,
@@ -674,17 +673,17 @@ pub fn load_audio_to_time(
     }
     let mut ws = state.workspace.lock().map_err(|error| error.to_string())?;
     if ws.instance_id() != workspace_id || ws.active_cue_list_id != list_id {
-        return Err("Open the Audio cue's original workspace and cue list.".into());
+        return Err("Open the cue's original workspace and cue list.".into());
     }
     let context = workspace_context(&state, &ws);
     let cue = ws.active_cue_list_mut().and_then(|list| list.get_mut(&cue_id))
-        .and_then(|cue| (cue as &mut dyn std::any::Any).downcast_mut::<AudioCue>())
-        .ok_or("Load to Time is available for a top-level File Audio cue.")?;
+        .filter(|cue| matches!(cue.cue_type(), CueType::Audio | CueType::Video))
+        .ok_or("Load to Time is available for a top-level File Audio or Video cue.")?;
     if let Some(offset) = offset_ms {
-        cue.load_to_time(offset).map_err(|error| error.to_string())?;
+        stage_media_load_time(cue, offset).map_err(|error| error.to_string())?;
         context.request_cue_refresh();
-    } else {
-        cue.clear_loaded_time(&context);
+    } else if cue.cancel_loaded_time() {
+        context.request_cue_refresh();
     }
     Ok(())
 }

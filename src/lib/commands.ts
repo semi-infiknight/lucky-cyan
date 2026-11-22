@@ -98,8 +98,8 @@ export const stopCue = (cueId: CueId) => invoke<void>("stop_cue", { cueId });
 export const pauseCue = (cueId: CueId) => invoke<void>("pause_cue", { cueId });
 export const seekCue = (cueId: CueId, positionMs: number) =>
   invoke<void>("seek_cue", { cueId, positionMs });
-export const loadAudioToTime = (workspaceId: string, listId: string, cueId: CueId, offsetMs: number | null) =>
-  invoke<void>("load_audio_to_time", { workspaceId, listId, cueId, offsetMs });
+export const loadMediaToTime = (workspaceId: string, listId: string, cueId: CueId, offsetMs: number | null) =>
+  invoke<void>("load_media_to_time", { workspaceId, listId, cueId, offsetMs });
 export const resumeCue = (cueId: CueId) =>
   invoke<void>("resume_cue", { cueId });
 
