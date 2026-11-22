@@ -5,7 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   CartCell,
-  CartWindowSnapshot,
+  CueListWindowSnapshot,
+  SequentialWindowAction,
   CartEdit,
   AppPreferences,
   AudioCueData,
@@ -457,7 +458,11 @@ export const setCueListNumber = (workspaceId: string, listId: string, expected: 
 export const setActiveCueList = (id: string) =>
   invoke<void>("set_active_cue_list", { id });
 export const openCartWindow = (listId: string) => invoke<void>("open_cart_window", { listId });
-export const readCartWindow = () => invoke<CartWindowSnapshot | null>("read_cart_window");
+export const readCartWindow = () => invoke<CueListWindowSnapshot | null>("read_cart_window");
+export const openSequentialWindow = (listId: string) => invoke<void>("open_sequential_window", { listId });
+export const readSequentialWindow = () => invoke<CueListWindowSnapshot | null>("read_sequential_window");
+export const sequentialWindowAction = (action: SequentialWindowAction) =>
+  invoke<void>("sequential_window_action", { action });
 export const cartWindowPad = (cueId: CueId, action: "fire" | "stop") =>
   invoke<void>("cart_window_pad", { cueId, action });
 export const editCartLayout = (listId: string, edit: CartEdit) =>

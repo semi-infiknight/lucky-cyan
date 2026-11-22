@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import { PreferencesStandalone } from "./components/Preferences/PreferencesStandalone";
 import { FloatTimerWindow } from "./windows/FloatTimer";
-import { CartWindow } from "./windows/CartWindow";
+import { CueListWindow } from "./windows/CueListWindow";
 import { MixerWindow } from "./windows/MixerWindow";
 
 // Synchronously read window label from Tauri internals — no function call,
@@ -16,7 +16,9 @@ const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement)
 root.render(
   <React.StrictMode>
     {tauriLabel?.startsWith("cart-") ? (
-      <CartWindow />
+      <CueListWindow kind="cart" />
+    ) : tauriLabel?.startsWith("cue-list-") ? (
+      <CueListWindow kind="sequential" />
     ) : tauriLabel === "preferences" ? (
       <PreferencesStandalone />
     ) : tauriLabel === "float-timer" ? (

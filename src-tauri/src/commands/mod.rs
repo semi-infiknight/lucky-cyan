@@ -55,7 +55,7 @@ pub(crate) fn clear_decode_failure(cue_id: Uuid) {
     health::clear(&decode_alert_key(cue_id));
 }
 
-pub mod cart_window_cmds;
+pub mod cue_list_window_cmds;
 pub mod launch_cmds;
 pub mod agent_cmds;
 pub(crate) mod review_cmds;

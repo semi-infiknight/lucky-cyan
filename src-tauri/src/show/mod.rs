@@ -1,7 +1,7 @@
 //! Show layer — workspace, cue list, transport, and background event loop.
 
 pub mod cart_layout;
-pub mod cart_window;
+pub mod cue_list_window;
 pub mod crossfade;
 pub(crate) mod cue_colors;
 pub mod cue_list;

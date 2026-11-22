@@ -294,6 +294,7 @@ export interface CueSummary {
   seekable: boolean;
   /** One-shot rehearsal entrance as time from the saved clip start. */
   loaded_time_ms?: number;
+  is_prepared?: boolean;
   /** Human-readable warning description, present when is_warning is true. */
   warning_message?: string;
   /** Output Patch name this cue plays through (explicit or workspace default).
@@ -796,11 +797,22 @@ export type CartEdit =
   | { action: "place"; cue_id: CueId; cell: CartCell }
   | { action: "compact" };
 
-export interface CartWindowSnapshot {
+export interface CueListWindowSnapshot {
+  workspace_id: string;
   name: string;
+  number: string | null;
   layout: CartLayout | null;
+  standby_id: CueId | null;
+  standby_child_id: CueId | null;
   cues: CueSummary[];
 }
+
+export type SequentialWindowAction =
+  | { kind: "go"; cue_id: CueId; child_id: CueId | null }
+  | { kind: "set_standby"; cue_id: CueId }
+  | { kind: "pause_list" }
+  | { kind: "resume_list" }
+  | { kind: "stop_list" };
 
 export interface CueListSummary {
   id: string;

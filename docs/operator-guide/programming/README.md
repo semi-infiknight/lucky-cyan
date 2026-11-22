@@ -226,6 +226,15 @@ In programming mode, click or tab to an underlined cue name in the selected list
 
 Select **Audio map** to inspect a saved calibration and the assigned main-device output levels in either mode. [Audio map exercise](../audio/README.md#check-an-audio-map-from-show-mode)
 
+## Run a second cue list in its own window
+
+1. Put two silent Wait cues in a second sequential list. Keep the first list selected on the main desk. Right-click the second list's tab and choose **Open cue list in separate window**. Move it to the second display. In Show Mode, choose **Open cue list window** for the list on screen.
+2. Choose **Set standby** beside an armed cue in the separate window. Confirm that its **Next standby** reflects the selection and that the main desk still shows the first list. Press **GO**, or focus the cue table and press **Space**.
+3. Watch **Remaining** on the running row. Practice **Pause list** and **Resume list** on the countdown. Start a rehearsal Wait on the main desk and choose **Stop list** in the separate window. **Escape** in that window also stops its list. Check both running states in **Cue monitor**.
+4. Close the separate window while its list is running to rehearse handoff. Reopen it to see the current standby. Close and reopen the workspace to start a fresh window session.
+
+The separate window uses the desk's configured Double GO interval. Use the main desk to edit programming. If standby advances on the desk or through a controller before the window's GO arrives, check the refreshed standby and give a fresh GO. [QLab cue list windows](https://reference.qlab.app/docs/v5/fundamentals/cue-lists/)
+
 ## Put a cart on a second display
 
 1. In the bundled rehearsal workspace, leave **Rehearsal** active and park its main playhead on cue 1. Right-click the **Sound checks** tab and choose **Open cart in separate window**. Right-clicking the tab lets you open the cart while the main desk stays on Rehearsal. In Show Mode, **Open cart window** is also available when an independent cart is active.

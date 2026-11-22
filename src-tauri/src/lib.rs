@@ -42,7 +42,10 @@ use commands::{
         set_playlist_loop, set_playlist_second_trigger, set_playlist_auto_shuffle, set_image_file, set_midi_file,
         go_to_cue_number, reset_silent_speed, revert_picture_fade, set_playhead, set_video_file, stop_preview, toggle_output_window, ungroup, update_cue,
     },
-    cart_window_cmds::{cart_window_pad, open_cart_window, read_cart_window},
+    cue_list_window_cmds::{
+        cart_window_pad, open_cart_window, open_sequential_window, read_cart_window,
+        read_sequential_window, sequential_window_action,
+    },
     cue_list_cmds::{
         add_cue_list, get_cue_lists, remove_cue_list, rename_cue_list,
         set_active_cue_list, set_cue_list_mode, set_cue_list_number, edit_cart_layout,
@@ -670,6 +673,9 @@ pub fn run() {
             get_cue_lists,
             open_cart_window,
             read_cart_window,
+            open_sequential_window,
+            read_sequential_window,
+            sequential_window_action,
             cart_window_pad,
             add_cue_list,
             remove_cue_list,

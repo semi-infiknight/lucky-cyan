@@ -1,6 +1,6 @@
 import { cartGrid, cellAt, focusGridCell, gridColumns } from "../CueList/cartGrid";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { openCartWindow, goCue, setActiveCueList, stopCue } from "../../lib/commands";
+import { openCartWindow, openSequentialWindow, goCue, setActiveCueList, stopCue } from "../../lib/commands";
 import { formatClock } from "../../lib/timeline";
 import { cueAccent } from "../../lib/cueColors";
 import type { CueSummary } from "../../lib/types";
@@ -133,6 +133,7 @@ export function ShowModeView({ onGoto, onRefresh }: { onGoto: () => void; onRefr
         </select> : <h2>{activeList?.name || "Cue list"}</h2>}
         <span>{rows.length} {rows.length === 1 ? "cue" : "cues"}</span>
         {cart && !activeList.chain_cart_cues && <button onClick={() => void act(() => openCartWindow(activeList.id))}>Open cart window</button>}
+        {activeList?.mode === "sequential" && <button onClick={() => void act(() => openSequentialWindow(activeList.id))}>Open cue list window</button>}
         {!cart && <button onClick={onGoto} disabled={!rows.length}>Go to cue <kbd>G</kbd></button>}
       </header>
       {error && <p role="alert" className="desk-error">{error}</p>}

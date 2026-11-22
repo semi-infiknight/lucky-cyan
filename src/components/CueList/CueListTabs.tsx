@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import {
-  addCueList, openCartWindow, removeCueList, renameCueList, setActiveCueList, setCueListMode, setCueListNumber,
+  addCueList, openCartWindow, openSequentialWindow, removeCueList, renameCueList, setActiveCueList, setCueListMode, setCueListNumber,
   getCuelistTcConfig, setCuelistTcConfig,
 } from "../../lib/commands";
 import type { CueListSummary, CueListTcConfig, TcRate, TcOnStart, TcOnStop } from "../../lib/types";
@@ -274,6 +274,13 @@ export function CueListTabs({ onRefresh }: { onRefresh: () => void }) {
               setContextMenu(null);
               setWindowError("");
               void openCartWindow(menuList.id).catch(error => setWindowError(String(error)));
+            }}
+          />}
+          {menuList?.mode === "sequential" && <ContextMenuItem label="Open cue list in separate window"
+            onClick={() => {
+              setContextMenu(null);
+              setWindowError("");
+              void openSequentialWindow(menuList.id).catch(error => setWindowError(String(error)));
             }}
           />}
           {menuList?.mode === "cart" && <ContextMenuItem

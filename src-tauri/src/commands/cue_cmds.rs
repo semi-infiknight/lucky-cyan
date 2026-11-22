@@ -98,6 +98,8 @@ pub struct CueSummary {
     pub seekable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loaded_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_prepared: Option<bool>,
     /// Duration of one pass before trim and repetition, or the period of an
     /// authored loop. `None` when the cue has no known period or duration.
     pub file_duration_ms: Option<u64>,
@@ -350,6 +352,7 @@ fn summarise(
         is_warning: warning_message.is_some(),
         seekable: cue.supports_seek(),
         loaded_time_ms: cue.loaded_time_ms(),
+        is_prepared: cue.has_prepared_media().then_some(true),
         warning_message,
         file_duration_ms: cue.file_duration().map(|d| d.as_millis() as u64),
         children,

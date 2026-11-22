@@ -2,13 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CartPlaybackGrid } from "../components/CueList/CartView";
-import { cartWindowPad, readCartWindow } from "../lib/commands";
-import type { CartWindowSnapshot, CueStateChangedEvent, CueTimeUpdateEvent } from "../lib/types";
+import { cartWindowPad, readCartWindow, readSequentialWindow, sequentialWindowAction } from "../lib/commands";
+import type { CueListWindowSnapshot, CueStateChangedEvent, CueTimeUpdateEvent } from "../lib/types";
 import { useTimingStore } from "../stores/timingStore";
 import { followDeskTheme } from "./deskTheme";
+import { flattenCueRows, SequentialListPlayback } from "./SequentialListPlayback";
 
-export function CartWindow() {
-  const [snapshot, setSnapshot] = useState<CartWindowSnapshot | null>(null);
+export function CueListWindow({ kind }: { kind: "cart" | "sequential" }) {
+  const [snapshot, setSnapshot] = useState<CueListWindowSnapshot | null>(null);
   const [loadError, setLoadError] = useState("");
   const [actionError, setActionError] = useState("");
   const refresh = useRef<() => void>(() => {});
@@ -24,22 +25,24 @@ export function CartWindow() {
     let visibleIds = new Set<string>();
     const unlisten: UnlistenFn[] = [];
     const native = getCurrentWindow();
+    const readSnapshot = kind === "cart" ? readCartWindow : readSequentialWindow;
 
     const read = async () => {
       if (disposed || unavailable || reading) return;
       reading = true;
       dirty = false;
       try {
-        const next = await readCartWindow();
+        const next = await readSnapshot();
         if (disposed || dirty) return;
         if (!next) {
           unavailable = true;
           visibleIds.clear();
           setSnapshot(null);
-          setLoadError("This cart has closed.");
+          setLoadError("This cue list has closed.");
           await native.close();
         } else {
-          visibleIds = new Set(next.cues.map(cue => cue.id));
+          visibleIds = new Set(kind === "cart" ? next.cues.map(cue => cue.id)
+            : flattenCueRows(next.cues).map(({ cue }) => cue.id));
           setSnapshot(next);
           setLoadError("");
         }
@@ -64,9 +67,10 @@ export function CartWindow() {
     };
     const setup = async () => {
       try {
+        const updates = ["cue-lists-changed", "workspace-modified", "cue-list-refresh", "cue-load-error"];
+        if (kind === "sequential") updates.push("playhead-moved", "cue-monitor-structure-changed");
         await Promise.all([
-          ...["cue-lists-changed", "workspace-modified", "cue-list-refresh", "cue-load-error"]
-            .map(event => attach(listen(event, schedule))),
+          ...updates.map(event => attach(listen(event, schedule))),
           attach(listen<CueStateChangedEvent>("cue-state-changed", ({ payload }) => {
             if (visibleIds.has(payload.cue_id)) {
               if (payload.new_state === "standby" || payload.new_state === "completed") {
@@ -93,26 +97,30 @@ export function CartWindow() {
       window.removeEventListener("focus", schedule);
       unlisten.forEach(remove => remove());
     };
-  }, []);
+  }, [kind]);
 
-  const title = snapshot?.name;
+  const title = snapshot && [snapshot.number, snapshot.name].filter(Boolean).join(" ");
   useEffect(() => {
     if (title) void getCurrentWindow().setTitle(`Inkue · ${title}`).catch(() => {});
   }, [title]);
 
-  async function act(id: string, action: "fire" | "stop") {
+  async function act(action: () => Promise<void>) {
     setActionError("");
-    try { await cartWindowPad(id, action); }
+    try { await action(); }
     catch (error) { setActionError(String(error)); }
     finally { refresh.current(); }
   }
 
-  return <main className="cart-window" aria-label="Separate cart window">
-    <header><h1>{snapshot?.name ?? "Cue cart"}</h1></header>
+  const label = kind === "cart" ? "Cue cart" : "Cue list";
+  return <main className="cart-window" aria-label={`${label} window`}>
+    <header><h1>{title ?? label}</h1></header>
     {loadError && <p role="alert" className="cart-window-error">{loadError}</p>}
     {actionError && <p role="alert" className="cart-window-error">{actionError}</p>}
-    {snapshot ? <CartPlaybackGrid cues={snapshot.cues} layout={snapshot.layout}
-      onFire={id => void act(id, "fire")} onStop={id => void act(id, "stop")} />
-      : !loadError && <p role="status">Loading cart…</p>}
+    {snapshot ? (kind === "cart"
+      ? <CartPlaybackGrid cues={snapshot.cues} layout={snapshot.layout}
+        onFire={id => void act(() => cartWindowPad(id, "fire"))}
+        onStop={id => void act(() => cartWindowPad(id, "stop"))} />
+      : <SequentialListPlayback snapshot={snapshot} onAction={action => act(() => sequentialWindowAction(action))} />)
+      : !loadError && <p role="status">Loading {label.toLowerCase()}…</p>}
   </main>;
 }
