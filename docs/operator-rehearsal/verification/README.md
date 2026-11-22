@@ -79,6 +79,10 @@ The Debian 13 package passed 1,069 native tests, 189 frontend tests, 13 archived
 
 The silent two-second video loop played through its final blue frame and cleared the stage at natural EOF after Whole Cue Devamp. A first attempt showed the expected stage colors and failed one timing bound while polling full-window XWD captures. The repeat sampled one stage pixel during timing and preserved full-window images at the observed transitions. On the same installed binary, the blue tail appeared after 996 ms and black followed 984 ms later. A fresh GO restored the loop. The kit carries the matching source revision and installed checksum in `Evidence/release-verification.json`.
 
+## Installed candidate `3684d80`
+
+The Debian package installed and recovered after the virtual output disappeared. With both the graph and application set to 2,048 frames, the recovered output stayed silent until a fresh GO. Thirteen repeat cycles passed. The fourteenth captured three consecutive silent 10 ms blocks during a steady tone and failed the check. Earlier standalone PipeWire controls also recorded silence with Inkue closed on this host. The dropout’s cause remains undetermined, and `63e1613` is the latest rehearsal kit that passed the short run.
+
 ## Qualification still required
 
 The Linux launch gate includes an uninterrupted overnight run on the release binary and a rehearsal on the intended audio interface with a representative collected show. The latter checks monitoring by ear, channel routing, device loss and recovery, hard stop, and manual takeover on the venue's backup machine. Distribution signing and operator sign-off also remain open. Windows and macOS rehearsals follow Linux qualification. The technical proposal to FonograF is a private draft.
