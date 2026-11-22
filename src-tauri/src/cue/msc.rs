@@ -34,6 +34,7 @@ pub(crate) enum MscAction {
     Pause(Option<String>),
     Resume(Option<String>),
     Load(Option<String>),
+    Reset(Option<String>),
     AllOff,
     Step { forward: bool, sequence: bool },
 }
@@ -77,6 +78,7 @@ impl MscTransport {
                 MscCommand::Resume => MscAction::Resume(None),
                 MscCommand::Load => MscAction::Load(None),
                 MscCommand::AllOff => MscAction::AllOff,
+                MscCommand::Reset => MscAction::Reset(None),
                 _ => return None,
             };
             return Some(Self { action, list: None });
@@ -98,6 +100,7 @@ impl MscTransport {
             MscCommand::Stop => MscAction::Pause(Some(number)),
             MscCommand::Resume => MscAction::Resume(Some(number)),
             MscCommand::Load => MscAction::Load(Some(number)),
+            MscCommand::Reset => MscAction::Reset(Some(number)),
             _ => return None,
         };
         Some(Self { action, list })
@@ -222,6 +225,8 @@ mod tests {
             unscoped(MscAction::Pause(Some("01.2".into()))));
         assert_eq!(MscTransport::decode(&frame(7, 16, 2, b""), 7), unscoped(MscAction::Pause(None)));
         assert_eq!(MscTransport::decode(&frame(7, 16, 5, b""), 7), unscoped(MscAction::Load(None)));
+        assert_eq!(MscTransport::decode(&frame(7, 16, 10, b""), 7), unscoped(MscAction::Reset(None)));
+        assert_eq!(MscTransport::decode(&frame(7, 16, 10, b"04"), 7), unscoped(MscAction::Reset(Some("04".into()))));
         assert_eq!(MscTransport::decode(&frame(7, 1, 3, b""), 7), unscoped(MscAction::Resume(None)));
         assert_eq!(MscTransport::decode(&frame(7, 16, 8, b""), 7), unscoped(MscAction::AllOff));
         assert_eq!(MscTransport::decode(&frame(7, 16, 1, b"1\x0004\x00"), 7),

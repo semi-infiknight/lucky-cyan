@@ -55,6 +55,10 @@ pub(super) fn apply(
             }
             return Ok(changed);
         }
+        MscAction::Reset(None) => {
+            transport.reset_workspace(&mut show.cue_lists)?;
+            return Ok(true);
+        }
         MscAction::Resume(None) => {
             let mut changed = false;
             for cue in show.cue_lists.iter_mut().flat_map(|list| &mut list.cues) {
@@ -115,6 +119,7 @@ pub(super) fn apply(
             Ok(true)
         }
         MscAction::Step { forward, sequence } => step_standby(list, forward, sequence),
+        MscAction::Reset(Some(number)) => transport.reset_numbered_cue(list, &number),
         MscAction::Pause(Some(ref number)) | MscAction::Resume(Some(ref number)) | MscAction::Load(Some(ref number)) => {
             let Some(id) = list.unique_numbered_cue(number).map(|cue| cue.id()) else {
                 return Ok(false);
@@ -122,7 +127,7 @@ pub(super) fn apply(
             let Some(cue) = list.get_mut(&id) else { return Ok(false) };
             apply_cue_action(transport, &action, cue)
         }
-        MscAction::AllOff | MscAction::Resume(None) | MscAction::Pause(None) | MscAction::Load(None) => {
+        MscAction::AllOff | MscAction::Resume(None) | MscAction::Pause(None) | MscAction::Load(None) | MscAction::Reset(None) => {
             unreachable!("handled before selecting a numbered target")
         }
     }
@@ -289,6 +294,48 @@ mod tests {
         show.active_cue_list_mut().unwrap().number = Some("07".into());
         assert!(!send(&mut transport, &mut show, 2, b"42\x0007"));
         assert!(show.cue_lists[1].get(&ids[4]).unwrap().is_running());
+    }
+
+    #[test]
+    fn msc_reset_stops_the_addressed_cue_or_rewinds_all_lists() {
+        let (context, _, calls) = crate::test_support::recording_context();
+        let mut transport = Transport::new(context);
+        let mut show = Workspace::new("Reset rehearsal");
+        let make_list = |list: &mut CueList, number: &str| {
+            let mut audio = AudioCue::new();
+            audio.accept_preloaded_audio(Arc::new(vec![0.0; 4800]), 1, 48_000, Duration::from_millis(100));
+            let first = audio.id();
+            list.push(Box::new(audio));
+            let mut wait = WaitCue::new();
+            wait.set_number(Some(number.into()));
+            wait.go(&transport.context).unwrap();
+            let running = wait.id();
+            list.push(Box::new(wait));
+            list.set_playhead(Some(running)).unwrap();
+            (first, running)
+        };
+        let (first, running) = make_list(show.active_cue_list_mut().unwrap(), "04");
+        let mut secondary = CueList::new("Secondary");
+        let (second_first, second_running) = make_list(&mut secondary, "04");
+        show.cue_lists.push(secondary);
+
+        let reset = |target: Option<&str>| MscTransport { action: MscAction::Reset(target.map(str::to_owned)), list: None };
+        assert!(apply(&mut transport, &mut show, reset(Some("04")), || false).unwrap());
+        let list = show.active_cue_list().unwrap();
+        assert_eq!(list.playhead_cue_id, Some(running));
+        assert_eq!(list.get(&running).unwrap().state(), CueState::Standby);
+        assert!(show.cue_lists[1].get(&second_running).unwrap().is_running());
+
+        assert!(apply(&mut transport, &mut show, reset(None), || false).unwrap());
+        let list = show.active_cue_list().unwrap();
+        assert_eq!(list.playhead_cue_id, Some(first));
+        assert!(list.get(&first).unwrap().has_prepared_media());
+        assert_eq!(show.cue_lists[1].playhead_cue_id, Some(second_first));
+        assert!(show.cue_lists[1].get(&second_first).unwrap().has_prepared_media());
+        assert_eq!(show.cue_lists[1].get(&second_running).unwrap().state(), CueState::Standby);
+        let calls = calls.lock().unwrap();
+        let prepared = calls.iter().filter(|call| matches!(call, crate::test_support::EngineCall::AudioPlayPausedRouted { .. })).count();
+        assert_eq!(prepared, 2);
     }
 
     #[test]

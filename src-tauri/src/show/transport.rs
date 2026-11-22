@@ -396,10 +396,7 @@ impl Transport {
                     }
                     ControlAction::Target => target.set_temporary_target(replacement),
                     ControlAction::Reset => {
-                        target.clear_temporary_targets();
-                        let _ = target.hard_stop(&self.context);
-                        let _ = target.reset();
-                        self.context.reset_action_colors(target);
+                        let _ = self.reset_cue_state(target);
                     }
                     ControlAction::Arm => target.set_disabled(false),
                     ControlAction::Disarm => target.set_disabled(true),
@@ -691,6 +688,54 @@ impl Transport {
             let _ = cue.reset();
         }
         cue_list.independent_runs.clear();
+        Ok(())
+    }
+
+    fn reset_cue_state(&self, cue: &mut dyn Cue) -> Result<()> {
+        cue.clear_temporary_targets();
+        let stopped = cue.hard_stop(&self.context);
+        let reset = cue.reset();
+        self.context.reset_action_colors(cue);
+        stopped.and(reset)
+    }
+
+    pub(crate) fn reset_numbered_cue(&self, list: &mut CueList, number: &str) -> Result<bool> {
+        let Some(id) = list.unique_numbered_cue(number).map(|cue| cue.id()) else {
+            return Ok(false);
+        };
+        list.cancel_enter_follow_for(id);
+        let cue = list.get_mut(&id).ok_or_else(|| anyhow!("Cue {number} no longer exists"))?;
+        self.reset_cue_state(cue)?;
+        Ok(true)
+    }
+
+    pub(crate) fn reset_workspace(&mut self, lists: &mut [CueList]) -> Result<()> {
+        // Stop every list before preparing any cue. The engine panic backstop
+        // is shared and would otherwise discard cues loaded in an earlier list.
+        for list in &mut *lists {
+            self.hard_stop_all(list)?;
+        }
+        for list in lists {
+            for cue in &list.cues {
+                self.context.reset_action_colors(cue.as_ref());
+            }
+            if list.independent_pads() {
+                list.set_playhead(None)?;
+                continue;
+            }
+            let first = list.cues.first().map(|cue| cue.id());
+            list.set_playhead(first)?;
+            if let Some(cue) = first.and_then(|id| list.get_mut(&id)).filter(|cue| !cue.is_disabled()) {
+                let alert_id = format!("load-{}", cue.id());
+                match cue.preload(&self.context) {
+                    Ok(()) => crate::health::clear(&alert_id),
+                    Err(error) => crate::health::set(crate::health::HealthAlert::new(
+                        &alert_id, crate::health::HealthLevel::Warning,
+                        format!("Could not load {} after Reset Workspace: {error}", cue.name()),
+                    )),
+                }
+            }
+        }
         Ok(())
     }
 

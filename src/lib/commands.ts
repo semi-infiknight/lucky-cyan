@@ -100,6 +100,8 @@ export const setMasterVolume = (db: number) => invoke<void>("set_master_volume",
 export const stopAll = () => invoke<void>("stop_all");
 export const hardStopBlackout = (workspaceId: string) => invoke<void>("hard_stop_blackout", { workspaceId });
 export const hardStopAll = () => invoke<void>("hard_stop_all");
+export const resetWorkspaceTransport = (workspaceId: string) =>
+  invoke<void>("reset_workspace_transport", { workspaceId });
 export const stopCue = (cueId: CueId) => invoke<void>("stop_cue", { cueId });
 export const pauseCue = (cueId: CueId) => invoke<void>("pause_cue", { cueId });
 export const seekCue = (cueId: CueId, positionMs: number) =>

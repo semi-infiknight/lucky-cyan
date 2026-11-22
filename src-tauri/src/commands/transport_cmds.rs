@@ -480,6 +480,28 @@ pub fn hard_stop_all(app_handle: tauri::AppHandle, state: State<'_, AppState>) -
     stop_locked(&state, &app_handle, &mut ws, true)
 }
 
+#[tauri::command]
+pub fn reset_workspace_transport(
+    workspace_id: uuid::Uuid,
+    window: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Use Reset Workspace on the main desk.".into());
+    }
+    let mut show = state.workspace.lock().map_err(|error| error.to_string())?;
+    if show.instance_id() != workspace_id {
+        return Err("The workspace changed before it could be reset.".into());
+    }
+    let mut transport = Transport::new(workspace_context(&state, &show));
+    transport.reset_workspace(&mut show.cue_lists).map_err(|error| error.to_string())?;
+    let standby = show.active_cue_list().and_then(|list| list.playhead_cue_id);
+    let _ = app_handle.emit("playhead-moved", serde_json::json!({ "cue_id": standby }));
+    let _ = app_handle.emit("cue-list-refresh", ());
+    Ok(())
+}
+
 /// An operator-selected action on the local desk. The ordinary hard stop, ESC,
 /// OSC, MIDI and agent paths continue to use their own existing stop behavior.
 #[tauri::command]

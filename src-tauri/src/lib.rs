@@ -106,7 +106,7 @@ use commands::{
     },
     transport_cmds::{
         go, go_cue, fire_cue_hotkey, set_cue_hotkey, arm_wall_clock_trigger, set_wall_clock_trigger,
-        hard_stop_all, hard_stop_blackout, load_media_to_time, pause_cue, resume_cue, seek_cue,
+        hard_stop_all, hard_stop_blackout, load_media_to_time, pause_cue, reset_workspace_transport, resume_cue, seek_cue,
         set_master_volume, stop_all, stop_cue,
     },
     undo_cmds::{can_redo, can_undo, copy_cue, paste_cue, redo, undo},
@@ -550,6 +550,7 @@ pub fn run() {
             set_wall_clock_trigger,
             stop_all,
             hard_stop_all,
+            reset_workspace_transport,
             hard_stop_blackout,
             stop_cue,
             pause_cue,
