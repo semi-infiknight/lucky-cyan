@@ -1190,7 +1190,7 @@ pub fn apply_cue_properties(
     }
     let mix_channels = if matrix_changed {
         patch.map(|patch| {
-            if matches!(edited.cue_type(), CueType::Audio | CueType::Video) {
+            if matches!(edited.cue_type(), CueType::Audio | CueType::Video | CueType::Mic) {
                 patch.cue_mixer_channels()
             } else {
                 std::borrow::Cow::Borrowed(patch.channels.as_slice())
@@ -1573,7 +1573,7 @@ pub fn set_live_crosspoint(
     let voice = state.output_engine.video_audio_voice(params.voice_id).unwrap_or(params.voice_id);
     check_live_matrix_patch(state.audio_engine.as_ref(), voice, patch)?;
     let patch_channels = patch.map(|patch| {
-        if matches!(cue.cue_type(), CueType::Audio | CueType::Video) {
+        if matches!(cue.cue_type(), CueType::Audio | CueType::Video | CueType::Mic) {
             patch.cue_mixer_channels()
         } else {
             std::borrow::Cow::Borrowed(patch.channels.as_slice())

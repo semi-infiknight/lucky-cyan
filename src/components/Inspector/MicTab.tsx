@@ -1,10 +1,12 @@
 // Inspector tab for Mic cues — routes a live audio input to an Output Patch.
 
 import { useEffect, useState } from "react";
-import type { MicCueData, InputPatch, OutputPatch, FadeCurve } from "../../lib/types";
-import { listInputPatches, getOutputPatches } from "../../lib/commands";
+import type { MicCueData, InputPatch, FadeCurve } from "../../lib/types";
+import { listInputPatches } from "../../lib/commands";
+import { useOutputPatchTable } from "../../hooks/useOutputPatchTable";
 import { Select } from "../common/Select";
 import { DragNumber } from "../common/DragNumber";
+import { LevelMatrixGrid } from "./LevelMatrixGrid";
 
 interface Props {
   cue: MicCueData;
@@ -33,15 +35,16 @@ const CURVE_LABELS: Record<FadeCurve, string> = {
 
 export function MicTab({ cue, onSave }: Props) {
   const [inputPatches, setInputPatches] = useState<InputPatch[]>([]);
-  const [outputPatches, setOutputPatches] = useState<OutputPatch[]>([]);
+  const { table, error: patchError } = useOutputPatchTable();
+  const outputPatches = table?.patches ?? [];
 
   useEffect(() => {
     listInputPatches().then(setInputPatches).catch(console.error);
-    getOutputPatches().then(setOutputPatches).catch(console.error);
   }, []);
 
   const selectedInput = inputPatches.find((p) => p.id === cue.input_patch_id) ?? null;
   const inputChannelCount = cue.input_channels.length || (selectedInput?.channels.length ?? 0);
+  const outputPatch = outputPatches.find(patch => patch.id === (cue.output_patch_id ?? table?.default_patch_id));
 
   return (
     <div>
@@ -88,6 +91,7 @@ export function MicTab({ cue, onSave }: Props) {
 
       {/* Output Patch */}
       <div style={fieldStyle}>
+        {patchError && <p role="status">Output Patches: {patchError}</p>}
         <div style={labelStyle}>Output Patch</div>
         <Select
           style={selectStyle}
@@ -116,7 +120,7 @@ export function MicTab({ cue, onSave }: Props) {
             }
           />
         </div>
-        <div style={{ flex: 1 }}>
+        {!cue.level_matrix && <div style={{ flex: 1 }}>
           <div style={labelStyle}>Pan ({cue.pan.toFixed(2)})</div>
           <input
             style={{ width: "100%" }}
@@ -127,8 +131,14 @@ export function MicTab({ cue, onSave }: Props) {
             value={cue.pan}
             onChange={(e) => onSave({ pan: parseFloat(e.target.value) })}
           />
-        </div>
+        </div>}
       </div>
+
+      <LevelMatrixGrid key={cue.id} cueId={cue.id} matrix={cue.level_matrix ?? null}
+        patchName={outputPatch?.name ?? (cue.output_patch_id ? "Missing output patch" : "Default output device")}
+        deviceChannels={outputPatch?.channels ?? []} channelNames={outputPatch?.channel_names}
+        inputLimit={inputChannelCount === 1 ? 1 : 2}
+        onSave={level_matrix => onSave({ level_matrix })} />
 
       {/* Fades */}
       <FadeRow

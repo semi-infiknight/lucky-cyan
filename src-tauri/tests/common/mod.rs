@@ -434,8 +434,7 @@ impl AudioEngineApi for RecAudio {
         let (prod, _cons) = HeapRb::<f32>::new(ch.max(1) * 64).split();
         Ok((Uuid::new_v4(), prod))
     }
-    #[allow(clippy::too_many_arguments)]
-    fn play_mic_voice(&self, _f: Uuid, _il: usize, _ir: usize, _ol: usize, _or: usize, _g: f32, _p: f32, _fi: u32, _c: FadeCurve, _patch: Option<Arc<inkue_lib::engine::patch_fader::PatchFader>>) -> Result<VoiceId> {
+    fn play_mic_voice(&self, _request: inkue_lib::engine::audio_engine::LiveVoiceRequest) -> Result<VoiceId> {
         record(&self.0, EngineCall::AudioPlayMicVoice);
         Ok(Uuid::new_v4())
     }

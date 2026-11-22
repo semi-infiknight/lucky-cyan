@@ -42,7 +42,7 @@ An Inkue audio engine reopen withdraws active file Audio cues that used this set
 3. At a low listening level, play a clip with bass and treble through **Backstage Filter**. Compare it with the same clip on a dry patch reaching the same hardware channel. Start two Audio cues on **Backstage Filter** together and compare the combined output with the dry patch still playing. The filter works on the sum of the two filtered cues.
 4. Stop the patch’s file Audio cues before editing the chain. Save and reopen the workspace to verify the settings. To check routing loss, disconnect the interface with playback stopped and try GO. The processed cue should stay held.
 
-The named main output can play up to eight processed patches at once, each with up to eight native device effects. The device can use up to 32 hardware channels and 4,096 frames per audio block. Cue inserts run before patch routing. Each patch sums its File Audio and Video soundtracks by hardware channel, applies its Output FX, and then contributes to the device master. Use a dry patch and a dedicated hardware channel for LTC. Mic and LTC use dry paths. Third-party plug-ins require separate support. [QLab Audio Output Patch Editor](https://qlab.app/docs/v5/audio/audio-output-patch-editor/)
+The named main output can play up to eight processed patches at once, each with up to eight native device effects. The device can use up to 32 hardware channels and 4,096 frames per audio block. Cue inserts run before patch routing. Each patch sums its Audio, Video and Mic signals by hardware channel, applies its Output FX, and then contributes to the device master. Use a dry patch and a dedicated hardware channel for LTC. Third-party plug-ins require separate support. [QLab Audio Output Patch Editor](https://qlab.app/docs/v5/audio/audio-output-patch-editor/)
 
 ## Filter one cue output before the patch sums it
 
@@ -51,13 +51,20 @@ The named main output can play up to eight processed patches at once, each with 
 3. In **Preferences → Audio → Output Patches**, expand **Cue Output FX** and select cue output 1. Add a high-pass filter and set it to 600 Hz. Start both cues and check that the low tone is reduced while the second signal remains audible on the shared speaker.
 4. Save and reopen the workspace. Stop both cues before changing the chain or its routing. Try cue output 2 in the FX selector to program a separate chain.
 
-Cue Output FX support up to 32 logical outputs on a processed patch, with up to eight ordered native filters in each chain. They run after the Audio or Video cue's Levels matrix and before its cue outputs are mapped to hardware channels. **Output FX** apply to the summed hardware channels afterward. [QLab Cue Outputs and Patch Routing](https://reference.qlab.app/docs/v5/audio/audio-output-patch-editor/)
+Cue Output FX support up to 32 logical outputs on a processed patch, with up to eight ordered native filters in each chain. They run after the Audio, Video or Mic cue's matrix and before its cue outputs are mapped to hardware channels. **Output FX** apply to the summed hardware channels afterward. [QLab Cue Outputs and Patch Routing](https://reference.qlab.app/docs/v5/audio/audio-output-patch-editor/)
 
 ### Process a Video soundtrack through the same patch
 
 1. Choose a rehearsal Video with a known soundtrack and select the processed patch in **I/O**. Route the soundtrack in **Levels** to the cue output you filtered. Keep the named device selected as the main output.
 2. Wait for the soundtrack to finish loading, then give the cue a GO. Check the first visible frame and the sound together. Repeat using a **Load** cue so the soundtrack stays paused while the picture is prepared.
 3. On the rehearsal rig, test the patch with its required device unavailable. The Video holds its start. Restore the device and give it a fresh GO. A verified silent Video can play without the soundtrack route. [QLab Video cue audio and I/O](https://qlab.app/docs/v5/video/video-cues/)
+
+### Route a live input to its own filtered send
+
+1. Connect a line-level test source and create an **Input Patch** for that channel. Add a Mic cue, select the Input Patch and choose **Mono (1 ch)**. Select a processed Output Patch on the named main device.
+2. In the **Mic** inspector choose **Use a matrix**. Route input 1 to one cue output and mute its other crosspoints. Prepare a high-pass or peaking EQ on that output through **Cue Output FX**.
+3. Start the Mic cue and play a reference File Audio cue on a different cue output assigned to the same hardware channel. Compare the two signals. Adjust a live crosspoint and check that its saved value is recalled after stopping and restarting the cue.
+4. Stop the cues on the patch before editing the chain or reassigning the hardware. Rehearse the Mic cue with the named device unavailable and confirm that its GO stays held until the device is restored and you give it a fresh GO. The Mic inspector supports one or two captured input channels. [QLab Mic cue workflow](https://qlab.app/docs/v5/audio/mic-cues/)
 
 To compare two chains on one device, give a music patch a low-pass filter and a dialogue patch a high-pass filter. Select the same named hardware output for both patches and route a File Audio cue through each. Play them together, then pause and resume the music while the dialogue stays live. Change patch effects after stopping the cues on that patch.
 

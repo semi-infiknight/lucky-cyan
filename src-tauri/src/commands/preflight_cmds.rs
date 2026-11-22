@@ -175,7 +175,7 @@ fn capture_checks(
                 .is_some_and(crate::cue::video_cue::VideoCue::has_verified_silent_soundtrack);
             match cue.cue_type() {
                 cue_type if cue_type == CueType::Audio
-                    || (cue_type == CueType::Video && patch.has_audio_effects() && !verified_silent) => match patch.named_output() {
+                    || (matches!(cue_type, CueType::Mic | CueType::Video) && patch.has_audio_effects() && !verified_silent) => match patch.named_output() {
                     Ok(route) => {
                         needs_main_output_for_effects = patch.has_audio_effects();
                         named_device = route.map(|route| route.device_id);
@@ -187,7 +187,7 @@ fn capture_checks(
                     || (cue_type == CueType::Timecode && cue.output_patch_id().is_some()) =>
                 {
                     let setting = if patch.has_audio_effects() {
-                        format!("Output Patch “{}” applies its effects to File Audio and Video soundtracks. This cue uses its existing dry path.", patch.name)
+                        format!("Output Patch “{}” applies effects to Audio, Video and Mic cues. LTC uses its dry path.", patch.name)
                     } else {
                         format!("The named-device GO requirement on Output Patch “{}” applies to Audio file cues. Check this cue’s routing separately.", patch.name)
                     };

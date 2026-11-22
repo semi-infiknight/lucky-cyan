@@ -170,10 +170,12 @@ impl TimecodeCue {
                         start.rate = self.rate;
                         self.active_ltc_gen =
                             Some(LtcGenerator::start(start, sample_rate, prod));
-                        match context.audio_engine.play_mic_voice(
-                            feed_id, 0, 0, out_l, out_r, 1.0, 0.0, 0, EngineFadeCurve::Linear,
-                            context.resolve_patch(self.output_patch_id).map(|p| context.patch_fader(p)),
-                        ) {
+                        match context.audio_engine.play_mic_voice(crate::engine::audio_engine::LiveVoiceRequest {
+                            feed_id, inputs: [0, 0], outputs: [out_l, out_r], gain: 1.0, pan: 0.0,
+                            fade_in: (0, EngineFadeCurve::Linear),
+                            patch_fader: context.resolve_patch(self.output_patch_id).map(|p| context.patch_fader(p)),
+                            patch_id: None, patch_slot: None, named_output: None, level_matrix: None,
+                        }) {
                             Ok(vid) => self.active_ltc_voice = Some(vid),
                             Err(e) => {
                                 self.active_ltc_gen = None;

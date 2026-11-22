@@ -12,6 +12,7 @@ interface Props {
   deviceChannels: number[];
   channelNames?: string[];
   sourceNames?: string[];
+  inputLimit?: number;
   onSaveSourceNames?: (names: string[]) => void;
   onSave: (matrix: number[][] | null) => void;
 }
@@ -53,12 +54,12 @@ function Crosspoint({ db, label, onPreview, onCommit }: {
   </label>;
 }
 
-export function LevelMatrixGrid({ cueId, matrix, patchName, deviceChannels, channelNames = [], sourceNames = [], onSaveSourceNames, onSave }: Props) {
+export function LevelMatrixGrid({ cueId, matrix, patchName, deviceChannels, channelNames = [], sourceNames = [], inputLimit = CHANNEL_LIMIT, onSaveSourceNames, onSave }: Props) {
   const [inputStart, setInputStart] = useState(0);
   const [outputStart, setOutputStart] = useState(0);
   const [liveError, setLiveError] = useState("");
   const banks = useMemo(() => routedBanks(matrix), [matrix]);
-  const inputs = Array.from({ length: INPUT_BANK_SIZE }, (_, i) => inputStart + i);
+  const inputs = Array.from({ length: Math.max(0, Math.min(INPUT_BANK_SIZE, inputLimit - inputStart)) }, (_, i) => inputStart + i);
   const outputs = Array.from({ length: OUTPUT_BANK_SIZE }, (_, i) => outputStart + i);
   const preview = (input: number, output: number, db: number) => {
     void setLiveCrosspoint(cueId, input, output, db).catch(error => setLiveError(String(error)));
@@ -66,7 +67,9 @@ export function LevelMatrixGrid({ cueId, matrix, patchName, deviceChannels, chan
   return <section className="route-matrix" aria-label="Level matrix">
     <header className="route-heading">
       <div><h3>Level matrix</h3><span>{patchName}</span></div>
-      <button type="button" onClick={() => onSave(matrix === null ? stereoMatrix() : null)}>
+      <button type="button" onClick={() => onSave(matrix === null
+        ? inputLimit === 1 ? [[0, 0]] : stereoMatrix()
+        : null)}>
         {matrix === null ? "Use a matrix" : "Use pan instead"}
       </button>
     </header>
@@ -87,7 +90,7 @@ export function LevelMatrixGrid({ cueId, matrix, patchName, deviceChannels, chan
     </details>}
     {matrix !== null && <>
       <div className="route-banks">
-        <ChannelBank label="Inputs" width={INPUT_BANK_SIZE} start={inputStart} onChange={setInputStart} />
+        {inputLimit > INPUT_BANK_SIZE && <ChannelBank label="Inputs" width={INPUT_BANK_SIZE} start={inputStart} onChange={setInputStart} />}
         <ChannelBank label="Outputs" width={OUTPUT_BANK_SIZE} start={outputStart} onChange={setOutputStart} />
         {banks.some(bank => bank.inputStart !== inputStart || bank.outputStart !== outputStart) &&
           <label className="route-bank route-bank-jump">

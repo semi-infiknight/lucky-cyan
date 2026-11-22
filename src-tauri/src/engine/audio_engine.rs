@@ -1149,26 +1149,20 @@ impl AudioEngine {
             .and_then(|f| f.iter().find(|f| f.id == feed_id).map(|f| (f.in_channels, f.sample_rate)))
     }
 
-    /// Start a live (Mic Cue) voice reading input channels `in_l`/`in_r` (equal
-    /// for mono) from `feed_id`, routed to output channels `out_l`/`out_r`, with
-    /// optional fade-in.  Returns the voice id (use [`stop_voice`] to stop it).
-    #[allow(clippy::too_many_arguments)]
-    pub fn play_mic_voice(
-        &self,
-        feed_id: Uuid,
-        in_l: usize,
-        in_r: usize,
-        out_l: usize,
-        out_r: usize,
-        gain: f32,
-        pan: f32,
-        fade_in_ms: u32,
-        fade_curve: FadeCurve,
-        patch_fader: Option<Arc<super::patch_fader::PatchFader>>,
-    ) -> Result<VoiceId> {
+    /// Submit a live voice reading a captured or synthetic input feed.
+    pub fn play_mic_voice(&self, request: LiveVoiceRequest) -> Result<VoiceId> {
+        let LiveVoiceRequest {
+            feed_id, inputs: [in_l, in_r], outputs: [out_l, out_r], gain, pan,
+            fade_in: (fade_in_ms, fade_curve), patch_fader, patch_id, patch_slot,
+            named_output, level_matrix,
+        } = request;
         let (in_ch, src_rate) = self
             .feed_info(feed_id)
             .ok_or_else(|| anyhow!("input feed {feed_id:?} not found"))?;
+        if named_output.is_some() {
+            anyhow::ensure!(in_l < in_ch && in_r < in_ch,
+                "The Mic cue’s selected input channels are unavailable.");
+        }
         // Clamp requested channels to what the device offers.
         let in_l = in_l.min(in_ch.saturating_sub(1));
         let in_r = in_r.min(in_ch.saturating_sub(1));
@@ -1176,6 +1170,12 @@ impl AudioEngine {
         let live = LiveSource::new(feed_id, in_l, in_r, src_rate);
         let mut voice = Voice::new_live(live, self.sample_rate(), gain, pan);
         voice.patch_fader = patch_fader;
+        voice.output_patch_id = patch_id;
+        voice.patch_slot = patch_slot;
+        voice.named_output = named_output;
+        if let Some(matrix) = level_matrix {
+            voice.inner.level_matrix.update(|_| Some(matrix));
+        }
         voice.out_l = out_l;
         voice.out_r = out_r;
         // Mic routing is always explicit (Input Patch → Output Patch channels);
@@ -1701,6 +1701,20 @@ impl AudioEngine {
             .try_push(cmd)
             .map_err(|_| anyhow!("Audio command ring buffer full"))
     }
+}
+
+pub struct LiveVoiceRequest {
+    pub feed_id: Uuid,
+    pub inputs: [usize; 2],
+    pub outputs: [usize; 2],
+    pub gain: f32,
+    pub pan: f32,
+    pub fade_in: (u32, FadeCurve),
+    pub patch_fader: Option<Arc<super::patch_fader::PatchFader>>,
+    pub patch_id: Option<Uuid>,
+    pub patch_slot: Option<u8>,
+    pub named_output: Option<NamedOutput>,
+    pub level_matrix: Option<super::voice::LevelMatrix>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2271,15 +2285,6 @@ fn fill_buffer(
         let mut voice_peak_l = 0.0_f32;
         let mut voice_peak_r = 0.0_f32;
 
-        // Live (Mic Cue) voice — resample from its input feed instead of samples.
-        if voice.live.is_some() {
-            if let Some(feeds) = feeds_guard.as_deref() {
-                mix_live(output, channels, output_sample_rate, voice, feeds, status_prod, &mut voice_peak_l, &mut voice_peak_r, output_period);
-            }
-            accumulate_peaks(voice, voice_peak_l, voice_peak_r, &mut peak_l, &mut peak_r, &mut patch_peaks);
-            continue;
-        }
-
         let (output, channels, left, right) = match (voice.patch_effects.as_deref(), patch_block) {
             (None, _) => (&mut *output, channels, voice.out_l, voice.out_r),
             (Some(_), Some(active)) if active.fits => {
@@ -2298,6 +2303,16 @@ fn fill_buffer(
                 continue;
             }
         };
+        // Capture and decoded-file voices can contribute to the same patch bus.
+        if voice.live.is_some() {
+            if let Some(feeds) = feeds_guard.as_deref() {
+                let mut peaks = [0.0; 2];
+                mix_live(output, channels, output_sample_rate, voice, feeds, status_prod, [left, right], &mut peaks, output_period);
+                [voice_peak_l, voice_peak_r] = peaks;
+            }
+            accumulate_peaks(voice, voice_peak_l, voice_peak_r, &mut peak_l, &mut peak_r, &mut patch_peaks);
+            continue;
+        }
         let patch_gain = voice.patch_gain();
         let (gain_l, gain_r) = voice.pan_gains();
         let (gain_l, gain_r) = (gain_l * patch_gain, gain_r * patch_gain);
@@ -2614,8 +2629,8 @@ fn mix_live(
     voice: &Arc<Voice>,
     feeds: &[InputFeed],
     status_prod: &mut ringbuf::HeapProd<AudioStatus>,
-    peak_l: &mut f32,
-    peak_r: &mut f32,
+    [left, right]: [usize; 2],
+    peaks: &mut [f32; 2],
     output_period: &Arc<std::sync::atomic::AtomicU32>,
 ) {
     let Some(live) = voice.live.as_ref() else { return };
@@ -2653,6 +2668,9 @@ fn mix_live(
     let patch_gain = voice.patch_gain();
     let (gain_l, gain_r) = voice.pan_gains();
     let (gain_l, gain_r) = (gain_l * patch_gain, gain_r * patch_gain);
+    let matrix = voice.inner.level_matrix.snapshot();
+    let matrix_gain = voice.inner.gain() * patch_gain;
+    let inputs = if live.in_r == live.in_l { 1 } else { 2 };
     // SAFETY: `fade` is only mutated from this callback thread.
     let fade_ptr = voice.inner.fade.get();
     // Oldest frame still resident in the circular staging buffer.
@@ -2687,15 +2705,19 @@ fn mix_live(
 
         let s_l = feed.sample(live.in_l, read);
         let s_r = if live.in_r == live.in_l { s_l } else { feed.sample(live.in_r, read) };
-        let out_l = s_l * gain_l * fade_gain;
-        let out_r = s_r * gain_r * fade_gain;
-
         let base = frame * channels;
-        if voice.out_l < channels { output[base + voice.out_l] += out_l; }
-        if voice.out_r < channels { output[base + voice.out_r] += out_r; }
-
-        *peak_l = (*peak_l).max(out_l.abs());
-        *peak_r = (*peak_r).max(out_r.abs());
+        if let Some(matrix) = matrix.as_deref() {
+            let source = [s_l, s_r];
+            matrix.mix(&source[..inputs], matrix_gain * fade_gain, None,
+                &mut output[base..base + channels], peaks);
+        } else {
+            let out_l = s_l * gain_l * fade_gain;
+            let out_r = s_r * gain_r * fade_gain;
+            if left < channels { output[base + left] += out_l; }
+            if right < channels { output[base + right] += out_r; }
+            peaks[0] = peaks[0].max(out_l.abs());
+            peaks[1] = peaks[1].max(out_r.abs());
+        }
 
         read += ratio;
     }
@@ -2918,6 +2940,41 @@ mod tests {
         fill_buffer(audio_clock_us(), &mut output, 2, 48_000, &pool, &feeds, &mut commands, &mut status, &master, &period);
         assert!(output[1] > 0.50, "both cue outputs enter the device output: {}", output[1]);
         assert!((output[2047] - 0.20).abs() < 1e-5, "the unaffected cue output stays dry");
+        assert!(output.iter().step_by(2).all(|&sample| sample == 0.0));
+    }
+
+    #[test]
+    fn processed_mic_matrix_filters_a_live_send_before_it_joins_a_dry_send() {
+        use super::super::{device_manager::{CueOutputEffects, OutputPatch}, voice::LevelMatrix};
+        use std::sync::atomic::AtomicU32;
+
+        let mut patch = OutputPatch::new("Stage", "hw:CARD=Stage", vec![1, 1]);
+        patch.require_named_device = true;
+        patch.cue_output_effects.push(CueOutputEffects { output: 1, effects: vec![
+            CueEffect::HighPass { id: Uuid::new_v4(), enabled: true, frequency_hz: 600.0 },
+        ] });
+        let route = patch.named_output().unwrap().unwrap();
+        let bus = Arc::new(PatchBus::new(route.clone(), 2, 48_000).unwrap());
+        let (feed, mut producer) = make_feed(1);
+        for _ in 0..4096 { producer.try_push(0.3).unwrap(); }
+        let mut mic = Voice::new_live(LiveSource::new(feed.id, 0, 0, 48_000), 48_000, 1.0, 0.0);
+        let mut matrix = LevelMatrix::default();
+        matrix.set(0, 1, 1.0);
+        mic.inner.level_matrix.update(|_| Some(matrix));
+        mic.named_output = Some(route);
+        mic.patch_effects = Some(bus.clone());
+        mic.set_playing();
+
+        let pool = ArcSwap::from_pointee(vec![Arc::new(mic), filtered_stage_voice(0.20, bus, 2048)]);
+        let feeds = Arc::new(Mutex::new(vec![feed]));
+        let (_, mut commands) = HeapRb::new(16).split();
+        let (mut status, _) = HeapRb::new(16).split();
+        let master = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
+        let period = Arc::new(AtomicU32::new(1024));
+        let mut output = [0.0; 2048];
+        fill_buffer(audio_clock_us(), &mut output, 2, 48_000, &pool, &feeds, &mut commands, &mut status, &master, &period);
+        assert!(output[1] > 0.47, "the mic and the dry file use the same speaker");
+        assert!((output[2047] - 0.20).abs() < 1e-5, "only the mic is filtered");
         assert!(output.iter().step_by(2).all(|&sample| sample == 0.0));
     }
 
@@ -3687,10 +3744,10 @@ mod tests {
         let voice = Arc::new(Voice::new_live(live, 48_000, 1.0, 0.0)); // unity gain, center pan
         let (mut status_prod, _) = HeapRb::<AudioStatus>::new(64).split();
         let mut out = vec![0.0_f32; 256 * 2];
-        let (mut pl, mut pr) = (0.0_f32, 0.0_f32);
+        let mut peaks = [0.0; 2];
         let period = Arc::new(std::sync::atomic::AtomicU32::new(256));
 
-        mix_live(&mut out, 2, 48_000, &voice, &feeds, &mut status_prod, &mut pl, &mut pr, &period);
+        mix_live(&mut out, 2, 48_000, &voice, &feeds, &mut status_prod, [0, 1], &mut peaks, &period);
 
         // Center pan → both gains = sqrt(0.5) ≈ 0.707; L = 0.5·0.707 ≈ 0.354.
         assert!(out[0] > 0.34 && out[0] < 0.37, "L sample was {}", out[0]);

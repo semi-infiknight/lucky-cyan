@@ -16,7 +16,7 @@ use std::time::Duration;
 use anyhow::Result;
 use uuid::Uuid;
 
-use super::audio_engine::AudioEngine;
+use super::audio_engine::{AudioEngine, LiveVoiceRequest};
 use super::dmx_engine::{DmxChannelLevel, DmxEngine, PatchedChannel};
 use super::output_engine::{
     ContentRequest, CrossfadePhase, CrossfadeRequest, OutputEngine, OutputId, SilentSpeedOrigin,
@@ -81,20 +81,7 @@ pub trait AudioEngineApi: Send + Sync {
         channels: usize,
         sample_rate: u32,
     ) -> Result<(Uuid, ringbuf::HeapProd<f32>)>;
-    #[allow(clippy::too_many_arguments)]
-    fn play_mic_voice(
-        &self,
-        feed_id: Uuid,
-        in_l: usize,
-        in_r: usize,
-        out_l: usize,
-        out_r: usize,
-        gain: f32,
-        pan: f32,
-        fade_in_ms: u32,
-        fade_curve: FadeCurve,
-        patch_fader: Option<std::sync::Arc<super::patch_fader::PatchFader>>,
-    ) -> Result<VoiceId>;
+    fn play_mic_voice(&self, request: LiveVoiceRequest) -> Result<VoiceId>;
     fn panic_stop_all(&self) -> Result<()>;
 }
 
@@ -189,22 +176,8 @@ impl AudioEngineApi for AudioEngine {
     ) -> Result<(Uuid, ringbuf::HeapProd<f32>)> {
         AudioEngine::register_synthetic_feed(self, channels, sample_rate)
     }
-    fn play_mic_voice(
-        &self,
-        feed_id: Uuid,
-        in_l: usize,
-        in_r: usize,
-        out_l: usize,
-        out_r: usize,
-        gain: f32,
-        pan: f32,
-        fade_in_ms: u32,
-        fade_curve: FadeCurve,
-        patch_fader: Option<std::sync::Arc<super::patch_fader::PatchFader>>,
-    ) -> Result<VoiceId> {
-        AudioEngine::play_mic_voice(
-            self, feed_id, in_l, in_r, out_l, out_r, gain, pan, fade_in_ms, fade_curve, patch_fader,
-        )
+    fn play_mic_voice(&self, request: LiveVoiceRequest) -> Result<VoiceId> {
+        AudioEngine::play_mic_voice(self, request)
     }
     fn panic_stop_all(&self) -> Result<()> {
         AudioEngine::panic_stop_all(self)

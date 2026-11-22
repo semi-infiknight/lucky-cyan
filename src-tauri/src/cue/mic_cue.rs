@@ -13,7 +13,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::engine::ring_command::{FadeCurve as EngineFadeCurve, VoiceId};
+use crate::engine::{audio_engine::LiveVoiceRequest, ring_command::{FadeCurve as EngineFadeCurve, VoiceId}};
 
 use super::{
     context::{CueContext, CueEvent},
@@ -59,6 +59,8 @@ pub struct MicCue {
     pub volume_db: f64,
     /// Stereo pan (-1.0 to +1.0).
     pub pan: f32,
+    /// Input rows to logical cue output columns.
+    pub level_matrix: Option<Vec<Vec<f64>>>,
     /// Optional fade-in on GO.
     pub fade_in: Option<FadeSpec>,
     /// Optional fade-out (also used on soft stop).
@@ -93,6 +95,7 @@ impl MicCue {
             output_patch_id: None,
             volume_db: 0.0,
             pan: 0.0,
+            level_matrix: None,
             fade_in: None,
             fade_out: None,
             active_voice_id: None,
@@ -126,6 +129,11 @@ impl MicCue {
             self.input_channels.clone()
         };
 
+        let output_patch = context.resolve_patch(self.output_patch_id);
+        let named_output = output_patch.filter(|patch| patch.has_audio_effects())
+            .map(|patch| patch.named_output().map_err(anyhow::Error::msg))
+            .transpose()?.flatten();
+
         let feed_id = context
             .audio_engine
             .ensure_input_feed(Some(&device), context.audio_buffer_size)
@@ -136,7 +144,7 @@ impl MicCue {
 
         // Output Patch routing (falls back to the workspace default / 0,1).
         let (mut out_l, mut out_r) = (0usize, 1usize);
-        if let Some(op) = context.resolve_patch(self.output_patch_id) {
+        if let Some(op) = output_patch {
             if let Some(&c) = op.channels.first() {
                 out_l = c as usize;
             }
@@ -154,10 +162,18 @@ impl MicCue {
             .map(|f| (f.duration_ms as u32, Self::engine_curve(f.curve)))
             .unwrap_or((0, EngineFadeCurve::Linear));
 
-        let vid = context
-            .audio_engine
-            .play_mic_voice(feed_id, in_l, in_r, out_l, out_r, gain, self.pan, fade_ms, curve,
-                context.resolve_patch(self.output_patch_id).map(|p| context.patch_fader(p)))?;
+        let mix_channels = output_patch.map(|patch| patch.cue_mixer_channels()).unwrap_or_default();
+        let level_matrix = self.level_matrix.as_ref().and_then(|levels| {
+            super::audio_cue::build_level_matrix(levels, &mix_channels, false)
+        });
+        let vid = context.audio_engine.play_mic_voice(LiveVoiceRequest {
+            feed_id, inputs: [in_l, in_r], outputs: [out_l, out_r], gain, pan: self.pan,
+            fade_in: (fade_ms, curve), named_output, level_matrix,
+            patch_fader: output_patch.map(|patch| context.patch_fader(patch)),
+            patch_id: output_patch.map(|patch| patch.id),
+            patch_slot: output_patch.and_then(|patch| context.output_patches.iter()
+                .position(|item| item.id == patch.id).and_then(|index| u8::try_from(index).ok())),
+        })?;
         self.active_voice_id = Some(vid);
         self.action_started_at = Some(Instant::now());
         self.in_pre_wait = false;
@@ -351,8 +367,8 @@ impl Cue for MicCue {
             voice_id,
             gain: crate::cue::types::db_to_linear(self.volume_db) as f32,
             pan: self.pan,
-            matrix_mirror_mono: true,
-            level_matrix: None,
+            matrix_mirror_mono: false,
+            level_matrix: self.level_matrix.clone(),
         })
     }
 
@@ -373,6 +389,7 @@ impl Cue for MicCue {
             "output_patch_id": self.output_patch_id,
             "volume_db": self.volume_db,
             "pan": self.pan,
+            "level_matrix": self.level_matrix,
             "fade_in_ms": self.fade_in.as_ref().map(|f| f.duration_ms),
             "fade_in_curve": self.fade_in.as_ref().map(|f| f.curve),
             "fade_out_ms": self.fade_out.as_ref().map(|f| f.duration_ms),
@@ -439,6 +456,9 @@ impl CueFactory for MicCueFactory {
         }
         if let Some(pan) = value.get("pan").and_then(|v| v.as_f64()) {
             cue.pan = pan as f32;
+        }
+        if let Some(matrix) = value.get("level_matrix") {
+            cue.level_matrix = serde_json::from_value(matrix.clone())?;
         }
         if let Some(ms) = value.get("fade_in_ms").and_then(|v| v.as_u64()) {
             let curve = value.get("fade_in_curve")

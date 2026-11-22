@@ -778,9 +778,9 @@ export interface OutputPatch {
   gain_db: number;
   /** File Audio starts only on this named device. Older patches omit this. */
   require_named_device?: boolean;
-  /** Native effects on the summed file audio and Video soundtracks of this patch. */
+  /** Native effects on the summed Audio, Video and Mic signals of this patch. */
   audio_effects?: CueEffect[];
-  /** Effects on logical outputs from Audio and Video cues before device routing. */
+  /** Effects on logical outputs from Audio, Video and Mic cues before device routing. */
   cue_output_effects?: Array<{ output: number; effects: CueEffect[] }>;
 }
 
@@ -802,6 +802,7 @@ export interface MicCueData extends CueSummary {
   output_patch_id: string | null;
   volume_db: number;
   pan: number;
+  level_matrix?: number[][] | null;
   fade_in_ms: number | null;
   fade_in_curve: FadeCurve | null;
   fade_out_ms: number | null;
