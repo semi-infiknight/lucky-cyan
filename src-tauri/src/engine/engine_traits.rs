@@ -229,9 +229,9 @@ pub trait OutputEngineApi: Send + Sync {
     fn begin_voice_geometry_fade(&self, _voice_id: VoiceId, _owner: Uuid) -> Option<super::output_engine::VideoGeometry> { None }
     fn begin_voice_rotation_fade(&self, _voice_id: VoiceId, _owner: Uuid) -> Option<super::output_engine::VideoGeometry> { None }
     fn set_voice_geometry_fade(&self, _voice_id: VoiceId, _owner: Uuid, _update: super::output_engine::VideoGeometryUpdate) -> bool { false }
-    fn begin_voice_saturation_fade(&self, _voice_id: VoiceId, _owner: Uuid) -> Option<f32> { None }
-    fn set_voice_saturation_fade(&self, _voice_id: VoiceId, _owner: Uuid, _saturation: f32) -> bool { false }
-    fn set_layer_props(&self, voice_id: VoiceId, style: &super::output_engine::LayerStyle, edit_saturation: bool);
+    fn begin_voice_color_fade(&self, _voice_id: VoiceId, _owner: Uuid, _fields: [bool; 4]) -> [Option<f32>; 4] { [None; 4] }
+    fn set_voice_color_fade(&self, _voice_id: VoiceId, _owner: Uuid, _values: [Option<f32>; 4]) -> [bool; 4] { [false; 4] }
+    fn set_layer_props(&self, voice_id: VoiceId, style: &super::output_engine::LayerStyle, edit_color: [bool; 4]);
     /// The AudioEngine voice carrying a video voice's audio track, if any.
     fn video_audio_voice(&self, voice_id: VoiceId) -> Option<VoiceId>;
     /// Re-anchor a video's paired audio voice to its actual picture position.
@@ -309,14 +309,14 @@ impl OutputEngineApi for OutputEngine {
     fn set_voice_geometry_fade(&self, voice_id: VoiceId, owner: Uuid, update: super::output_engine::VideoGeometryUpdate) -> bool {
         OutputEngine::set_voice_geometry_fade(self, voice_id, owner, update)
     }
-    fn begin_voice_saturation_fade(&self, voice_id: VoiceId, owner: Uuid) -> Option<f32> {
-        OutputEngine::begin_voice_saturation_fade(self, voice_id, owner)
+    fn begin_voice_color_fade(&self, voice_id: VoiceId, owner: Uuid, fields: [bool; 4]) -> [Option<f32>; 4] {
+        OutputEngine::begin_voice_color_fade(self, voice_id, owner, fields)
     }
-    fn set_voice_saturation_fade(&self, voice_id: VoiceId, owner: Uuid, saturation: f32) -> bool {
-        OutputEngine::set_voice_saturation_fade(self, voice_id, owner, saturation)
+    fn set_voice_color_fade(&self, voice_id: VoiceId, owner: Uuid, values: [Option<f32>; 4]) -> [bool; 4] {
+        OutputEngine::set_voice_color_fade(self, voice_id, owner, values)
     }
-    fn set_layer_props(&self, voice_id: VoiceId, style: &super::output_engine::LayerStyle, edit_saturation: bool) {
-        OutputEngine::set_layer_props(self, voice_id, style, edit_saturation);
+    fn set_layer_props(&self, voice_id: VoiceId, style: &super::output_engine::LayerStyle, edit_color: [bool; 4]) {
+        OutputEngine::set_layer_props(self, voice_id, style, edit_color);
     }
     fn video_audio_voice(&self, voice_id: VoiceId) -> Option<VoiceId> {
         OutputEngine::video_audio_voice(self, voice_id)

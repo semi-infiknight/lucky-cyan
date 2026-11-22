@@ -492,7 +492,7 @@ struct RecOutput {
     crossfades: CrossfadeSim,
     picture_waits: bool,
     geometry: Mutex<std::collections::HashMap<VoiceId, (VideoGeometry, Option<Uuid>)>>,
-    saturation: Mutex<std::collections::HashMap<VoiceId, (f32, Option<Uuid>)>>,
+    picture_color: Mutex<std::collections::HashMap<VoiceId, [(f32, Option<Uuid>); 4]>>,
     silent_speed: Mutex<std::collections::HashMap<VoiceId, (f64, Option<Uuid>)>>,
 }
 impl OutputEngineApi for RecOutput {
@@ -509,7 +509,10 @@ impl OutputEngineApi for RecOutput {
         }
         let voice = Uuid::new_v4();
         self.geometry.lock().unwrap().insert(voice, (req.geometry, None));
-        self.saturation.lock().unwrap().insert(voice, (req.layer_style.saturation as f32, None));
+        let style = req.layer_style;
+        self.picture_color.lock().unwrap().insert(voice, [
+            style.saturation, style.picture_brightness, style.contrast, style.hue_degrees,
+        ].map(|value| (value as f32, None)));
         if req.allow_silent_speed && req.audio_voice_id.is_none() && self.video_audio.is_none() {
             self.silent_speed.lock().unwrap().insert(voice, (1.0, None));
         }
@@ -532,7 +535,7 @@ impl OutputEngineApi for RecOutput {
     fn stop_content(&self, voice: VoiceId, _vf: u32, _af: u32) {
         record(&self.log, EngineCall::OutputStopContent);
         self.geometry.lock().unwrap().remove(&voice);
-        self.saturation.lock().unwrap().remove(&voice);
+        self.picture_color.lock().unwrap().remove(&voice);
         self.silent_speed.lock().unwrap().remove(&voice);
     }
     fn hard_stop_current(&self) {}
@@ -573,24 +576,33 @@ impl OutputEngineApi for RecOutput {
         record(&self.log, EngineCall::OutputGeometryFade { voice, update });
         true
     }
-    fn begin_voice_saturation_fade(&self, voice: VoiceId, owner: Uuid) -> Option<f32> {
-        let mut values = self.saturation.lock().unwrap();
-        let (saturation, current_owner) = values.get_mut(&voice)?;
-        *current_owner = Some(owner);
-        Some(*saturation)
+    fn begin_voice_color_fade(&self, voice: VoiceId, owner: Uuid, fields: [bool; 4]) -> [Option<f32>; 4] {
+        let mut values = self.picture_color.lock().unwrap();
+        let Some(color) = values.get_mut(&voice) else { return [None; 4] };
+        std::array::from_fn(|index| fields[index].then(|| {
+            color[index].1 = Some(owner);
+            color[index].0
+        }))
     }
-    fn set_voice_saturation_fade(&self, voice: VoiceId, owner: Uuid, saturation: f32) -> bool {
-        let mut values = self.saturation.lock().unwrap();
-        let Some((current, current_owner)) = values.get_mut(&voice) else { return false };
-        if *current_owner != Some(owner) { return false; }
-        *current = saturation;
-        record(&self.log, EngineCall::OutputSaturationFade { voice, saturation });
-        true
+    fn set_voice_color_fade(&self, voice: VoiceId, owner: Uuid, updates: [Option<f32>; 4]) -> [bool; 4] {
+        let mut values = self.picture_color.lock().unwrap();
+        let Some(color) = values.get_mut(&voice) else { return [false; 4] };
+        std::array::from_fn(|index| {
+            let Some(value) = updates[index] else { return false };
+            if color[index].1 != Some(owner) { return false; }
+            color[index].0 = value;
+            if index == 0 {
+                record(&self.log, EngineCall::OutputSaturationFade { voice, saturation: value });
+            }
+            true
+        })
     }
-    fn set_layer_props(&self, voice: VoiceId, style: &inkue_lib::engine::output_engine::LayerStyle, edit_saturation: bool) {
-        if edit_saturation {
-            if let Some(value) = self.saturation.lock().unwrap().get_mut(&voice) {
-                *value = (style.saturation as f32, None);
+    fn set_layer_props(&self, voice: VoiceId, style: &inkue_lib::engine::output_engine::LayerStyle, edits: [bool; 4]) {
+        let mut values = self.picture_color.lock().unwrap();
+        if let Some(color) = values.get_mut(&voice) {
+            let source = [style.saturation, style.picture_brightness, style.contrast, style.hue_degrees];
+            for (index, edit) in edits.into_iter().enumerate() {
+                if edit { color[index] = (source[index] as f32, None); }
             }
         }
     }
@@ -602,7 +614,7 @@ impl OutputEngineApi for RecOutput {
     }
     fn stop_voice(&self, voice: VoiceId, _f: u32) -> Result<()> {
         self.geometry.lock().unwrap().remove(&voice);
-        self.saturation.lock().unwrap().remove(&voice);
+        self.picture_color.lock().unwrap().remove(&voice);
         self.silent_speed.lock().unwrap().remove(&voice);
         Ok(())
     }
@@ -721,7 +733,7 @@ fn build_recording_context(
             crossfades: crossfades.clone(),
             picture_waits,
             geometry: Mutex::new(std::collections::HashMap::new()),
-            saturation: Mutex::new(std::collections::HashMap::new()),
+            picture_color: Mutex::new(std::collections::HashMap::new()),
             silent_speed: Mutex::new(std::collections::HashMap::new()),
         }),
         tx,

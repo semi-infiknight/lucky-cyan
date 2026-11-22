@@ -525,7 +525,7 @@ fn saturation_only_fade_keeps_geometry_and_returns_to_saved_colour_on_fresh_go()
     assert!(ctx.output_engine.begin_voice_geometry_fade(voice, owner).is_some());
 
     go(&mut transport, &mut list, fade_id);
-    ctx.output_engine.set_layer_props(voice, &LayerStyle { opacity: 0.7, ..LayerStyle::default() }, false);
+    ctx.output_engine.set_layer_props(voice, &LayerStyle { opacity: 0.7, ..LayerStyle::default() }, [false; 4]);
     run_for(&mut list, &ctx, Duration::from_millis(20));
     assert!(log.lock().unwrap().iter().any(|call|
         matches!(call, EngineCall::OutputSaturationFade { voice: id, saturation }
@@ -533,13 +533,43 @@ fn saturation_only_fade_keeps_geometry_and_returns_to_saved_colour_on_fresh_go()
     assert!(translations(&log).is_empty());
     assert!(opacity_writes(&log).is_empty());
     assert!(ctx.output_engine.set_voice_geometry_fade(voice, owner, Default::default()));
-    assert_eq!(ctx.output_engine.begin_voice_saturation_fade(voice, Uuid::new_v4()), Some(0.25));
+    assert_eq!(ctx.output_engine.begin_voice_color_fade(voice, Uuid::new_v4(), [true, false, false, false])[0], Some(0.25));
 
     list.get_mut(&target_id).unwrap().stop(&ctx).unwrap();
     go(&mut transport, &mut list, target_id);
     let fresh = list.get(&target_id).unwrap().playing_voice_id().unwrap();
     assert_ne!(fresh, voice);
-    assert_eq!(ctx.output_engine.begin_voice_saturation_fade(fresh, Uuid::new_v4()), Some(1.0));
+    assert_eq!(ctx.output_engine.begin_voice_color_fade(fresh, Uuid::new_v4(), [true, false, false, false])[0], Some(1.0));
+}
+
+#[test]
+fn picture_color_fade_can_revert_parameters_independently_after_live_edits() {
+    use inkue_lib::engine::output_engine::PictureColorParameter::{Contrast, Hue};
+
+    let registry = full_registry();
+    let (ctx, _rx, _) = recording_context();
+    let target = video(&registry, "colour.mp4");
+    let target_id = target.id();
+    let mut fade = position_fade(target_id, 0);
+    fade.target_translation = None;
+    fade.target_picture_brightness = Some(-0.25);
+    fade.target_contrast = Some(1.75);
+    fade.target_hue_degrees = Some(120.0);
+    let fade_id = fade.id();
+    let mut list = list_of(vec![target, Box::new(fade)]);
+    let mut transport = Transport::new(ctx.clone());
+    go(&mut transport, &mut list, target_id);
+    let voice = list.get(&target_id).unwrap().playing_voice_id().unwrap();
+    go(&mut transport, &mut list, fade_id);
+    run_for(&mut list, &ctx, Duration::from_millis(20));
+
+    let style = LayerStyle { picture_brightness: 0.375, ..LayerStyle::default() };
+    ctx.output_engine.set_layer_props(voice, &style, [false, true, false, false]);
+    let result = crossfade::revert_picture_fade(&mut list, ctx.output_engine.as_ref(), fade_id).unwrap();
+    assert_eq!(result.other_color, [Contrast, Hue]);
+    assert!(!result.geometry && !result.saturation);
+    assert_eq!(ctx.output_engine.begin_voice_color_fade(voice, Uuid::new_v4(), [true; 4]),
+        [Some(1.0), Some(0.375), Some(1.0), Some(0.0)]);
 }
 
 #[test]
@@ -558,14 +588,14 @@ fn manual_geometry_and_saturation_edits_release_only_their_own_part_of_a_combine
         let voice = list.get(&target_id).unwrap().playing_voice_id().unwrap();
         go(&mut transport, &mut list, fade_id);
         if edit_colour {
-            ctx.output_engine.set_layer_props(voice, &LayerStyle::default(), true);
+            ctx.output_engine.set_layer_props(voice, &LayerStyle::default(), [true, false, false, false]);
         } else {
             ctx.output_engine.apply_geometry(voice, &VideoGeometry::default());
         }
         run_for(&mut list, &ctx, Duration::from_millis(20));
         assert_eq!(!translations(&log).is_empty(), edit_colour);
         let expected = if edit_colour { 1.0 } else { 0.0 };
-        assert_eq!(ctx.output_engine.begin_voice_saturation_fade(voice, Uuid::new_v4()), Some(expected));
+        assert_eq!(ctx.output_engine.begin_voice_color_fade(voice, Uuid::new_v4(), [true, false, false, false])[0], Some(expected));
     }
 }
 
@@ -585,7 +615,7 @@ fn picture_fade_revert_uses_the_original_live_voice_and_respects_later_owners() 
     let voice = list.get(&target_id).unwrap().playing_voice_id().unwrap();
     let original = VideoGeometry { pan_x: -0.25, pan_y: -0.5, scale: 0.75, ..Default::default() };
     ctx.output_engine.apply_geometry(voice, &original);
-    ctx.output_engine.set_layer_props(voice, &LayerStyle { saturation: 0.75, ..LayerStyle::default() }, true);
+    ctx.output_engine.set_layer_props(voice, &LayerStyle { saturation: 0.75, ..LayerStyle::default() }, [true, false, false, false]);
 
     go(&mut transport, &mut list, fade_id);
     run_for(&mut list, &ctx, Duration::from_millis(20));
@@ -620,14 +650,14 @@ fn picture_fade_revert_uses_the_original_live_voice_and_respects_later_owners() 
     run_for(&mut list, &ctx, Duration::from_millis(20));
     list.get_mut(&fade_id).unwrap().reset().unwrap();
     let later_owner = Uuid::new_v4();
-    let saturation = ctx.output_engine.begin_voice_saturation_fade(voice, later_owner).unwrap();
+    let saturation = ctx.output_engine.begin_voice_color_fade(voice, later_owner, [true, false, false, false])[0].unwrap();
     assert_eq!(saturation, 0.25);
-    assert!(ctx.output_engine.set_voice_saturation_fade(voice, later_owner, 1.25));
+    assert!(ctx.output_engine.set_voice_color_fade(voice, later_owner, [Some(1.25), None, None, None])[0]);
     log.lock().unwrap().clear();
     let result = crossfade::revert_picture_fade(&mut list, ctx.output_engine.as_ref(), fade_id).unwrap();
     assert!(result.geometry && !result.saturation);
     assert_eq!(log.lock().unwrap().len(), 1);
-    assert_eq!(ctx.output_engine.begin_voice_saturation_fade(voice, Uuid::new_v4()), Some(1.25));
+    assert_eq!(ctx.output_engine.begin_voice_color_fade(voice, Uuid::new_v4(), [true, false, false, false])[0], Some(1.25));
 
     go(&mut transport, &mut list, fade_id);
     run_for(&mut list, &ctx, Duration::from_millis(20));

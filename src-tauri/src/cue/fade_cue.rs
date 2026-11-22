@@ -29,7 +29,7 @@ use crate::{
     engine::{
         cue_effects::{EQ_GAIN_RANGE, MAX_FREQUENCY, MIN_FREQUENCY},
         output_engine::{
-            CrossfadePhase, SilentSpeedOrigin, VideoGeometry, VideoGeometryUpdate, VideoTranslation,
+            CrossfadePhase, PictureColorParameter, SilentSpeedOrigin, VideoGeometry, VideoGeometryUpdate, VideoTranslation,
         },
         rate_fader::{normalize_rate, RateFade, RateFader, ScalarFade, ScalarFader},
         ring_command::FadeCurve as EngineFadeCurve,
@@ -64,7 +64,7 @@ enum VisualGeometryRun {
         relative: Option<RelativeGeometry>,
         waypoints: Vec<[f64; 2]>,
         smooth_path: bool,
-        saturation_destination: Option<f32>,
+        color_destinations: [Option<f32>; 4],
     },
     Declined,
     Active {
@@ -76,14 +76,14 @@ enum VisualGeometryRun {
         rotation_delta_degrees: Option<f64>,
         waypoints: Vec<[f64; 2]>,
         smooth_path: bool,
-        saturation: Option<(f32, f32)>,
+        color: [Option<(f32, f32)>; 4],
     },
 }
 
 impl VisualGeometryRun {
     fn update(&mut self, context: &CueContext, rising: f64, falling: f64, elapsed: f64) -> bool {
         let Self::Active { voice, owner, start, destination, rotation_delta_degrees,
-            waypoints, smooth_path, saturation, .. } = self else { return false };
+            waypoints, smooth_path, color, .. } = self else { return false };
         if start.is_some_and(|origin| {
             let update = sample_visual_geometry(
                 origin, *destination, *rotation_delta_degrees, waypoints, *smooth_path, (rising, falling, elapsed),
@@ -92,17 +92,20 @@ impl VisualGeometryRun {
         }) {
             *start = None;
         }
-        if saturation.is_some_and(|(origin, end)| {
-            let value = sample_picture_value(origin.into(), end.into(), rising, falling, elapsed) as f32;
-            !context.output_engine.set_voice_saturation_fade(*voice, *owner, value)
-        }) {
-            *saturation = None;
+        if color.iter().any(Option::is_some) {
+            let values = color.map(|field| field.map(|(origin, end)| {
+                sample_picture_value(origin.into(), end.into(), rising, falling, elapsed) as f32
+            }));
+            let written = context.output_engine.set_voice_color_fade(*voice, *owner, values);
+            for (field, written) in color.iter_mut().zip(written) {
+                if !written { *field = None; }
+            }
         }
-        start.is_some() || saturation.is_some()
+        start.is_some() || color.iter().any(Option::is_some)
     }
 
     fn completed_picture(&self) -> Option<CompletedPictureFade> {
-        let Self::Active { target, voice, owner, start, destination, saturation, .. } = self else {
+        let Self::Active { target, voice, owner, start, destination, color, .. } = self else {
             return None;
         };
         let geometry = start.and_then(|origin| {
@@ -121,13 +124,13 @@ impl VisualGeometryRun {
             (translation.is_some() || scale.is_some() || rotation_degrees.is_some())
                 .then_some(VideoGeometryUpdate { translation, scale, rotation_degrees })
         });
-        let saturation = saturation.filter(|(start, end)| start != end).map(|(start, _)| start);
-        (geometry.is_some() || saturation.is_some()).then_some(CompletedPictureFade {
+        let color = color.map(|field| field.filter(|(start, end)| start != end).map(|(start, _)| start));
+        (geometry.is_some() || color.iter().any(Option::is_some)).then_some(CompletedPictureFade {
             target: *target,
             voice: *voice,
             owner: *owner,
             geometry,
-            saturation,
+            color,
         })
     }
 }
@@ -137,13 +140,14 @@ struct CompletedPictureFade {
     voice: CueId,
     owner: Uuid,
     geometry: Option<VideoGeometryUpdate>,
-    saturation: Option<f32>,
+    color: [Option<f32>; 4],
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PictureFadeRevertResult {
     pub geometry: bool,
     pub saturation: bool,
+    pub other_color: Vec<PictureColorParameter>,
 }
 
 /// Changes to apply to one picture's geometry when its Fade starts.
@@ -366,6 +370,9 @@ pub struct FadeCue {
     pub target_rotation_delta_degrees: Option<f64>,
     /// Absolute layer saturation between monochrome and twice the original saturation.
     pub target_saturation: Option<f64>,
+    pub target_picture_brightness: Option<f64>,
+    pub target_contrast: Option<f64>,
+    pub target_hue_degrees: Option<f64>,
     pub target_map_motion: Option<super::point_mix::MapMotion>,
     /// When `true` (default) the fade drives the target volume toward
     /// `target_volume_db`. Set `false` for a **pan-only** fade that must leave the
@@ -459,6 +466,9 @@ impl FadeCue {
             target_rotation_degrees: None,
             target_rotation_delta_degrees: None,
             target_saturation: None,
+            target_picture_brightness: None,
+            target_contrast: None,
+            target_hue_degrees: None,
             target_map_motion: None,
             fade_volume: true,
             fade_duration_ms: 2000,
@@ -515,11 +525,17 @@ impl FadeCue {
         let geometry = record.geometry.is_some_and(|original| {
             output.set_voice_geometry_fade(record.voice, record.owner, original)
         });
-        let saturation = record.saturation.is_some_and(|original| {
-            output.set_voice_saturation_fade(record.voice, record.owner, original)
-        });
-        anyhow::ensure!(geometry || saturation, "A later edit or Fade took control of the picture settings.");
-        Ok(PictureFadeRevertResult { geometry, saturation })
+        let written = if record.color.iter().any(Option::is_some) {
+            output.set_voice_color_fade(record.voice, record.owner, record.color)
+        } else {
+            [false; 4]
+        };
+        anyhow::ensure!(geometry || written.contains(&true), "A later edit or Fade took control of the picture settings.");
+        let saturation = written[PictureColorParameter::Saturation as usize];
+        let other_color = PictureColorParameter::ALL.into_iter()
+            .filter(|&parameter| parameter != PictureColorParameter::Saturation && written[parameter as usize])
+            .collect();
+        Ok(PictureFadeRevertResult { geometry, saturation, other_color })
     }
 
     /// The legacy single-curve name for this cue, so an older Inkue opening the
@@ -552,7 +568,7 @@ impl FadeCue {
             anyhow::ensure!(self.continue_mode == ContinueMode::DoNotContinue && !self.stop_at_end,
                 "Loop path needs Do Not Continue and Stop at end off");
             anyhow::ensure!(self.target_scale.is_none() && !self.has_rotation_goal()
-                && self.target_saturation.is_none() && !self.fade_volume && !self.fade_brightness
+                && !self.has_color_goal() && !self.fade_volume && !self.fade_brightness
                 && self.target_pan.is_none() && self.target_rate.is_none() && self.effect_destination().is_none()
                 && self.target_map_motion.is_none() && self.target_silent_speed.is_none() && self.patch_target_id.is_none(),
                 "Use a dedicated position-only Fade for Loop path");
@@ -563,7 +579,15 @@ impl FadeCue {
     fn has_picture_goal(&self) -> bool {
         self.target_translation.is_some() || self.target_scale.is_some()
             || self.target_relative_geometry.is_some_and(RelativeGeometry::active)
-            || self.has_rotation_goal() || self.target_saturation.is_some()
+            || self.has_rotation_goal() || self.has_color_goal()
+    }
+
+    fn color_destinations(&self) -> [Option<f64>; 4] {
+        [self.target_saturation, self.target_picture_brightness, self.target_contrast, self.target_hue_degrees]
+    }
+
+    fn has_color_goal(&self) -> bool {
+        self.color_destinations().iter().any(Option::is_some)
     }
 
     fn has_rotation_goal(&self) -> bool {
@@ -602,6 +626,12 @@ impl FadeCue {
         }
         anyhow::ensure!(self.target_saturation.is_none_or(|value| (0.0..=2.0).contains(&value)),
             "Choose saturation between 0% and 200%");
+        anyhow::ensure!(self.target_picture_brightness.is_none_or(|value| PictureColorParameter::Brightness.range().contains(&value)),
+            "Choose picture brightness between −1 and +1");
+        anyhow::ensure!(self.target_contrast.is_none_or(|value| PictureColorParameter::Contrast.range().contains(&value)),
+            "Choose contrast between 0.25× and 4×");
+        anyhow::ensure!(self.target_hue_degrees.is_none_or(|value| PictureColorParameter::Hue.range().contains(&value)),
+            "Choose a hue angle between −180° and +180°");
         anyhow::ensure!(self.target_rotation_degrees.is_none_or(VideoGeometryUpdate::valid_rotation),
             "Choose a rotation angle from 0° up to, but excluding, 360°");
         anyhow::ensure!(self.target_rotation_delta_degrees.is_none_or(|delta| ROTATION_TURN_RANGE.contains(&delta)),
@@ -811,7 +841,7 @@ impl Cue for FadeCue {
         let geometry_run = if self.has_picture_goal() && self.effect_destination().is_none() {
             let [target] = self.target_cue_ids.as_slice() else {
                 if self.has_rotation_goal() { anyhow::bail!(ROTATION_TARGET_REQUIRED); }
-                anyhow::bail!("A position, scale or saturation Fade needs one Video, Image, or Camera target");
+                anyhow::bail!("A position, scale, or color Fade needs one Video, Image, or Camera target");
             };
             anyhow::ensure!(self.crossfade_into.is_none(), "Use a separate Fade cue for the dissolve");
             anyhow::ensure!(self.target_translation.is_none_or(VideoTranslation::is_valid),
@@ -826,7 +856,7 @@ impl Cue for FadeCue {
                 rotation_delta_degrees: self.target_rotation_delta_degrees,
                 waypoints: self.translation_waypoints.clone(),
                 smooth_path: self.smooth_translation_path,
-                saturation_destination: self.target_saturation.map(|value| value as f32),
+                color_destinations: self.color_destinations().map(|field| field.map(|value| value as f32)),
             }
         } else {
             VisualGeometryRun::Idle
@@ -1444,7 +1474,7 @@ impl Cue for FadeCue {
 
     fn set_geometry_voice(&mut self, voice: Option<CueId>, context: &CueContext) {
         let VisualGeometryRun::Pending { target, destination, relative, rotation_delta_degrees,
-            waypoints, smooth_path, saturation_destination } = &mut self.geometry_run else { return };
+            waypoints, smooth_path, color_destinations } = &mut self.geometry_run else { return };
         let (target, mut destination, relative, rotation_delta_degrees, waypoints, smooth_path) =
             (*target, *destination, *relative, *rotation_delta_degrees, std::mem::take(waypoints), *smooth_path);
         let owner = Uuid::new_v4();
@@ -1472,10 +1502,14 @@ impl Cue for FadeCue {
             self.geometry_run = VisualGeometryRun::Declined;
             return;
         };
-        let saturation = saturation_destination.and_then(|destination| {
-            context.output_engine.begin_voice_saturation_fade(voice, owner).map(|origin| (origin, destination))
-        });
-        if start.is_none() && saturation.is_none() {
+        let fields = color_destinations.map(|value| value.is_some());
+        let origins = if fields.contains(&true) {
+            context.output_engine.begin_voice_color_fade(voice, owner, fields)
+        } else {
+            [None; 4]
+        };
+        let color: [Option<(f32, f32)>; 4] = std::array::from_fn(|index| origins[index].zip(color_destinations[index]));
+        if start.is_none() && color.iter().all(Option::is_none) {
             self.geometry_run = VisualGeometryRun::Declined;
             return;
         }
@@ -1503,7 +1537,7 @@ impl Cue for FadeCue {
             }).into_iter().collect();
         }
         self.geometry_run = VisualGeometryRun::Active {
-            target, voice, owner, start, destination, rotation_delta_degrees, waypoints, smooth_path, saturation,
+            target, voice, owner, start, destination, rotation_delta_degrees, waypoints, smooth_path, color,
         };
     }
 
@@ -1573,7 +1607,7 @@ impl Cue for FadeCue {
                     issues.push(CueIssue::error(ROTATION_TARGET_REQUIRED));
                 }
             } else if !matches!(self.target_cue_ids.as_slice(), [target] if ctx.visual_cue_ids.contains(target)) {
-                issues.push(CueIssue::error("A position, scale or saturation Fade needs one Video, Image, or Camera target"));
+                issues.push(CueIssue::error("A position, scale, or color Fade needs one Video, Image, or Camera target"));
             }
             if self.crossfade_into.is_some() {
                 issues.push(CueIssue::error("Use a separate Fade cue for the dissolve"));
@@ -1644,13 +1678,21 @@ impl Cue for FadeCue {
             "crossfade_into_id": self.crossfade_into.map(|id| id.to_string()),
             "is_disabled": self.is_disabled,
         });
+        for (key, destination) in [
+            ("target_picture_brightness", self.target_picture_brightness),
+            ("target_contrast", self.target_contrast),
+            ("target_hue_degrees", self.target_hue_degrees),
+        ] {
+            saved[key] = json!(destination);
+        }
         // Decoders predating EQ automation ignore its destination. Leave them
         // no other action to apply to the target when they read this Fade.
         if self.target_eq_gain.is_some() {
             for field in [
                 "patch_target_id", "target_pan", "target_rate", "target_silent_speed",
                 "target_translation", "target_scale", "target_rotation_degrees", "target_rotation_delta_degrees",
-                "target_saturation", "target_map_motion", "crossfade_into_id",
+                "target_saturation", "target_picture_brightness", "target_contrast", "target_hue_degrees",
+                "target_map_motion", "crossfade_into_id",
             ] {
                 saved[field] = Value::Null;
             }
@@ -1784,6 +1826,15 @@ impl CueFactory for FadeCueFactory {
         }
         if let Some(saturation) = value.get("target_saturation") {
             cue.target_saturation = serde_json::from_value(saturation.clone())?;
+        }
+        for (key, target) in [
+            ("target_picture_brightness", &mut cue.target_picture_brightness),
+            ("target_contrast", &mut cue.target_contrast),
+            ("target_hue_degrees", &mut cue.target_hue_degrees),
+        ] {
+            if let Some(value) = value.get(key) {
+                *target = serde_json::from_value(value.clone())?;
+            }
         }
         cue.validate_picture_goals()?;
         if let Some(b) = value.get("fade_brightness").and_then(Value::as_bool) {

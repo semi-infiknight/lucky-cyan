@@ -298,6 +298,38 @@ fn deserialize_hue_degrees<'de, D: serde::Deserializer<'de>>(decoder: D) -> Resu
     deserialize_picture_parameter(decoder, 0.0, -180.0, 180.0)
 }
 
+/// Index order used by the live compositor color controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PictureColorParameter {
+    Saturation,
+    Brightness,
+    Contrast,
+    Hue,
+}
+
+impl PictureColorParameter {
+    pub const ALL: [Self; 4] = [Self::Saturation, Self::Brightness, Self::Contrast, Self::Hue];
+
+    pub fn layer_key(self) -> &'static str {
+        match self {
+            Self::Saturation => "saturation",
+            Self::Brightness => "picture_brightness",
+            Self::Contrast => "contrast",
+            Self::Hue => "hue_degrees",
+        }
+    }
+
+    pub fn range(self) -> std::ops::RangeInclusive<f64> {
+        match self {
+            Self::Saturation => 0.0..=2.0,
+            Self::Brightness => -1.0..=1.0,
+            Self::Contrast => 0.25..=4.0,
+            Self::Hue => -180.0..=180.0,
+        }
+    }
+}
+
 /// How a visual cue sits in the layer compositor (QLab model): its stacking
 /// order, base opacity and blend mode.  Fade in/out and Fade Cues animate a
 /// separate runtime multiplier on top of `opacity`.
@@ -352,15 +384,12 @@ impl Default for LayerStyle {
 }
 
 impl LayerStyle {
-    pub(super) fn source_saturation(&self) -> f32 {
-        normalize_saturation(self.saturation) as f32
-    }
-
-    pub(super) fn source_tone(&self) -> [f32; 3] {
+    pub(super) fn source_color(&self) -> [f32; 4] {
         [
+            normalize_saturation(self.saturation) as f32,
             normalize_picture_parameter(self.picture_brightness, 0.0, -1.0, 1.0) as f32,
             normalize_picture_parameter(self.contrast, default_contrast(), 0.25, 4.0) as f32,
-            normalize_picture_parameter(self.hue_degrees, 0.0, -180.0, 180.0) as f32 / 360.0,
+            normalize_picture_parameter(self.hue_degrees, 0.0, -180.0, 180.0) as f32,
         ]
     }
 
@@ -839,7 +868,7 @@ mod tests {
             "opacity": 0.4, "picture_brightness": "bad", "contrast": 20.0, "hue_degrees": -200.0
         })).unwrap();
         assert_eq!(normalized.opacity, 0.4);
-        assert_eq!(normalized.source_tone(), [0.0, 4.0, -0.5]);
+        assert_eq!(normalized.source_color(), [1.0, 0.0, 4.0, -180.0]);
     }
 
     #[test]

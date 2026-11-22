@@ -32,7 +32,7 @@ use super::blend::BlendMode;
 use super::crossfade::{CrossfadeLink, Departure, Outgoing};
 use super::output::{all_slots, slot_for_voice, wake_signal, Output};
 use super::types::{
-    CrossfadePhase, CrossfadeRequest, LayerStyle, MpvCtx, OutputId, OutputStatus, SilentSpeedOrigin,
+    CrossfadePhase, CrossfadeRequest, LayerStyle, MpvCtx, OutputId, OutputStatus, PictureColorParameter, SilentSpeedOrigin,
     VideoGeometry, VoiceId,
 };
 use super::{cs, opt_str, try_apply_crop, OUTPUT_STATUS_TX};
@@ -188,11 +188,9 @@ pub(super) struct SlotState {
     /// sequence breaks ties (newest on top).  See [`resolve_layer_key`].
     pub layer_key: u64,
     pub blend_mode: BlendMode,
-    pub saturation: f32,
-    /// Source brightness, contrast and hue in turns.
-    pub source_tone: [f32; 3],
-    /// The active saturation Fade is independent of the slot's geometry Fade.
-    pub saturation_owner: Option<Uuid>,
+    live_color: [f32; 4],
+    /// Each source color parameter can be held by a different Fade.
+    color_owners: [Option<Uuid>; 4],
     saturation_preview: Option<SaturationPreview>,
     pub silent_speed: Option<SilentSpeed>,
     whole_loop: Option<WholeLoop>,
@@ -263,6 +261,8 @@ struct SaturationPreview {
     expires_at: Instant,
 }
 
+const SATURATION: usize = PictureColorParameter::Saturation as usize;
+
 impl SlotState {
     pub(super) fn preview_saturation(&mut self, voice: VoiceId, token: Uuid, value: f32, expires_at: Instant) -> bool {
         if self.voice_id != Some(voice) || self.preloaded || self.pending_unload
@@ -289,27 +289,43 @@ impl SlotState {
 
     pub(super) fn effective_saturation(&self, now: Instant) -> f32 {
         self.saturation_preview.as_ref().filter(|preview| now < preview.expires_at)
-            .map_or(self.saturation, |preview| preview.value)
+            .map_or(self.live_color[SATURATION], |preview| preview.value)
     }
 
-    pub(super) fn claim_saturation(&mut self, voice: VoiceId, owner: Uuid) -> Option<f32> {
+    pub(super) fn color_uniform(&self, now: Instant) -> [f32; 4] {
+        let [_, brightness, contrast, hue] = self.live_color;
+        [self.effective_saturation(now), brightness, contrast, hue / 360.0]
+    }
+
+    pub(super) fn claim_color(&mut self, voice: VoiceId, owner: Uuid, fields: [bool; 4]) -> [Option<f32>; 4] {
         if self.voice_id != Some(voice) || self.preloaded || self.pending_unload {
-            return None;
+            return [None; 4];
         }
-        self.saturation_preview = None;
-        self.saturation_owner = Some(owner);
-        Some(self.saturation)
+        if fields[SATURATION] {
+            self.saturation_preview = None;
+        }
+        std::array::from_fn(|index| {
+            fields[index].then(|| {
+                self.color_owners[index] = Some(owner);
+                self.live_color[index]
+            })
+        })
     }
 
-    pub(super) fn write_saturation(&mut self, voice: VoiceId, owner: Uuid, value: f32) -> bool {
-        if self.voice_id != Some(voice) || self.saturation_owner != Some(owner) || self.pending_unload
-            || !(0.0..=2.0).contains(&value)
-        {
-            return false;
+    pub(super) fn write_color(&mut self, voice: VoiceId, owner: Uuid, values: [Option<f32>; 4]) -> [bool; 4] {
+        if self.voice_id != Some(voice) || self.pending_unload {
+            return [false; 4];
         }
-        self.saturation_preview = None;
-        self.saturation = value;
-        true
+        PictureColorParameter::ALL.map(|parameter| {
+            let index = parameter as usize;
+            let Some(value) = values[index] else { return false };
+            if self.color_owners[index] != Some(owner) || !parameter.range().contains(&f64::from(value)) {
+                return false;
+            }
+            if index == SATURATION { self.saturation_preview = None; }
+            self.live_color[index] = value;
+            true
+        })
     }
 
     pub(super) fn accepts_rotation_fade(&self) -> bool {
@@ -341,9 +357,8 @@ impl SlotState {
             crop_applied: true,
             layer_key: 0,
             blend_mode: BlendMode::Normal,
-            saturation: 1.0,
-            source_tone: LayerStyle::default().source_tone(),
-            saturation_owner: None,
+            live_color: LayerStyle::default().source_color(),
+            color_owners: [None; 4],
             saturation_preview: None,
             silent_speed: None,
             whole_loop: None,
@@ -366,12 +381,16 @@ impl SlotState {
         }
     }
 
-    fn apply_layer_style(&mut self, style: &LayerStyle, edit_saturation: bool) {
+    fn apply_layer_style(&mut self, style: &LayerStyle, edit_color: [bool; 4]) {
         self.blend_mode = style.blend_mode;
-        self.source_tone = style.source_tone();
-        if edit_saturation {
-            self.saturation = style.source_saturation();
-            self.saturation_owner = None;
+        let source = style.source_color();
+        for (index, edited) in edit_color.into_iter().enumerate() {
+            if edited {
+                self.live_color[index] = source[index];
+                self.color_owners[index] = None;
+            }
+        }
+        if edit_color[SATURATION] {
             self.saturation_preview = None;
         }
         // Preserve the GO sequence part when an explicit layer has been edited.
@@ -1027,9 +1046,8 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) -> Result<()
         st.crop_applied = load.still_raster.is_some() || !load.geometry.has_crop();
         st.layer_key = resolve_layer_key(load.layer_style.layer, seq);
         st.blend_mode = load.layer_style.blend_mode;
-        st.saturation = load.layer_style.source_saturation();
-        st.source_tone = load.layer_style.source_tone();
-        st.saturation_owner = None;
+        st.live_color = load.layer_style.source_color();
+        st.color_owners = [None; 4];
         st.saturation_preview = None;
         st.silent_speed = load.allow_silent_speed.then(|| SilentSpeed::pending(load.url.clone()));
         st.whole_loop = load.allow_whole_loop_release.then(|| WholeLoop {
@@ -1602,10 +1620,10 @@ pub(super) fn dissolve_of(slot: &Arc<VideoSlot>, now: Instant) -> Option<(Vec<Vo
 // ---------------------------------------------------------------------------
 
 /// Keep the active opacity when editing the layer's color or stacking.
-pub(super) fn set_layer_style(slot: &Arc<VideoSlot>, voice: VoiceId, style: &LayerStyle, edit_saturation: bool) {
+pub(super) fn set_layer_style(slot: &Arc<VideoSlot>, voice: VoiceId, style: &LayerStyle, edit_color: [bool; 4]) {
     if let Ok(mut st) = slot.state.lock() {
         if st.voice_id != Some(voice) { return; }
-        st.apply_layer_style(style, edit_saturation);
+        st.apply_layer_style(style, edit_color);
     }
     slot.wake();
 }
@@ -2234,20 +2252,20 @@ mod tests {
         let now = Instant::now();
         let deadline = now + Duration::from_secs(2);
 
-        assert_eq!(state.claim_saturation(voice, previous), Some(1.0));
-        assert!(state.write_saturation(voice, previous, 1.25));
+        assert_eq!(state.claim_color(voice, previous, [true, false, false, false])[SATURATION], Some(1.0));
+        assert!(state.write_color(voice, previous, [Some(1.25), None, None, None])[SATURATION]);
         assert!(state.preview_saturation(voice, token, 0.0, deadline));
         assert_eq!(state.effective_saturation(now), 0.0);
         assert_eq!(state.effective_saturation(deadline), 1.25);
-        assert_eq!(state.saturation_owner, Some(previous));
+        assert_eq!(state.color_owners[SATURATION], Some(previous));
 
-        assert!(state.write_saturation(voice, previous, 1.0));
+        assert!(state.write_color(voice, previous, [Some(1.0), None, None, None])[SATURATION]);
         assert_eq!(state.effective_saturation(now), 1.0);
         assert!(state.preview_saturation(voice, token, 0.25, deadline));
-        assert_eq!(state.claim_saturation(voice, next), Some(1.0));
-        assert!(state.write_saturation(voice, next, 1.75));
+        assert_eq!(state.claim_color(voice, next, [true, false, false, false])[SATURATION], Some(1.0));
+        assert!(state.write_color(voice, next, [Some(1.75), None, None, None])[SATURATION]);
         assert!(!state.cancel_saturation_preview(voice, token));
-        assert!(!state.write_saturation(voice, previous, 0.0));
+        assert!(!state.write_color(voice, previous, [Some(0.0), None, None, None])[SATURATION]);
         assert_eq!(state.effective_saturation(now), 1.75);
     }
 
@@ -2279,9 +2297,9 @@ mod tests {
         assert!(!state.cancel_saturation_preview(voice, first));
         assert_eq!(state.effective_saturation(now), 0.5);
 
-        state.apply_layer_style(&LayerStyle::default(), false);
+        state.apply_layer_style(&LayerStyle::default(), [false; 4]);
         assert_eq!(state.effective_saturation(now), 0.5);
-        state.apply_layer_style(&LayerStyle { saturation: 1.5, ..LayerStyle::default() }, true);
+        state.apply_layer_style(&LayerStyle { saturation: 1.5, ..LayerStyle::default() }, [true, false, false, false]);
         assert_eq!(state.effective_saturation(now), 1.5);
         assert!(!state.cancel_saturation_preview(voice, second));
     }
@@ -2532,32 +2550,32 @@ mod tests {
         };
         let geometry_owner = Uuid::new_v4();
         state.geometry_owner = Some(geometry_owner);
-        state.saturation_owner = Some(Uuid::new_v4());
-        state.apply_layer_style(&style, true);
-        assert_eq!(state.saturation, 0.0);
+        state.color_owners[SATURATION] = Some(Uuid::new_v4());
+        state.apply_layer_style(&style, [true, false, false, false]);
+        assert_eq!(state.live_color[SATURATION], 0.0);
         assert_eq!(state.anim.current, 0.35);
-        assert_eq!(state.saturation_owner, None);
+        assert_eq!(state.color_owners[SATURATION], None);
         assert_eq!(state.geometry_owner, Some(geometry_owner));
 
         let saturation_owner = Uuid::new_v4();
-        state.saturation_owner = Some(saturation_owner);
+        state.color_owners[SATURATION] = Some(saturation_owner);
         style.opacity = 0.7;
         style.saturation = 1.0;
-        state.apply_layer_style(&style, false);
+        state.apply_layer_style(&style, [false; 4]);
         assert_eq!(state.anim.current, 0.7);
-        assert_eq!(state.saturation, 0.0);
-        assert_eq!(state.saturation_owner, Some(saturation_owner));
+        assert_eq!(state.live_color[SATURATION], 0.0);
+        assert_eq!(state.color_owners[SATURATION], Some(saturation_owner));
         style.picture_brightness = 0.125;
         style.contrast = 1.5;
         style.hue_degrees = 90.0;
-        state.apply_layer_style(&style, false);
-        assert_eq!(state.source_tone, [0.125, 1.5, 0.25]);
+        state.apply_layer_style(&style, [false, true, true, true]);
+        assert_eq!(state.color_uniform(Instant::now()), [0.0, 0.125, 1.5, 0.25]);
         assert_eq!(state.anim.current, 0.7);
-        assert_eq!(state.saturation_owner, Some(saturation_owner));
+        assert_eq!(state.color_owners[SATURATION], Some(saturation_owner));
         state.anim.set(0.0);
         state.preloaded = true;
         style.opacity = 0.4;
-        state.apply_layer_style(&style, false);
+        state.apply_layer_style(&style, [false; 4]);
         assert_eq!(state.anim.current, 0.0);
         assert_eq!(state.base_opacity, 0.4);
     }

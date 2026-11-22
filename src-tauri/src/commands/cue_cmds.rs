@@ -1301,8 +1301,10 @@ pub fn apply_cue_properties(
         let style_edits = properties.get("layer_style_patch").and_then(serde_json::Value::as_object);
         if replace_style || style_edits.is_some() {
             if let Some(style) = edited.layer_style() {
-                let edit_saturation = replace_style || style_edits.is_some_and(|edits| edits.contains_key("saturation"));
-                output.set_layer_props(voice, &style, edit_saturation);
+                let edit_color = crate::engine::output_engine::PictureColorParameter::ALL.map(|parameter| {
+                    replace_style || style_edits.is_some_and(|edits| edits.contains_key(parameter.layer_key()))
+                });
+                output.set_layer_props(voice, &style, edit_color);
             }
         }
     }

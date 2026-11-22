@@ -127,7 +127,9 @@ export const getCue = (cueId: CueId) =>
 export const findCues = (workspaceId: string, listId: string, query: string) =>
   invoke<CueId[]>("find_cues", { workspaceId, listId, query });
 export const revertPictureFade = (workspaceId: string, listId: string, cueId: CueId) =>
-  invoke<{ geometry: boolean; saturation: boolean }>("revert_picture_fade", { workspaceId, listId, cueId });
+  invoke<{ geometry: boolean; saturation: boolean; other_color: Array<"brightness" | "contrast" | "hue"> }>(
+    "revert_picture_fade", { workspaceId, listId, cueId },
+  );
 export const previewPictureSaturation = (request: {
   workspace_id: string; list_id: string; fade_id: CueId; target_id: CueId; voice_id: string; saturation: number;
 }) => invoke<[token: string, durationMs: number]>("preview_picture_saturation", { request });

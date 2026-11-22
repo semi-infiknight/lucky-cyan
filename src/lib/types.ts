@@ -698,6 +698,9 @@ export interface FadeCueData extends CueSummary {
   target_rotation_delta_degrees?: number | null;
   /** Absolute compositor saturation, 0 through 2; null leaves it alone. */
   target_saturation?: number | null;
+  target_picture_brightness?: number | null;
+  target_contrast?: number | null;
+  target_hue_degrees?: number | null;
   target_map_motion?: MapMotion | null;
   /** When true (default) the fade drives volume toward target_volume_db; false = pan-only. */
   fade_volume: boolean;

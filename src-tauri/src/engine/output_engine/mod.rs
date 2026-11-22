@@ -43,7 +43,7 @@ pub use regions::{OutputRegions, OutputSplitDirection};
 pub(crate) use source_placement::supports_still_rotation_path;
 pub use types::{
     ContentRequest, CrossfadePhase, CrossfadeRequest, FitMode, LayerStyle, OutputConfig, OutputId,
-    OutputStatus, OutputTransform, ScreenInfo, SilentSpeedOrigin, TestPattern, VideoGeometry,
+    OutputStatus, OutputTransform, PictureColorParameter, ScreenInfo, SilentSpeedOrigin, TestPattern, VideoGeometry,
     VideoGeometryUpdate, VideoTranslation, VoiceId, MAIN_OUTPUT,
 };
 use types::compose_display_props;
@@ -854,20 +854,20 @@ impl OutputEngine {
         true
     }
 
-    /// Start a saturation Fade from this picture's live compositor value.
-    pub fn begin_voice_saturation_fade(&self, voice_id: VoiceId, owner: Uuid) -> Option<f32> {
-        let slot = output::slot_for_voice(voice_id)?;
-        let saturation = slot.state.lock().ok()?.claim_saturation(voice_id, owner);
-        if saturation.is_some() {
+    /// Claim selected parameters and snapshot their live compositor values.
+    pub fn begin_voice_color_fade(&self, voice_id: VoiceId, owner: Uuid, fields: [bool; 4]) -> [Option<f32>; 4] {
+        let Some(slot) = output::slot_for_voice(voice_id) else { return [None; 4] };
+        let origins = slot.state.lock().map_or([None; 4], |mut state| state.claim_color(voice_id, owner, fields));
+        if origins.iter().any(Option::is_some) {
             slot.wake();
         }
-        saturation
+        origins
     }
 
-    pub fn set_voice_saturation_fade(&self, voice_id: VoiceId, owner: Uuid, saturation: f32) -> bool {
-        let Some(slot) = output::slot_for_voice(voice_id) else { return false };
-        let written = slot.state.lock().is_ok_and(|mut state| state.write_saturation(voice_id, owner, saturation));
-        if written {
+    pub fn set_voice_color_fade(&self, voice_id: VoiceId, owner: Uuid, values: [Option<f32>; 4]) -> [bool; 4] {
+        let Some(slot) = output::slot_for_voice(voice_id) else { return [false; 4] };
+        let written = slot.state.lock().map_or([false; 4], |mut state| state.write_color(voice_id, owner, values));
+        if written.contains(&true) {
             slot.wake();
         }
         written
@@ -898,10 +898,10 @@ impl OutputEngine {
         }
     }
 
-    /// Live-apply compositing properties, taking over saturation only for an explicit edit.
-    pub fn set_layer_props(&self, voice_id: VoiceId, style: &LayerStyle, edit_saturation: bool) {
+    /// Live-apply compositing properties, taking over each explicitly edited color parameter.
+    pub fn set_layer_props(&self, voice_id: VoiceId, style: &LayerStyle, edit_color: [bool; 4]) {
         if let Some(slot) = output::slot_for_voice(voice_id) {
-            slot::set_layer_style(&slot, voice_id, style, edit_saturation);
+            slot::set_layer_style(&slot, voice_id, style, edit_color);
         }
     }
 

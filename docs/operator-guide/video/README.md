@@ -77,7 +77,7 @@ Preview uses a running, revealed Video, Image, or Camera cue on a visible output
 3. Run the Fade again. After it finishes, edit the Image’s **Geometry**. Use **Revert Picture Fade** again and check that its colour returns at the new position. You can also run another saturation Fade first to give that Fade control of the colour.
 4. Repeat the original Fade, stop its Image and give the Image a fresh GO. The new playback uses its saved settings. The revert command tells you when the original playback has ended.
 
-Revert applies once to the latest completed Fade on the same armed Video, Image or Camera playback. Position, scale and still-image rotation share Geometry ownership. Saturation has its own ownership. The command restores the live values that Fade changed. A Reset cue targeting the Fade clears its revert record. [QLab Reverting Fades](https://qlab.app/docs/v5/video/fading-video/#reverting-fades)
+Revert applies once to the latest completed Fade on the same armed Video, Image or Camera playback. Position, scale and still-image rotation share Geometry ownership. Each color control can be taken over and restored independently. A Reset cue targeting the Fade clears its revert record. [QLab Reverting Fades](https://qlab.app/docs/v5/video/fading-video/#reverting-fades)
 
 ## Mask the edge of a projector
 
@@ -145,7 +145,14 @@ Inkue applies saturation to the selected Video, Image, or Camera cue before blen
 2. Set **Hue angle** to 120° on a red test picture to see it turn green. Change **Saturation** to adjust how much color comes through. Compare the underlying cue and any visible transparent edges while you make these adjustments.
 3. Save and reopen to recall the corrected picture. In rehearsal, choose **Reset color controls** to restore brightness 0, contrast 1×, hue 0° and saturation 100%.
 
-When moving a show from QLab, copy the Color Controls settings into the corresponding Inkue controls. Rehearse the look on the target display. Inkue rotates the source in HSV and applies the controls before the blend mode. A Fade can animate saturation. Rebuild timelines using the other effect parameters separately. [QLab Color Controls parameter ranges](https://qlab.app/docs/v5/scripting/parameter-reference/#video-effects)
+When moving a show from QLab, copy the Color Controls settings into the corresponding Inkue controls. Rehearse the look on the target display. Inkue rotates the source in HSV and applies the controls before the blend mode. Set the Fade destinations separately in the Fade inspector. [QLab Color Controls parameter ranges](https://qlab.app/docs/v5/scripting/parameter-reference/#video-effects)
+
+### Animate the picture's color controls
+
+1. Start a colored still or movie. Target it with a two-second Fade and leave **Crossfade** set to **None**. Under **Visual**, turn off **Fade brightness** to keep opacity steady. Turn off **Fade volume** to keep the soundtrack steady.
+2. Enable **Fade picture brightness**, **Fade contrast** and **Fade hue angle**. Try destinations of −0.2, 1.5× and 120°. Start the Fade and check the three changes on the stage. Pause and resume it to rehearse the transition. Hue passes through the intervening signed angles in numeric order.
+3. After the Fade finishes, adjust only **Picture brightness** in the target's **Layer → Color Controls**. Select the Fade again and choose **Revert Picture Fade**. Contrast and hue return to the values they had when the Fade started. The manual brightness edit stays live.
+4. Stop and restart the picture to check its saved starting settings. Combine color changes with saturation or geometry in the same Fade when they share the same timing. [QLab Fading Video](https://qlab.app/docs/v5/video/fading-video/)
 
 ### Fade the foreground to monochrome
 

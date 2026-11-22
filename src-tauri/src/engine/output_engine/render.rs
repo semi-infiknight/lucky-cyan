@@ -456,10 +456,7 @@ fn render_thread_main(
                         layer_key: st.layer_key,
                         opacity: if st.preloaded || st.positioned_reveal_pending(voice) { 0.0 } else { opacity },
                         blend_mode: st.blend_mode.shader_id(),
-                        color_controls: [
-                            st.effective_saturation(Instant::now()),
-                            st.source_tone[0], st.source_tone[1], st.source_tone[2],
-                        ],
+                        color_controls: st.color_uniform(Instant::now()),
                         source_placement: st.still_raster.map(|raster| {
                             SourcePlacement::new(raster, st.geometry, [w_px, h_px])
                         }),

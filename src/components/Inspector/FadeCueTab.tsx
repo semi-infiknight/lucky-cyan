@@ -26,6 +26,15 @@ import { PictureSaturationPreview } from "./PictureSaturationPreview";
 
 const hintStyle = { fontSize: 11, color: "var(--wc-text-faint)", margin: "6px 0 10px", lineHeight: 1.5 } as const;
 
+const colorFadeFields = [
+  { key: "target_picture_brightness", label: "picture brightness", initial: 0, min: -1, max: 1, step: 0.01 },
+  { key: "target_contrast", label: "contrast", initial: 1, min: 0.25, max: 4, step: 0.01 },
+  { key: "target_hue_degrees", label: "hue angle", initial: 0, min: -180, max: 180, step: 1 },
+] as const;
+const clearColorFade = {
+  target_saturation: null, target_picture_brightness: null, target_contrast: null, target_hue_degrees: null,
+};
+
 export function FadeCueTab({
   cue,
   onSave,
@@ -97,13 +106,14 @@ export function FadeCueTab({
     target_rotation_delta_degrees: turn ? value : null,
   });
   const saturation = cue.target_saturation ?? null;
+  const hasColorFade = saturation != null || colorFadeFields.some(({ key }) => cue[key] != null);
   const loopPath = cue.loop_translation_path ?? false;
   const durationMs = cue.fade_duration_ms ?? 2000;
   const canFadeGeometry = crossfadeInto === null && targetIds.length === 1 &&
     pictureCues.some((picture) => picture.id === targetIds[0]);
   const canFadeRotation = canFadeGeometry && targetCues[0]?.still_rotation_target === true;
   const canLoopPath = !fadeVolume && !(cue.fade_brightness ?? true) && !panEnabled && cue.target_rate == null
-    && scale == null && rotation == null && saturation == null && cue.patch_target_id == null
+    && scale == null && rotation == null && !hasColorFade && cue.patch_target_id == null
     && !cue.stop_at_end && cue.continue_mode === "do_not_continue";
   const savePosition = (next: typeof translation | null) => {
     onSave(relative ? { target_relative_geometry: { ...relative, translation: next } } : { target_translation: next });
@@ -151,7 +161,7 @@ export function FadeCueTab({
             fade_volume: false, fade_brightness: false, target_pan: null, target_rate: null,
             target_translation: null, translation_waypoints: [], target_scale: null,
             target_relative_geometry: null,
-            target_rotation_degrees: null, target_rotation_delta_degrees: null, target_saturation: null,
+            target_rotation_degrees: null, target_rotation_delta_degrees: null, ...clearColorFade,
             patch_target_id: null, crossfade_into_id: null,
             continue_mode: "do_not_continue", stop_at_end: false,
           } : { target_map_motion: null })}
@@ -173,7 +183,8 @@ export function FadeCueTab({
                 fade_volume: false, fade_brightness: false, stop_at_end: false,
                 patch_target_id: null, target_pan: null, target_rate: null, target_silent_speed: null,
                 target_translation: null, translation_waypoints: [], target_scale: null,
-                target_rotation_degrees: null, target_rotation_delta_degrees: null, target_saturation: null, target_map_motion: null, crossfade_into_id: null,
+                target_rotation_degrees: null, target_rotation_delta_degrees: null, ...clearColorFade,
+                target_map_motion: null, crossfade_into_id: null,
               });
             } else {
               onSave(destination ? {
@@ -191,7 +202,7 @@ export function FadeCueTab({
               fade_volume: false, fade_brightness: false, target_pan: null, target_rate: null,
               target_translation: null, translation_waypoints: [], target_scale: null,
               target_relative_geometry: null,
-              target_rotation_degrees: null, target_rotation_delta_degrees: null, target_saturation: null,
+              target_rotation_degrees: null, target_rotation_delta_degrees: null, ...clearColorFade,
               patch_target_id: null, crossfade_into_id: null, continue_mode: "do_not_continue", stop_at_end: false,
             } : { target_silent_speed: null })}>
             <Grid2>
@@ -342,7 +353,7 @@ export function FadeCueTab({
         </Section>
       )}
 
-      {!dedicatedFade && (showBrightness || saturation != null) && (
+      {!dedicatedFade && (showBrightness || hasColorFade) && (
         <Section
           title="Visual"
           hint={crossfadeInto ? "Used only if there is nothing to dissolve into." : undefined}
@@ -363,6 +374,7 @@ export function FadeCueTab({
             />
           </ToggleRow>}
           {canFadeGeometry ? (
+            <>
             <ToggleRow label="Fade saturation" checked={saturation != null}
               onToggle={(enabled) => onSave({ target_saturation: enabled ? 0 : null })}>
               <Grid2>
@@ -375,10 +387,22 @@ export function FadeCueTab({
               {saturation != null && targetCues[0] && <PictureSaturationPreview fadeId={cue.id}
                 target={targetCues[0]} saturation={saturation} fadeRunning={fadeState === "running" || fadeState === "paused"} />}
             </ToggleRow>
-          ) : saturation != null && (
+            {colorFadeFields.map(({ key, label, initial, min, max, step }) => (
+              <ToggleRow key={key} label={`Fade ${label}`} checked={cue[key] != null}
+                onToggle={enabled => onSave({ [key]: enabled ? initial : null })}>
+                <Grid2>
+                  <MiniField label={`Destination ${label}`}>
+                    <NumberInput ariaLabel={`Destination ${label}`} value={cue[key] ?? null}
+                      min={min} max={max} step={step} onCommit={value => onSave({ [key]: value })} />
+                  </MiniField>
+                </Grid2>
+              </ToggleRow>
+            ))}
+            </>
+          ) : hasColorFade && (
             <>
               <div style={hintStyle}>Select one Video, Image or Camera target and set Crossfade to None.</div>
-              <button type="button" onClick={() => onSave({ target_saturation: null })}>Clear saturation fade</button>
+              <button type="button" onClick={() => onSave(clearColorFade)}>Clear color fades</button>
             </>
           )}
         </Section>
@@ -491,7 +515,7 @@ export function FadeCueTab({
       )}
 
       {!dedicatedFade && !loopPath && !cue.stop_at_end && crossfadeInto === null &&
-        (position != null || scale != null || rotation != null || saturation != null) && (
+        (position != null || scale != null || rotation != null || hasColorFade) && (
           <RevertPictureFade key={cue.id} cueId={cue.id} running={fadeState === "running" || fadeState === "paused"} />
         )}
 
@@ -521,8 +545,12 @@ function RevertPictureFade({ cueId, running }: { cueId: string; running: boolean
     setFeedback(undefined);
     try {
       const result = await revertPictureFade(workspaceId, listId, cueId);
-      const restored = [result.geometry && "geometry", result.saturation && "saturation"].filter(Boolean).join(" and ");
-      setFeedback({ text: `Restored the picture's ${restored}.`, error: false });
+      const restored = [
+        ...(result.geometry ? ["geometry"] : []),
+        ...(result.saturation ? ["saturation"] : []),
+        ...result.other_color.map(parameter => parameter === "brightness" ? "picture brightness" : parameter),
+      ];
+      setFeedback({ text: `Restored the picture's ${restored.join(", ")}.`, error: false });
     } catch (error) {
       setFeedback({ text: String(error), error: true });
     } finally {
@@ -531,7 +559,7 @@ function RevertPictureFade({ cueId, running }: { cueId: string; running: boolean
   };
 
   return (
-    <Section title="Live picture" hint="Restore geometry or saturation from before the last completed Fade.">
+    <Section title="Live picture" hint="Restore geometry and color settings from before the last completed Fade.">
       <button type="button" disabled={busy || running || !workspaceId || !listId}
         onClick={() => { void revert(); }}>Revert Picture Fade</button>
       {feedback && <div role={feedback.error ? "alert" : "status"} style={hintStyle}>{feedback.text}</div>}
