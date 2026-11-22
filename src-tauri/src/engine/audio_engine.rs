@@ -4,7 +4,7 @@
 //! allocate, block, or do I/O. Control and status use ring buffers, and meter
 //! snapshots use bounded atomic storage.
 
-use std::sync::{Arc, Mutex};
+use std::{collections::HashSet, sync::{Arc, Mutex}};
 
 use anyhow::{anyhow, Result};
 use arc_swap::ArcSwap;
@@ -22,7 +22,7 @@ use super::{
     cue_effects::CueEffect,
     device_manager::{DeviceManager, NamedOutput},
     output_meter::OutputMeter,
-    patch_effects::{self, PatchBus},
+    patch_effects::{self, PatchBus, PatchBusState, MAX_PROCESSED_PATCHES},
     rate_fader::RateFader,
     ring_command::{AudioCommand, AudioStatus, FadeCurve, VoiceId},
     voice::{FadeDirection, FadeState, LiveSource, Voice, VoiceState},
@@ -712,16 +712,21 @@ impl AudioEngine {
     fn available_patch_bus(&self, route: &NamedOutput) -> Result<Option<Arc<PatchBus>>> {
         use std::sync::atomic::Ordering::Relaxed;
         patch_effects::check_capacity(self.output_channels() as usize, self.output_period.load(Relaxed) as usize)?;
-        let bus = self.voices.with(|voices| {
-            voices.iter()
-                .filter(|voice| active_voice(voice))
-                .find_map(|voice| voice.patch_effects.as_ref().cloned())
-        }).ok_or_else(|| anyhow!("Cannot verify the active Output Patch effects."))?;
-        anyhow::ensure!(
-            bus.as_ref().is_none_or(|bus| bus.route == *route),
-            "Stop the other processed Output Patch before starting these effects. One processed patch can play on the main output at a time."
-        );
-        Ok(bus)
+        self.voices.with(|voices| {
+            let mut active_patches = HashSet::new();
+            for bus in voices.iter().filter(|voice| active_voice(voice))
+                .filter_map(|voice| voice.patch_effects.as_ref())
+            {
+                if bus.route.patch_id == route.patch_id {
+                    anyhow::ensure!(bus.route == *route, "Stop the audio on this Output Patch before using its changed effects or routing.");
+                    return Ok(Some(bus.clone()));
+                }
+                active_patches.insert(bus.route.patch_id);
+            }
+            anyhow::ensure!(active_patches.len() < MAX_PROCESSED_PATCHES,
+                "Stop one of the {MAX_PROCESSED_PATCHES} processed Output Patches before starting another.");
+            Ok(None)
+        }).ok_or_else(|| anyhow!("Cannot verify the active Output Patch effects."))?
     }
 
     pub(crate) fn patch_has_active_audio(&self, patch_id: Uuid) -> Result<bool, String> {
@@ -2092,6 +2097,13 @@ fn open_aux_stream(
 // Audio callback — real-time safe
 // ---------------------------------------------------------------------------
 
+struct ActivePatchBlock<'a> {
+    bus: &'a PatchBus,
+    block: &'a mut PatchBusState,
+    fits: bool,
+    rendered: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fill_buffer(
     block_started_at: u64,
@@ -2140,8 +2152,7 @@ fn fill_buffer(
     // allocation in the RT callback).
     let mut patch_peaks = [0.0_f32; PATCH_VU_SLOTS * 2];
     let output_samples = output.len();
-    let mut patch_block = None;
-    let mut has_wet_audio = false;
+    let mut patch_blocks: [Option<ActivePatchBlock<'_>>; MAX_PROCESSED_PATCHES] = [const { None }; MAX_PROCESSED_PATCHES];
 
     for voice in voices_guard.iter() {
         let deadline = voice.start_deadline_us.load(std::sync::atomic::Ordering::Acquire);
@@ -2167,16 +2178,22 @@ fn fill_buffer(
                 continue;
             }
         }
-        if patch_block.is_none() && matches!(state, VoiceState::Playing | VoiceState::Paused | VoiceState::FadingOut) {
-            if let Some(bus) = voice.patch_effects.as_deref() {
-                // SAFETY: this bus is shared only by voices in this exact
-                // main stream's voice pool. Its serial callback owns state.
-                let block = unsafe { &mut *bus.state.get() };
-                let fits = output_period.load(std::sync::atomic::Ordering::Relaxed) as usize
-                    <= patch_effects::MAX_PATCH_EFFECT_FRAMES && block.begin(output_samples);
-                patch_block = Some((bus, block, fits));
-            }
-        }
+        let patch_block = match state {
+            VoiceState::Playing | VoiceState::Paused | VoiceState::FadingOut => voice.patch_effects.as_deref()
+                .and_then(|bus| {
+                    patch_blocks.iter_mut()
+                        .find(|slot| slot.as_ref().is_none_or(|active| std::ptr::eq(active.bus, bus)))
+                        .map(|slot| slot.get_or_insert_with(|| {
+                            // SAFETY: this callback owns the bus state. Blocks occupy
+                            // a dense prefix, so each bus is borrowed at most once.
+                            let block = unsafe { &mut *bus.state.get() };
+                            let fits = output_period.load(std::sync::atomic::Ordering::Relaxed) as usize
+                                <= patch_effects::MAX_PATCH_EFFECT_FRAMES && block.begin(output_samples);
+                            ActivePatchBlock { bus, block, fits, rendered: false }
+                        }))
+                }),
+            _ => None,
+        };
         if state == VoiceState::Paused && voice.live.is_none() {
             let fader = &voice.inner.rate_fader;
             // SAFETY: the mixer is the only reader and writer of RateSlew.
@@ -2237,11 +2254,11 @@ fn fill_buffer(
             continue;
         }
 
-        let output = match (voice.patch_effects.as_deref(), patch_block.as_mut()) {
+        let output = match (voice.patch_effects.as_deref(), patch_block) {
             (None, _) => &mut *output,
-            (Some(voice_bus), Some((bus, block, true))) if std::ptr::eq(voice_bus, *bus) => {
-                has_wet_audio = true;
-                block.samples(output_samples)
+            (Some(_), Some(active)) if active.fits => {
+                active.rendered = true;
+                active.block.samples(output_samples)
             }
             (Some(_), _) => {
                 voice.set_stopped();
@@ -2497,11 +2514,11 @@ fn fill_buffer(
         accumulate_peaks(voice, voice_peak_l, voice_peak_r, &mut peak_l, &mut peak_r, &mut patch_peaks);
     }
 
-    if let Some((_, block, _)) = patch_block {
-        if has_wet_audio {
-            block.finish(output, channels, output_sample_rate);
+    for active in patch_blocks.into_iter().flatten() {
+        if active.rendered {
+            active.block.finish(output, channels, output_sample_rate);
         } else {
-            block.reset();
+            active.block.reset();
         }
     }
     // Apply master gain.
@@ -2809,6 +2826,32 @@ mod tests {
         fill_buffer(audio_clock_us(), &mut output, 2, 48_000, &pool, &feeds, &mut commands, &mut status, &master, &period);
         assert!(output[0] > 0.58);
         assert!((output[4094] - 0.20).abs() < 1e-6);
+        assert!(output.iter().skip(1).step_by(2).all(|&sample| sample == 0.0));
+    }
+
+    #[test]
+    fn patch_effects_keep_two_chains_independent_on_the_same_output() {
+        use std::sync::atomic::AtomicU32;
+        let high_pass = high_pass_stage_bus();
+        let mut low_pass = named_stage_output(vec![0, 1]);
+        low_pass.audio_effects.push(CueEffect::LowPass {
+            id: Uuid::new_v4(), enabled: true, frequency_hz: 600.0,
+        });
+        let low_pass = Arc::new(PatchBus::new(low_pass, 2, 48_000).unwrap());
+        let first = filtered_stage_voice(0.35, high_pass, 2048);
+        let second = filtered_stage_voice(0.20, low_pass, 2048);
+        let pool = ArcSwap::from_pointee(vec![first.clone(), second.clone()]);
+        let feeds = Arc::new(Mutex::new(Vec::new()));
+        let (_, mut commands) = HeapRb::new(16).split();
+        let (mut status, _) = HeapRb::new(16).split();
+        let master = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
+        let period = Arc::new(AtomicU32::new(1024));
+        let mut output = [0.0; 2048];
+        fill_buffer(audio_clock_us(), &mut output, 2, 48_000, &pool, &feeds, &mut commands, &mut status, &master, &period);
+        assert_eq!(first.current_frame(), 1024);
+        assert_eq!(second.current_frame(), 1024);
+        assert!(output[0] > 0.30);
+        assert!((output[2046] - 0.20).abs() < 1e-5);
         assert!(output.iter().skip(1).step_by(2).all(|&sample| sample == 0.0));
     }
 

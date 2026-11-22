@@ -1,4 +1,4 @@
-//! A single prepared Output Patch bus for the exact main hardware stream.
+//! Prepared Output Patch buses for the exact main hardware stream.
 
 use std::cell::UnsafeCell;
 
@@ -8,6 +8,7 @@ use super::{cue_effects::CueEffects, device_manager::NamedOutput};
 
 pub(crate) const MAX_PATCH_EFFECT_CHANNELS: usize = 32;
 pub(crate) const MAX_PATCH_EFFECT_FRAMES: usize = 4096;
+pub(super) const MAX_PROCESSED_PATCHES: usize = 8;
 
 pub(super) struct PatchBus {
     pub(super) route: NamedOutput,

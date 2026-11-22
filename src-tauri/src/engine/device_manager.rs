@@ -64,7 +64,7 @@ fn is_false(value: &bool) -> bool {
 /// Admission constraints captured by an armed File Audio voice.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NamedOutput {
-    patch_id: OutputPatchId,
+    pub(super) patch_id: OutputPatchId,
     pub device_id: String,
     channels: Vec<u16>,
     pub(crate) audio_effects: Vec<CueEffect>,
