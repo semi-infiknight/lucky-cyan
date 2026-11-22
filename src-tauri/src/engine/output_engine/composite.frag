@@ -3,7 +3,8 @@ uniform sampler2D u_backdrop;
 uniform sampler2D u_layer;
 uniform int   u_blend_mode;
 uniform float u_opacity;
-uniform float u_saturation;
+// Saturation multiplier, additive brightness, contrast, and hue in turns.
+uniform vec4 u_color_controls;
 uniform bool u_place_picture;
 uniform vec3 u_place_x;
 uniform vec3 u_place_y;
@@ -31,14 +32,33 @@ vec4 sample_layer() {
     return sample;
 }
 
+// Rotate the HSV hue while preserving the source value and color range.
+vec3 rotate_hue(vec3 rgb, float turns) {
+    float hi = max(max(rgb.r, rgb.g), rgb.b);
+    float lo = min(min(rgb.r, rgb.g), rgb.b);
+    float chroma = hi - lo;
+    if (chroma == 0.0) return rgb;
+    float hue;
+    if (hi == rgb.r) hue = (rgb.g - rgb.b) / chroma;
+    else if (hi == rgb.g) hue = 2.0 + (rgb.b - rgb.r) / chroma;
+    else hue = 4.0 + (rgb.r - rgb.g) / chroma;
+    vec3 wheel = abs(mod(hue + 6.0 * turns + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0;
+    return lo + chroma * clamp(wheel, 0.0, 1.0);
+}
+
 void main() {
     vec4 b = texture(u_backdrop, v_uv);
     vec4 s = sample_layer();
     // Use the rendered SDR color values. The effect applies to this layer's
     // source only, before its blend mode. The source alpha is independent.
-    if (u_saturation != 1.0) {
-        float luma = dot(s.rgb, vec3(0.2126, 0.7152, 0.0722));
-        s.rgb = clamp(mix(vec3(luma), s.rgb, u_saturation), 0.0, 1.0);
+    if (any(notEqual(u_color_controls, vec4(1.0, 0.0, 1.0, 0.0)))) {
+        if (u_color_controls.x != 1.0) {
+            float luma = dot(s.rgb, vec3(0.2126, 0.7152, 0.0722));
+            s.rgb = mix(vec3(luma), s.rgb, u_color_controls.x);
+        }
+        if (u_color_controls.z != 1.0) s.rgb = (s.rgb - 0.5) * u_color_controls.z + 0.5;
+        s.rgb = clamp(s.rgb + u_color_controls.y, 0.0, 1.0);
+        if (u_color_controls.w != 0.0) s.rgb = rotate_hue(s.rgb, u_color_controls.w);
     }
     color = composite_stage(u_blend_mode, b, s.rgb, clamp(s.a * u_opacity, 0.0, 1.0));
 }

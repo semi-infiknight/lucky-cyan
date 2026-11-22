@@ -477,6 +477,9 @@ export interface LayerStyle {
   blend_mode: BlendMode;
   /** 0 is monochrome, 1 is unchanged, 2 doubles the color difference. */
   saturation?: number;
+  picture_brightness?: number;
+  contrast?: number;
+  hue_degrees?: number;
 }
 
 /** Default compositing (automatic layer, fully opaque, normal blending). */

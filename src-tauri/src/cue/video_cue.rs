@@ -1289,6 +1289,7 @@ mod tests {
             opacity: 0.5,
             blend_mode: BlendMode::Multiply,
             saturation: 0.25,
+            ..LayerStyle::default()
         };
 
         let json = cue.serialize();

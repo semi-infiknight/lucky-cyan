@@ -49,7 +49,7 @@ struct LayerDraw {
     layer_key: u64,
     opacity: f32,
     blend_mode: i32,
-    saturation: f32,
+    color_controls: [f32; 4],
     source_placement: Option<SourcePlacement>,
     source_waiting: bool,
     has_new_frame: bool,
@@ -456,7 +456,10 @@ fn render_thread_main(
                         layer_key: st.layer_key,
                         opacity: if st.preloaded || st.positioned_reveal_pending(voice) { 0.0 } else { opacity },
                         blend_mode: st.blend_mode.shader_id(),
-                        saturation: st.effective_saturation(Instant::now()),
+                        color_controls: [
+                            st.effective_saturation(Instant::now()),
+                            st.source_tone[0], st.source_tone[1], st.source_tone[2],
+                        ],
                         source_placement: st.still_raster.map(|raster| {
                             SourcePlacement::new(raster, st.geometry, [w_px, h_px])
                         }),
@@ -610,7 +613,7 @@ fn render_thread_main(
             if let (Some(t), Some(dst)) = (&overlay_target, &pingpong[free]) {
                 draw_composite_pass(
                     &gl, compositor.composite.0, compositor.composite.1,
-                    final_tex, t.tex, 0, 1.0, 1.0, None, w_px, h_px, dst.fbo,
+                    final_tex, t.tex, 0, 1.0, [1.0, 0.0, 1.0, 0.0], None, w_px, h_px, dst.fbo,
                 );
                 final_tex = dst.tex;
             }
@@ -1147,7 +1150,7 @@ fn draw_composite_pass(
     layer_tex: glow::Texture,
     blend_mode: i32,
     opacity: f32,
-    saturation: f32,
+    color_controls: [f32; 4],
     placement: Option<SourcePlacement>,
     w: u32,
     h: u32,
@@ -1174,8 +1177,8 @@ fn draw_composite_pass(
         if let Some(loc) = gl.get_uniform_location(program, "u_opacity") {
             gl.uniform_1_f32(Some(&loc), opacity);
         }
-        if let Some(loc) = gl.get_uniform_location(program, "u_saturation") {
-            gl.uniform_1_f32(Some(&loc), saturation);
+        if let Some(loc) = gl.get_uniform_location(program, "u_color_controls") {
+            gl.uniform_4_f32_slice(Some(&loc), &color_controls);
         }
         let place = gl.get_uniform_location(program, "u_place_picture");
         gl.uniform_1_i32(place.as_ref(), i32::from(placement.is_some()));
@@ -1241,7 +1244,7 @@ fn composite_stack(
         };
         draw_composite_pass(
             gl, compositor.composite.0, compositor.composite.1,
-            backdrop.tex, layer_t.tex, l.blend_mode, l.opacity, l.saturation,
+            backdrop.tex, layer_t.tex, l.blend_mode, l.opacity, l.color_controls,
             l.source_placement, targets.w, targets.h, out.fbo,
         );
         src = dst;

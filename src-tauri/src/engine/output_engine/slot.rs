@@ -189,6 +189,8 @@ pub(super) struct SlotState {
     pub layer_key: u64,
     pub blend_mode: BlendMode,
     pub saturation: f32,
+    /// Source brightness, contrast and hue in turns.
+    pub source_tone: [f32; 3],
     /// The active saturation Fade is independent of the slot's geometry Fade.
     pub saturation_owner: Option<Uuid>,
     saturation_preview: Option<SaturationPreview>,
@@ -340,6 +342,7 @@ impl SlotState {
             layer_key: 0,
             blend_mode: BlendMode::Normal,
             saturation: 1.0,
+            source_tone: LayerStyle::default().source_tone(),
             saturation_owner: None,
             saturation_preview: None,
             silent_speed: None,
@@ -365,6 +368,7 @@ impl SlotState {
 
     fn apply_layer_style(&mut self, style: &LayerStyle, edit_saturation: bool) {
         self.blend_mode = style.blend_mode;
+        self.source_tone = style.source_tone();
         if edit_saturation {
             self.saturation = style.source_saturation();
             self.saturation_owner = None;
@@ -1024,6 +1028,7 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) -> Result<()
         st.layer_key = resolve_layer_key(load.layer_style.layer, seq);
         st.blend_mode = load.layer_style.blend_mode;
         st.saturation = load.layer_style.source_saturation();
+        st.source_tone = load.layer_style.source_tone();
         st.saturation_owner = None;
         st.saturation_preview = None;
         st.silent_speed = load.allow_silent_speed.then(|| SilentSpeed::pending(load.url.clone()));
@@ -2541,6 +2546,13 @@ mod tests {
         state.apply_layer_style(&style, false);
         assert_eq!(state.anim.current, 0.7);
         assert_eq!(state.saturation, 0.0);
+        assert_eq!(state.saturation_owner, Some(saturation_owner));
+        style.picture_brightness = 0.125;
+        style.contrast = 1.5;
+        style.hue_degrees = 90.0;
+        state.apply_layer_style(&style, false);
+        assert_eq!(state.source_tone, [0.125, 1.5, 0.25]);
+        assert_eq!(state.anim.current, 0.7);
         assert_eq!(state.saturation_owner, Some(saturation_owner));
         state.anim.set(0.0);
         state.preloaded = true;

@@ -48,7 +48,7 @@ Start with the rows your show actually uses. The reference is QLab 5.6.5 with al
 | Revert a completed Fade action | Restore the live geometry or saturation that the Fade still owns. Rehearse each domain’s manual takeover and a fresh GO. [Revert picture Fade exercise](../video/README.md#revert-a-completed-picture-fade) |
 | Mask and blend projection edges | Compare overlap, black regions and feathering from the audience position. Full migration remains open. |
 | Warp and correct keystone | Pin the corners with the mouse or fine-tune them from the keyboard. Complex projector meshes need review. |
-| Apply or animate effects | Set or fade saturation from monochrome to 200% on one Video, Image, or Camera cue. Ordered effect chains, other parameters, and external effect compatibility remain open. [Saturation exercise](../video/README.md#fade-the-foreground-to-monochrome) |
+| Apply or animate effects | Set picture brightness, contrast, hue and saturation on a Video, Image, or Camera cue. A Fade can animate saturation from monochrome to 200%. Automatic effect migration, ordered effect chains, additional effect parameters and external effects remain open. [Color Controls exercise](../video/README.md#adjust-brightness-contrast-and-hue-on-one-layer) · [Saturation Fade exercise](../video/README.md#fade-the-foreground-to-monochrome) |
 | Set blend mode per cue | Inspect the layer controls and compare two overlapping images against the original blend mode. |
 | Syphon input and output | Open. Account for the original Mac sender and receiver when redesigning the signal path. |
 | NDI input and output | Native bidirectional NDI remains open. |

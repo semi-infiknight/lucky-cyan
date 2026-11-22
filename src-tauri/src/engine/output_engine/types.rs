@@ -263,6 +263,41 @@ fn normalize_saturation(value: f64) -> f64 {
     }
 }
 
+fn default_contrast() -> f64 {
+    1.0
+}
+
+fn contrast_is_default(value: &f64) -> bool {
+    *value == default_contrast()
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
+fn normalize_picture_parameter(value: f64, default: f64, min: f64, max: f64) -> f64 {
+    if value.is_finite() { value.clamp(min, max) } else { default }
+}
+
+fn deserialize_picture_parameter<'de, D: serde::Deserializer<'de>>(
+    decoder: D, default: f64, min: f64, max: f64,
+) -> Result<f64, D::Error> {
+    let value = serde_json::Value::deserialize(decoder)?.as_f64().unwrap_or(default);
+    Ok(normalize_picture_parameter(value, default, min, max))
+}
+
+fn deserialize_picture_brightness<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<f64, D::Error> {
+    deserialize_picture_parameter(decoder, 0.0, -1.0, 1.0)
+}
+
+fn deserialize_contrast<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<f64, D::Error> {
+    deserialize_picture_parameter(decoder, default_contrast(), 0.25, 4.0)
+}
+
+fn deserialize_hue_degrees<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<f64, D::Error> {
+    deserialize_picture_parameter(decoder, 0.0, -180.0, 180.0)
+}
+
 /// How a visual cue sits in the layer compositor (QLab model): its stacking
 /// order, base opacity and blend mode.  Fade in/out and Fade Cues animate a
 /// separate runtime multiplier on top of `opacity`.
@@ -285,6 +320,21 @@ pub struct LayerStyle {
         skip_serializing_if = "saturation_is_default"
     )]
     pub saturation: f64,
+    /// Additive source color offset, independent of the cue's opacity.
+    #[serde(
+        default, deserialize_with = "deserialize_picture_brightness", skip_serializing_if = "is_zero"
+    )]
+    pub picture_brightness: f64,
+    /// Contrast around middle gray.
+    #[serde(
+        default = "default_contrast",
+        deserialize_with = "deserialize_contrast",
+        skip_serializing_if = "contrast_is_default"
+    )]
+    pub contrast: f64,
+    /// Color wheel offset in degrees.
+    #[serde(default, deserialize_with = "deserialize_hue_degrees", skip_serializing_if = "is_zero")]
+    pub hue_degrees: f64,
 }
 
 impl Default for LayerStyle {
@@ -294,6 +344,9 @@ impl Default for LayerStyle {
             opacity: 1.0,
             blend_mode: super::blend::BlendMode::Normal,
             saturation: default_saturation(),
+            picture_brightness: 0.0,
+            contrast: default_contrast(),
+            hue_degrees: 0.0,
         }
     }
 }
@@ -301,6 +354,14 @@ impl Default for LayerStyle {
 impl LayerStyle {
     pub(super) fn source_saturation(&self) -> f32 {
         normalize_saturation(self.saturation) as f32
+    }
+
+    pub(super) fn source_tone(&self) -> [f32; 3] {
+        [
+            normalize_picture_parameter(self.picture_brightness, 0.0, -1.0, 1.0) as f32,
+            normalize_picture_parameter(self.contrast, default_contrast(), 0.25, 4.0) as f32,
+            normalize_picture_parameter(self.hue_degrees, 0.0, -180.0, 180.0) as f32 / 360.0,
+        ]
     }
 
     /// `true` when every field is at its default.
@@ -761,15 +822,24 @@ mod tests {
             opacity: 0.35,
             blend_mode: super::super::blend::BlendMode::Screen,
             saturation: 0.4,
+            picture_brightness: 0.14,
+            contrast: 1.35,
+            hue_degrees: -90.0,
         };
         let json = serde_json::to_value(s).unwrap();
         assert_eq!(json["blend_mode"], "screen");
+        assert_eq!(json["hue_degrees"], -90.0);
         let back: LayerStyle = serde_json::from_value(json).unwrap();
         assert_eq!(s, back);
 
         // Pre-1.3 workspaces have no layer_style: empty object = defaults.
         let empty: LayerStyle = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(empty.is_default());
+        let normalized: LayerStyle = serde_json::from_value(serde_json::json!({
+            "opacity": 0.4, "picture_brightness": "bad", "contrast": 20.0, "hue_degrees": -200.0
+        })).unwrap();
+        assert_eq!(normalized.opacity, 0.4);
+        assert_eq!(normalized.source_tone(), [0.0, 4.0, -0.5]);
     }
 
     #[test]

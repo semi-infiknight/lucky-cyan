@@ -139,6 +139,14 @@ On a spare output, run a PNG with a transparent cutout or margin as an **Image**
 
 Inkue applies saturation to the selected Video, Image, or Camera cue before blending it into the stack. The cue’s picture transparency and audio follow their own settings. For a QLab migration, compare the result on the original display and mark any effect ordering, automated changes, or plug-ins that need to be rebuilt and checked separately. [QLab Video FX](https://qlab.app/docs/v5/video/video-cues/) · [QLab Fading Video](https://qlab.app/docs/v5/video/fading-video/)
 
+### Adjust brightness, contrast and hue on one layer
+
+1. Start a Video, Image, or Camera cue over a second visual cue. Open **Layer → Color Controls** on the foreground. Use **Picture brightness** to lift or darken the source and **Contrast** to separate or flatten its light and dark values. Check the result on the stage or stage monitor.
+2. Set **Hue angle** to 120° on a red test picture to see it turn green. Change **Saturation** to adjust how much color comes through. Compare the underlying cue and any visible transparent edges while you make these adjustments.
+3. Save and reopen to recall the corrected picture. In rehearsal, choose **Reset color controls** to restore brightness 0, contrast 1×, hue 0° and saturation 100%.
+
+When moving a show from QLab, copy the Color Controls settings into the corresponding Inkue controls. Rehearse the look on the target display. Inkue rotates the source in HSV and applies the controls before the blend mode. A Fade can animate saturation. Rebuild timelines using the other effect parameters separately. [QLab Color Controls parameter ranges](https://qlab.app/docs/v5/scripting/parameter-reference/#video-effects)
+
 ### Fade the foreground to monochrome
 
 1. Start the foreground and background from the exercise above. Set the foreground’s saved saturation to 100%.
