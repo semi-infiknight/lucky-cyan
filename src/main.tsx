@@ -4,6 +4,7 @@ import App from "./App";
 import { PreferencesStandalone } from "./components/Preferences/PreferencesStandalone";
 import { FloatTimerWindow } from "./windows/FloatTimer";
 import { CueListWindow } from "./windows/CueListWindow";
+import { StageMonitorWindow } from "./windows/StageMonitorWindow";
 import { MixerWindow } from "./windows/MixerWindow";
 
 // Synchronously read window label from Tauri internals — no function call,
@@ -19,6 +20,8 @@ root.render(
       <CueListWindow kind="cart" />
     ) : tauriLabel?.startsWith("cue-list-") ? (
       <CueListWindow kind="sequential" />
+    ) : tauriLabel?.startsWith("stage-monitor-") ? (
+      <StageMonitorWindow />
     ) : tauriLabel === "preferences" ? (
       <PreferencesStandalone />
     ) : tauriLabel === "float-timer" ? (

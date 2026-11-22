@@ -200,6 +200,12 @@ The speed change applies to one active picture. Inkue confirms that the loaded m
 
 The live preview uses a thumbnail up to 320 × 180 pixels and up to 24 frames per second. It reads finished stage frames, including masks and blackout, and displays the newest available frame. The stage output stays in charge of presentation timing. Use the physical display to verify frame timing, latency, or fine detail. [QLab video output monitors](https://qlab.app/docs/v5/tools/monitor-windows/#video-output-monitor-windows)
 
+### Put the stage monitor on another display
+
+1. In **Cue monitor → Stage snapshot**, select a visible output and choose **Open monitor window**. Move the window to the operator display and resize it. The selected output's live preview starts in the separate window.
+2. Return to the main desk and continue calling cues. To bring the same monitor forward, choose **Open monitor window** again for that output. Select a different output to open its own monitor.
+3. Use **Stop live preview** to hold the latest picture, or **Set reference** to keep a comparison still. Closing the monitor releases its preview. Reopen the monitor after switching workspaces.
+
 Each request reads a reduced copy of the final rendered picture, including the on-output text, regions, masks, and blackout. It works on an already visible output. Test the signal path, projector optics, and audience-side brightness on the physical display.
 
 ## Bringing over a QLab show

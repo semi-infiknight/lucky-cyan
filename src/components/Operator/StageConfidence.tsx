@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { captureStageSnapshot, readStagePreview, setStagePreview } from "../../lib/commands";
+import { captureStageSnapshot, openStageMonitor, readStagePreview, setStagePreview } from "../../lib/commands";
 import { MAIN_OUTPUT_ID, type StageSnapshot } from "../../lib/types";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { Select } from "../common/Select";
@@ -42,11 +42,14 @@ export function StageStillComparison({ latest, reference }: {
   </div>;
 }
 
-function StagePicture({ workspaceId, outputId }: { workspaceId: string; outputId: string }) {
+export function StagePicture({ workspaceId, outputId, autoStart = false, allowPopout = false }: {
+  workspaceId: string; outputId: string; autoStart?: boolean; allowPopout?: boolean;
+}) {
   const [latest, setLatest] = useState<StageSnapshot | null>(null);
   const [reference, setReference] = useState<StageSnapshot | null>(null);
   const [waiting, setWaiting] = useState(false);
-  const [live, setLive] = useState(false);
+  const [live, setLive] = useState(autoStart);
+  const [opening, setOpening] = useState(false);
   const [liveSize, setLiveSize] = useState<{ width: number; height: number } | null>(null);
   const [failure, setFailure] = useState("");
   const previewCanvas = useRef<HTMLCanvasElement>(null);
@@ -138,6 +141,15 @@ function StagePicture({ workspaceId, outputId }: { workspaceId: string; outputId
     }
   };
 
+  const popOut = async () => {
+    setLive(false);
+    setFailure("");
+    setOpening(true);
+    try { await openStageMonitor(workspaceId, outputId); }
+    catch (error) { setFailure(String(error)); }
+    finally { setOpening(false); }
+  };
+
   return <>
     <button type="button" onClick={() => void takeSnapshot()} disabled={waiting || live}>
       {latest || liveSize ? "Retake frame" : "Capture frame"}
@@ -147,6 +159,9 @@ function StagePicture({ workspaceId, outputId }: { workspaceId: string; outputId
       if (!live) setLiveSize(null);
       setLive(!live);
     }}>{live ? "Stop live preview" : "Start live preview"}</button>
+    {allowPopout && <button type="button" disabled={waiting || opening} onClick={() => void popOut()}>
+      Open monitor window
+    </button>}
     {(liveSize || (!live && latest)) && <button type="button" onClick={keepReference}
       disabled={waiting || (!liveSize && reference === latest)}>
       {reference ? "Replace reference" : "Set reference"}
@@ -181,6 +196,6 @@ export function StageConfidence({ workspaceId }: { workspaceId: string }) {
       {!outputs.some(output => output.id === MAIN_OUTPUT_ID) && <option value={MAIN_OUTPUT_ID}>Main</option>}
       {outputs.map(output => <option key={output.id} value={output.id}>{output.name}</option>)}
     </Select>
-    <StagePicture key={`${workspaceId}:${outputId}`} workspaceId={workspaceId} outputId={outputId} />
+    <StagePicture key={`${workspaceId}:${outputId}`} workspaceId={workspaceId} outputId={outputId} allowPopout />
   </section>;
 }

@@ -52,6 +52,12 @@
 .stage-confidence-result p + .stage-confidence-stills { margin-top: 8px; }
 .stage-confidence-result :is(img, canvas) { display: block; max-width: 100%; background: black; border-radius: 4px; }
 .stage-confidence-result figcaption { margin-top: 6px; }
+.stage-monitor-window {
+  box-sizing: border-box; min-height: 100vh; padding: 12px;
+  color: var(--wc-text); background: var(--wc-bg-app);
+}
+.stage-monitor-window h1 { font-size: 17px; margin: 0 0 12px; }
+.stage-monitor-window .stage-confidence-result :is(canvas, img) { width: 100%; height: auto; }
 .cue-monitor-sheet { min-height: 0; overflow: auto; padding: 12px; }
 .cue-monitor-lists { display: grid; gap: 10px; }
 .cue-monitor-list {

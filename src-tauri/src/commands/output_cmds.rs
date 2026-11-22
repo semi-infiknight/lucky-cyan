@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use uuid::Uuid;
 
 use crate::cue::traits::Cue;
@@ -90,12 +90,85 @@ fn check_capture_owner(ws: &Workspace, workspace_id: Uuid, output_id: OutputId) 
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StageMonitorTarget {
+    workspace_id: Uuid,
+    output_id: OutputId,
+}
+
+impl StageMonitorTarget {
+    fn label(self) -> String {
+        format!("stage-monitor-{}-{}", self.workspace_id.simple(), self.output_id.simple())
+    }
+
+    fn from_label(label: &str) -> Option<Self> {
+        let (workspace, output) = label.strip_prefix("stage-monitor-")?.split_once('-')?;
+        let target = Self { workspace_id: workspace.parse().ok()?, output_id: output.parse().ok()? };
+        (target.label() == label).then_some(target)
+    }
+
+    fn permits(self, label: &str) -> bool {
+        label == "main" || Self::from_label(label) == Some(self)
+    }
+
+    fn title(self, ws: &Workspace) -> Result<String, String> {
+        check_capture_owner(ws, self.workspace_id, self.output_id)?;
+        Ok(ws.video_outputs.iter().find(|output| output.id == self.output_id)
+            .map_or("Main", |output| output.name.as_str()).to_owned())
+    }
+}
+
+#[derive(Serialize)]
+pub(crate) struct StageMonitorInfo {
+    workspace_id: Uuid,
+    output_id: OutputId,
+    name: String,
+}
+
+#[tauri::command]
+pub(crate) async fn open_stage_monitor(
+    workspace_id: Uuid, output_id: OutputId, window: WebviewWindow, app: AppHandle, state: State<'_, AppState>,
+) -> Result<(), String> {
+    if window.label() != "main" { return Err("Open the stage monitor from the main desk".into()); }
+    let target = StageMonitorTarget { workspace_id, output_id };
+    let name = {
+        let ws = state.workspace.lock().map_err(|error| error.to_string())?;
+        target.title(&ws)?
+    };
+    let label = target.label();
+    let monitor = if let Some(existing) = app.get_webview_window(&label) {
+        existing
+    } else {
+        WebviewWindowBuilder::new(&app, label.clone(), WebviewUrl::App("index.html".into()))
+            .title(format!("Stage monitor · {name}"))
+            .inner_size(760.0, 480.0)
+            .min_inner_size(300.0, 200.0)
+            .build()
+            .or_else(|error| app.get_webview_window(&label).ok_or(error))
+            .map_err(|error| error.to_string())?
+    };
+    monitor.unminimize().map_err(|error| error.to_string())?;
+    monitor.show().map_err(|error| error.to_string())?;
+    monitor.set_focus().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn read_stage_monitor(window: WebviewWindow, state: State<'_, AppState>) -> Result<Option<StageMonitorInfo>, String> {
+    let target = StageMonitorTarget::from_label(window.label()).ok_or("Open a stage monitor window")?;
+    let ws = state.workspace.lock().map_err(|error| error.to_string())?;
+    Ok(target.title(&ws).ok().map(|name| StageMonitorInfo {
+        workspace_id: target.workspace_id, output_id: target.output_id, name,
+    }))
+}
+
 /// Read a single finished native output frame. Leave the output route, visibility
 /// and transport in the state chosen by the operator.
 #[tauri::command]
 pub(crate) async fn capture_stage_snapshot(
-    workspace_id: Uuid, output_id: OutputId, state: State<'_, AppState>,
+    workspace_id: Uuid, output_id: OutputId, window: WebviewWindow, state: State<'_, AppState>,
 ) -> Result<StageSnapshot, String> {
+    let target = StageMonitorTarget { workspace_id, output_id };
+    if !target.permits(window.label()) { return Err("Choose the output assigned to this monitor".into()); }
     let receiver = {
         let ws = state.workspace.lock().map_err(|error| error.to_string())?;
         check_capture_owner(&ws, workspace_id, output_id)?;
@@ -113,10 +186,15 @@ pub(crate) async fn capture_stage_snapshot(
 
 #[tauri::command]
 pub(crate) fn set_stage_preview(
-    workspace_id: Uuid, output_id: OutputId, session_id: Uuid, enabled: bool, state: State<'_, AppState>,
+    workspace_id: Uuid, output_id: OutputId, session_id: Uuid, enabled: bool, window: WebviewWindow, state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let target = StageMonitorTarget { workspace_id, output_id };
+    if !target.permits(window.label()) { return Err("Choose the output assigned to this monitor".into()); }
     let owner = PreviewOwner { workspace: workspace_id, session: session_id };
     if enabled {
+        if window.label() == "main" && window.app_handle().get_webview_window(&target.label()).is_some() {
+            return Err("Use this output's open stage monitor window for live preview".into());
+        }
         let ws = state.workspace.lock().map_err(|error| error.to_string())?;
         check_capture_owner(&ws, workspace_id, output_id)?;
         state.output_engine.start_stage_preview(output_id, owner)
@@ -128,8 +206,10 @@ pub(crate) fn set_stage_preview(
 
 #[tauri::command]
 pub(crate) async fn read_stage_preview(
-    workspace_id: Uuid, output_id: OutputId, session_id: Uuid, after: u32, state: State<'_, AppState>,
+    workspace_id: Uuid, output_id: OutputId, session_id: Uuid, after: u32, window: WebviewWindow, state: State<'_, AppState>,
 ) -> Result<tauri::ipc::Response, String> {
+    let target = StageMonitorTarget { workspace_id, output_id };
+    if !target.permits(window.label()) { return Err("Choose the output assigned to this monitor".into()); }
     let owner = PreviewOwner { workspace: workspace_id, session: session_id };
     let frame = {
         let ws = match state.workspace.try_lock() {
@@ -488,6 +568,18 @@ mod tests {
         assert!(check_capture_owner(&ws, Uuid::new_v4(), id).is_err());
         ws.video_outputs.clear();
         assert!(check_capture_owner(&ws, ws.instance_id, id).is_err());
+    }
+
+    #[test]
+    fn stage_monitor_window_is_bound_to_its_workspace_and_output() {
+        let ws = Workspace::new("Rehearsal");
+        let target = StageMonitorTarget { workspace_id: ws.instance_id(), output_id: MAIN_OUTPUT };
+        assert_eq!(StageMonitorTarget::from_label(&target.label()), Some(target));
+        assert!(target.permits("main"));
+        assert!(!target.permits("preferences"));
+        assert!(!target.permits(&StageMonitorTarget { output_id: Uuid::new_v4(), ..target }.label()));
+        assert_eq!(target.title(&ws).unwrap(), "Main");
+        assert!(target.title(&Workspace::new("Reopened")).is_err());
     }
 
     #[test]

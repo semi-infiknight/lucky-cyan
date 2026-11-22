@@ -1421,5 +1421,11 @@ export interface StageSnapshot {
   png_base64: string;
 }
 
+export interface StageMonitorInfo {
+  workspace_id: string;
+  output_id: string;
+  name: string;
+}
+
 /** Id of the main output. */
 export const MAIN_OUTPUT_ID = "00000000-0000-0000-0000-000000000000";
