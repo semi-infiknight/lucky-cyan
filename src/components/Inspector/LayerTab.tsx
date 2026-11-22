@@ -26,6 +26,12 @@ export const BLEND_MODES: { value: BlendMode; label: string }[] = [
   { value: "difference", label: "Difference" },
   { value: "exclusion", label: "Exclusion" },
   { value: "subtract", label: "Subtract" },
+  { value: "linear_burn", label: "Linear Burn" },
+  { value: "pin_light", label: "Pin Light" },
+  { value: "hue", label: "Hue" },
+  { value: "saturation", label: "Saturation" },
+  { value: "color", label: "Color" },
+  { value: "luminosity", label: "Luminosity" },
 ];
 
 export function LayerTab({

@@ -122,6 +122,10 @@ If a projector disconnects, its saved screen assignment can stay in the pair and
 
 Rehearse with the show’s treatment and actual viewing conditions. Brightness correction cannot remove the combined black floor of two projectors. [QLab overlap and blend gamma](https://qlab.app/docs/v5/video/video-output/#understanding-regions)
 
+## Audition a layer blend
+
+Route two pictures to a spare output, with a colored still above a picture that includes both gray and colored detail. Start both cues, select the foreground and open **Layer → Blend Mode**. Compare **Linear Burn** and **Pin Light**, then try **Hue**, **Saturation**, **Color** and **Luminosity** to choose how the two pictures contribute to the result. Lower the foreground opacity to see more of the picture underneath. The **Saturation** slider adjusts the foreground before the blend, and the **Saturation** blend mode uses its resulting color strength for the overlap. Save and reopen to check your choice. [QLab blend modes](https://qlab.app/docs/v5/video/blend-modes/) · [W3C component blend formulas](https://www.w3.org/TR/compositing-1/#blendingnonseparable)
+
 ## Make one video layer monochrome
 
 1. Route two Image cues to a spare output. Use a still with prominent colors for the foreground and choose a higher layer number for it. Leave a part of the background visible by scaling down the foreground in **Geometry**. Start both cues.

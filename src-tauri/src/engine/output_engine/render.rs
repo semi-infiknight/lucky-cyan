@@ -1013,8 +1013,8 @@ void main() { gl_Position = vec4(POS[gl_VertexID], 0.0, 1.0); }
 
 /// One blend step: `result = blend(backdrop, layer, mode, opacity)`.
 ///
-/// The per-channel math is [`super::blend::GLSL_BLEND_FN`], whose executable
-/// spec is the Rust `blend_channel` in `blend.rs` — keep them identical.
+/// The blend math is [`super::blend::GLSL_BLEND_FN`], mirrored by the Rust
+/// `blend_rgb` reference in `blend.rs`.
 fn build_composite_shader(gl: &glow::Context) -> Result<(glow::Program, glow::VertexArray)> {
     const VERT: &str = r#"
 #version 150 core

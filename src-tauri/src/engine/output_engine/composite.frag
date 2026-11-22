@@ -42,11 +42,8 @@ void main() {
     }
     float sa = clamp(s.a * u_opacity, 0.0, 1.0);
     float ao = sa + b.a * (1.0 - sa);
-    vec3 rgb = vec3(0.0);
-    for (int c = 0; c < 3; c++) {
-        float blended = (1.0 - b.a) * s[c] + b.a * blend_channel(u_blend_mode, b[c], s[c]);
-        rgb[c] = sa * blended + (1.0 - sa) * b.a * b[c];
-    }
+    vec3 blended = (1.0 - b.a) * s.rgb + b.a * blend_rgb(u_blend_mode, b.rgb, s.rgb);
+    vec3 rgb = sa * blended + (1.0 - sa) * b.a * b.rgb;
     if (ao > 0.0) rgb /= ao;
     color = vec4(rgb, ao);
 }

@@ -446,7 +446,8 @@ export const DEFAULT_GEOMETRY: VideoGeometry = {
 export type BlendMode =
   | "normal" | "add" | "multiply" | "screen" | "overlay"
   | "soft_light" | "hard_light" | "darken" | "lighten"
-  | "color_dodge" | "color_burn" | "difference" | "exclusion" | "subtract";
+  | "color_dodge" | "color_burn" | "difference" | "exclusion" | "subtract"
+  | "linear_burn" | "pin_light" | "hue" | "saturation" | "color" | "luminosity";
 
 /** Compositing properties of a visual cue (QLab layer model). */
 export interface LayerStyle {

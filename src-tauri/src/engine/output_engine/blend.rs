@@ -5,7 +5,7 @@
 //! style.  The reference implementations here are **pure Rust mirrors of the
 //! GLSL** in [`GLSL_BLEND_FN`] — same structure as `warp.rs` — so the math is
 //! unit-testable without a GL context; the shader is generated from the same
-//! formulas (standard W3C/Photoshop separable modes).
+//! formulas for separable and W3C component blends.
 //!
 //! Compositing itself is done back-to-front with ping-pong FBOs: GL fixed-
 //! function blending cannot read the backdrop, so each step samples the
@@ -34,11 +34,17 @@ pub enum BlendMode {
     Difference,
     Exclusion,
     Subtract,
+    LinearBurn,
+    PinLight,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
 }
 
 impl BlendMode {
     /// All modes, in inspector display order.
-    pub const ALL: [BlendMode; 14] = [
+    pub const ALL: [BlendMode; 20] = [
         BlendMode::Normal,
         BlendMode::Add,
         BlendMode::Multiply,
@@ -53,6 +59,12 @@ impl BlendMode {
         BlendMode::Difference,
         BlendMode::Exclusion,
         BlendMode::Subtract,
+        BlendMode::LinearBurn,
+        BlendMode::PinLight,
+        BlendMode::Hue,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Luminosity,
     ];
 
     /// Stable integer id passed to the composite shader (`u_blend_mode`).
@@ -72,16 +84,20 @@ impl BlendMode {
             BlendMode::Difference => 11,
             BlendMode::Exclusion => 12,
             BlendMode::Subtract => 13,
+            BlendMode::LinearBurn => 14,
+            BlendMode::PinLight => 15,
+            BlendMode::Hue => 16,
+            BlendMode::Saturation => 17,
+            BlendMode::Color => 18,
+            BlendMode::Luminosity => 19,
         }
     }
 }
 
 /// Reference blend of one colour channel (foreground `s`, backdrop `b`, both
-/// in [0,1]).  Mirrors the GLSL `blend_channel` exactly — this is the
-/// executable spec the shader is verified against; production renders run the
-/// GLSL, so outside tests this function is intentionally unused.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn blend_channel(mode: BlendMode, b: f32, s: f32) -> f32 {
+/// in [0,1]) for modes that treat each color channel independently.
+#[cfg(test)]
+fn blend_channel(mode: BlendMode, b: f32, s: f32) -> f32 {
     match mode {
         BlendMode::Normal => s,
         BlendMode::Add => (b + s).min(1.0),
@@ -117,10 +133,21 @@ pub(crate) fn blend_channel(mode: BlendMode, b: f32, s: f32) -> f32 {
         BlendMode::Difference => (b - s).abs(),
         BlendMode::Exclusion => b + s - 2.0 * b * s,
         BlendMode::Subtract => (b - s).max(0.0),
+        BlendMode::LinearBurn => (b + s - 1.0).max(0.0),
+        BlendMode::PinLight => {
+            if s <= 0.5 {
+                b.min(2.0 * s)
+            } else {
+                b.max(2.0 * s - 1.0)
+            }
+        }
+        BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity => {
+            unreachable!("Component modes combine complete colors")
+        }
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn hard_light(b: f32, s: f32) -> f32 {
     if s <= 0.5 {
         b * 2.0 * s
@@ -131,8 +158,62 @@ fn hard_light(b: f32, s: f32) -> f32 {
     }
 }
 
+#[cfg(test)]
+fn color_range(c: [f32; 3]) -> (f32, f32) {
+    (c[0].min(c[1]).min(c[2]), c[0].max(c[1]).max(c[2]))
+}
+
+#[cfg(test)]
+fn luminosity(c: [f32; 3]) -> f32 {
+    c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11
+}
+
+#[cfg(test)]
+fn saturation(c: [f32; 3]) -> f32 {
+    let (lo, hi) = color_range(c);
+    hi - lo
+}
+
+#[cfg(test)]
+fn with_saturation(c: [f32; 3], saturation: f32) -> [f32; 3] {
+    let (lo, hi) = color_range(c);
+    if hi <= lo {
+        return [0.0; 3];
+    }
+    // Equivalent to SetSat's min/mid/max assignments, including tied channels.
+    c.map(|value| (value - lo) * saturation / (hi - lo))
+}
+
+#[cfg(test)]
+fn with_luminosity(c: [f32; 3], target: f32) -> [f32; 3] {
+    let offset = target - luminosity(c);
+    let mut result = c.map(|value| value + offset);
+    let l = luminosity(result);
+    let (lo, hi) = color_range(result);
+    // Clip chroma around the target luminosity rather than clipping channels
+    // independently, which would shift the hue and luminosity.
+    if lo < 0.0 {
+        result = result.map(|value| l + (value - l) * l / (l - lo));
+    }
+    if hi > 1.0 {
+        result = result.map(|value| l + (value - l) * (1.0 - l) / (hi - l));
+    }
+    result.map(|value| value.clamp(0.0, 1.0))
+}
+
+#[cfg(test)]
+fn blend_rgb(mode: BlendMode, b: [f32; 3], s: [f32; 3]) -> [f32; 3] {
+    match mode {
+        BlendMode::Hue => with_luminosity(with_saturation(s, saturation(b)), luminosity(b)),
+        BlendMode::Saturation => with_luminosity(with_saturation(b, saturation(s)), luminosity(b)),
+        BlendMode::Color => with_luminosity(s, luminosity(b)),
+        BlendMode::Luminosity => with_luminosity(b, luminosity(s)),
+        _ => std::array::from_fn(|channel| blend_channel(mode, b[channel], s[channel])),
+    }
+}
+
 /// Full pixel composite, reference implementation of the GLSL `main`:
-/// blend the channels, then alpha-composite (source-over) with the source
+/// blend the colors, then alpha-composite (source-over) with the source
 /// alpha scaled by the layer opacity.
 ///
 /// `backdrop`/`source` are straight (non-premultiplied) RGBA.
@@ -145,10 +226,12 @@ pub(crate) fn composite_pixel(
 ) -> [f32; 4] {
     let sa = (source[3] * opacity).clamp(0.0, 1.0);
     let ba = backdrop[3];
+    let rgb = |[r, g, b, _]: [f32; 4]| [r, g, b];
+    let blend = blend_rgb(mode, rgb(backdrop), rgb(source));
     let mut out = [0.0f32; 4];
     for c in 0..3 {
         // W3C: result = (1−ba)·s + ba·B(b,s), then source-over with sa.
-        let blended = (1.0 - ba) * source[c] + ba * blend_channel(mode, backdrop[c], source[c]);
+        let blended = (1.0 - ba) * source[c] + ba * blend[c];
         out[c] = sa * blended + (1.0 - sa) * backdrop[c] * ba;
         // Un-premultiply against the output alpha below.
     }
@@ -163,8 +246,7 @@ pub(crate) fn composite_pixel(
 
 /// GLSL function bodies shared by the composite shader (`#version 150 core`).
 ///
-/// `blend_channel(mode, b, s)` must stay formula-identical to
-/// [`blend_channel`] above — the Rust version is the executable spec.
+/// `blend_rgb` and `blend_channel` mirror the Rust reference above.
 pub(crate) const GLSL_BLEND_FN: &str = r#"
 float hard_light(float b, float s) {
     if (s <= 0.5) return b * 2.0 * s;
@@ -197,7 +279,44 @@ float blend_channel(int mode, float b, float s) {
     }
     if (mode == 11) return abs(b - s);
     if (mode == 12) return b + s - 2.0 * b * s;
-    return max(b - s, 0.0);
+    if (mode == 13) return max(b - s, 0.0);
+    if (mode == 14) return max(b + s - 1.0, 0.0);
+    if (mode == 15) return (s <= 0.5) ? min(b, 2.0 * s) : max(b, 2.0 * s - 1.0);
+    return s;
+}
+float color_min(vec3 c) {
+    return min(min(c.r, c.g), c.b);
+}
+float color_max(vec3 c) {
+    return max(max(c.r, c.g), c.b);
+}
+float luminosity(vec3 c) {
+    return dot(c, vec3(0.3, 0.59, 0.11));
+}
+float saturation(vec3 c) {
+    return color_max(c) - color_min(c);
+}
+vec3 with_saturation(vec3 c, float s) {
+    float lo = color_min(c);
+    float hi = color_max(c);
+    return (hi > lo) ? (c - lo) * s / (hi - lo) : vec3(0.0);
+}
+vec3 with_luminosity(vec3 c, float target) {
+    vec3 result = c + (target - luminosity(c));
+    float l = luminosity(result);
+    float lo = color_min(result);
+    float hi = color_max(result);
+    if (lo < 0.0) result = l + (result - l) * l / (l - lo);
+    if (hi > 1.0) result = l + (result - l) * (1.0 - l) / (hi - l);
+    return clamp(result, 0.0, 1.0);
+}
+vec3 blend_rgb(int mode, vec3 b, vec3 s) {
+    if (mode == 16) return with_luminosity(with_saturation(s, saturation(b)), luminosity(b));
+    if (mode == 17) return with_luminosity(with_saturation(b, saturation(s)), luminosity(b));
+    if (mode == 18) return with_luminosity(s, luminosity(b));
+    if (mode == 19) return with_luminosity(b, luminosity(s));
+    return vec3(blend_channel(mode, b.r, s.r), blend_channel(mode, b.g, s.g),
+                blend_channel(mode, b.b, s.b));
 }
 "#;
 
@@ -226,9 +345,8 @@ mod tests {
 
     #[test]
     fn shader_ids_are_unique_and_dense() {
-        let mut ids: Vec<i32> = BlendMode::ALL.iter().map(|m| m.shader_id()).collect();
-        ids.sort_unstable();
-        assert_eq!(ids, (0..14).collect::<Vec<_>>());
+        let ids = BlendMode::ALL.map(BlendMode::shader_id);
+        assert_eq!(ids, std::array::from_fn(|index| index as i32));
     }
 
     #[test]
@@ -275,8 +393,8 @@ mod tests {
         assert!(close(blend_channel(BlendMode::ColorBurn, 1.0, 0.5), 1.0));
         for mode in BlendMode::ALL {
             for &(b, s) in &[(0.0, 0.0), (1.0, 1.0), (0.0, 1.0), (1.0, 0.0)] {
-                let v = blend_channel(mode, b, s);
-                assert!(v.is_finite() && (0.0..=1.0).contains(&v), "{mode:?}({b},{s}) = {v}");
+                let rgb = blend_rgb(mode, [b; 3], [s; 3]);
+                assert!(rgb.iter().all(|v| (0.0..=1.0).contains(v)), "{mode:?}({b},{s}) = {rgb:?}");
             }
         }
     }
@@ -287,6 +405,33 @@ mod tests {
         for &b in &[0.0, 0.25, 0.5, 0.9] {
             assert!(close(blend_channel(BlendMode::SoftLight, b, 0.5), b));
         }
+    }
+
+    #[test]
+    fn new_layer_modes_combine_color_and_honor_transparent_backdrops() {
+        let backdrop = [0.6, 0.4, 0.2, 1.0];
+        let source = [0.25, 0.75, 0.5, 1.0];
+        for (mode, expected) in [
+            (BlendMode::LinearBurn, [0.0, 0.15, 0.0, 1.0]),
+            (BlendMode::PinLight, [0.5, 0.5, 0.2, 1.0]),
+            (BlendMode::Hue, [0.18, 0.58, 0.38, 1.0]),
+            (BlendMode::Saturation, [0.6405, 0.3905, 0.1405, 1.0]),
+            (BlendMode::Color, [0.1155, 0.6155, 0.3655, 1.0]),
+            (BlendMode::Luminosity, [0.7345, 0.5345, 0.3345, 1.0]),
+        ] {
+            let actual = composite_pixel(mode, backdrop, source, 1.0);
+            assert!(
+                actual.into_iter().zip(expected).all(|(a, b)| close(a, b)),
+                "{mode:?}: {actual:?}"
+            );
+            let clear = composite_pixel(mode, [0.0; 4], source, 0.5);
+            assert_eq!(clear, [0.25, 0.75, 0.5, 0.5]);
+        }
+        let clipped = blend_rgb(BlendMode::Color, [0.5; 3], [1.0, 0.0, 0.0]);
+        assert!(clipped
+            .into_iter()
+            .zip([1.0, 2.0 / 7.0, 2.0 / 7.0])
+            .all(|(a, b)| close(a, b)));
     }
 
     #[test]
@@ -323,12 +468,10 @@ mod tests {
     #[test]
     fn glsl_source_contains_every_mode_id() {
         for mode in BlendMode::ALL {
-            if mode != BlendMode::Subtract {
-                assert!(
-                    GLSL_BLEND_FN.contains(&format!("mode == {}", mode.shader_id())),
-                    "GLSL missing mode {mode:?}"
-                );
-            }
+            assert!(
+                GLSL_BLEND_FN.contains(&format!("mode == {})", mode.shader_id())),
+                "GLSL missing mode {mode:?}"
+            );
         }
     }
 }
