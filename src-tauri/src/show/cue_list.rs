@@ -1240,6 +1240,45 @@ impl CueList {
         self.take_enter_follow(owner.group_id)
     }
 
+    /// Step to an armed cue or the beginning of an armed cue sequence.
+    pub(crate) fn step_standby(&mut self, forward: bool, sequence: bool) -> Result<bool> {
+        if self.independent_pads() {
+            return Ok(false);
+        }
+        let current = self.cues.iter().position(|cue| Some(cue.id()) == self.playhead_cue_id);
+        let target = if sequence {
+            self.sequence_destination(current, forward).and_then(|index| self.cues.get(index))
+        } else if forward {
+            let start = current.map_or(0, |index| index + 1);
+            self.cues[start..].iter().find(|cue| !cue.is_disabled())
+        } else {
+            self.cues[..current.unwrap_or(self.cues.len())].iter().rev().find(|cue| !cue.is_disabled())
+        };
+        let Some(id) = target.map(|cue| cue.id()) else { return Ok(false) };
+        self.set_playhead(Some(id))?;
+        Ok(true)
+    }
+
+    fn sequence_destination(&self, current: Option<usize>, forward: bool) -> Option<usize> {
+        // A QLab cue sequence is a run of Auto-Continue/Auto-Follow links.
+        // Only armed cues participate in Inkue's continuation path.
+        let mut head = true;
+        let mut starts = Vec::new();
+        for (index, cue) in self.cues.iter().enumerate().filter(|(_, cue)| !cue.is_disabled()) {
+            if head { starts.push(index); }
+            head = cue.continue_mode() == ContinueMode::DoNotContinue;
+        }
+        match (current, forward) {
+            (None, true) => starts.first().copied(),
+            (None, false) => starts.last().copied(),
+            (Some(current), true) => starts.into_iter().find(|&index| index > current),
+            (Some(current), false) => {
+                let current_sequence = starts.partition_point(|&start| start <= current);
+                current_sequence.checked_sub(2).and_then(|index| starts.get(index).copied())
+            }
+        }
+    }
+
     /// Move the Playhead to a specific cue.
     ///
     /// A top-level cue ID parks the Playhead directly on it.  A cue nested in a

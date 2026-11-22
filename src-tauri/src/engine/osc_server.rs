@@ -3,8 +3,7 @@
 //! Architecture:
 //! - One background thread per socket.
 //! - `recv_from` with a 100 ms read timeout so config changes take effect quickly.
-//! - Native transport handles numbered Go, Start, Select and Stop, plus
-//!   Pause and Resume. Other commands use frontend events.
+//! - Native transport handles workspace commands and addressed cue actions.
 //! - A few binary OSC queries reply directly to an explicitly allowlisted peer.
 
 use std::collections::VecDeque;
@@ -18,7 +17,8 @@ use uuid::Uuid;
 
 use crate::cue::{traits::Cue, types::CueId};
 use crate::commands::transport_cmds::{
-    address_numbered_network_cue, control_network_list_pause, NetworkCueAction, NetworkPauseAction,
+    address_numbered_network_cue, control_network_list_pause, control_network_workspace,
+    NetworkCueAction, NetworkPauseAction, NetworkWorkspaceAction,
 };
 use crate::preferences::OscReceiveConfig;
 use crate::show::Workspace;
@@ -427,6 +427,7 @@ enum OscAction<'a> {
     Command(serde_json::Value),
     /// Resolve the target and run it under the workspace lock.
     AddressedCue { workspace: Option<WorkspaceSelector<'a>>, number: &'a str, action: NetworkCueAction },
+    WorkspaceTransport { workspace: Option<WorkspaceSelector<'a>>, action: NetworkWorkspaceAction },
     /// Use the current native states in the active list under the workspace lock.
     ListPause(NetworkPauseAction),
     /// Trigger a full cue-list feedback dump.
@@ -450,14 +451,23 @@ fn resolve_action<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a> {
         "/inkue/cues/request"     => return OscAction::CueListRequest,
         "/inkue/playhead/request" => return OscAction::PlayheadRequest,
         addr if addr.starts_with("/inkue/cue/") => return parse_cue_address(addr, args),
-        _ => return parse_qlab_numbered_address(addr, args),
+        _ => return parse_qlab_address(addr, args),
     };
     OscAction::Command(payload)
 }
 
 fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, app_handle: &tauri::AppHandle) {
-    let (matched, activity) = match resolve_action(&msg.addr, &msg.args) {
-        OscAction::AddressedCue { workspace: Some(_), .. } if !explicitly_allowed => (false, false),
+    let (matched, activity) = match authorized_action(&msg.addr, &msg.args, explicitly_allowed) {
+        OscAction::WorkspaceTransport { workspace, action } => {
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                if let Err(error) = control_network_workspace(&state, app_handle, action, |show| {
+                    workspace.is_none_or(|selector| selector.matches(show))
+                }) {
+                    log::warn!("Network workspace command {}: {error}", msg.addr);
+                }
+            }
+            (true, true)
+        }
         OscAction::AddressedCue { workspace, number, action } => {
             if let Some(state) = app_handle.try_state::<AppState>() {
                 if let Err(error) = address_numbered_network_cue(&state, app_handle, action, |show| {
@@ -506,6 +516,16 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, app_handle: 
 
     if activity {
         let _ = app_handle.emit("osc-activity", serde_json::json!({}));
+    }
+}
+
+fn authorized_action<'a>(addr: &'a str, args: &[rosc::OscType], explicitly_allowed: bool) -> OscAction<'a> {
+    let action = resolve_action(addr, args);
+    match action {
+        OscAction::AddressedCue { workspace: Some(_), .. }
+        | OscAction::AddressedCue { action: NetworkCueAction::Reset, .. }
+        | OscAction::WorkspaceTransport { .. } if !explicitly_allowed => OscAction::Unmatched,
+        _ => action,
     }
 }
 
@@ -598,15 +618,39 @@ fn qlab_literal_cue_number(number: &str) -> bool {
         && !matches!(number, "selected" | "active" | "playhead" | "all" | "none" | "next" | "previous" | "nextSequence" | "previousSequence")
 }
 
-fn parse_qlab_numbered_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a> {
+fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a> {
     if !args.is_empty() {
         return OscAction::Unmatched;
     }
     let Some((workspace, addr)) = WorkspaceSelector::split_address(addr) else {
         return OscAction::Unmatched;
     };
+    use NetworkWorkspaceAction as Transport;
+    let transport = match addr {
+        "/go" => Some(Transport::Go),
+        "/stop" | "/panic" => Some(Transport::Stop),
+        "/hardStop" => Some(Transport::HardStop),
+        "/pause" => Some(Transport::SetPaused(true)),
+        "/resume" => Some(Transport::SetPaused(false)),
+        "/reset" => Some(Transport::Reset),
+        _ => None,
+    };
+    if let Some(action) = transport {
+        return OscAction::WorkspaceTransport { workspace, action };
+    }
     let playhead = addr.strip_prefix("/playhead/").or_else(|| addr.strip_prefix("/playbackPosition/"));
     let (number, action) = if let Some(number) = playhead {
+        let action = match number {
+            "next" => Some(Transport::Step { forward: true, sequence: false }),
+            "previous" => Some(Transport::Step { forward: false, sequence: false }),
+            "nextSequence" => Some(Transport::Step { forward: true, sequence: true }),
+            "previousSequence" => Some(Transport::Step { forward: false, sequence: true }),
+            "none" => Some(Transport::ClearStandby),
+            _ => None,
+        };
+        if let Some(action) = action {
+            return OscAction::WorkspaceTransport { workspace, action };
+        }
         if workspace.is_some() {
             return OscAction::Unmatched;
         }
@@ -615,6 +659,7 @@ fn parse_qlab_numbered_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> Osc
         match action {
             "start" => (number, NetworkCueAction::Start),
             "stop" => (number, NetworkCueAction::Stop),
+            "reset" => (number, NetworkCueAction::Reset),
             "pause" => (number, NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
             "resume" => (number, NetworkCueAction::SetPause(NetworkPauseAction::Resume)),
             _ => return OscAction::Unmatched,
@@ -1043,6 +1088,7 @@ mod tests {
         for (verb, expected) in [
             ("start", NetworkCueAction::Start),
             ("stop", NetworkCueAction::Stop),
+            ("reset", NetworkCueAction::Reset),
             ("pause", NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
             ("resume", NetworkCueAction::SetPause(NetworkPauseAction::Resume)),
         ] {
@@ -1074,6 +1120,42 @@ mod tests {
         duplicate.set_number(Some("202.1".into()));
         workspace.active_cue_list_mut().unwrap().push(Box::new(duplicate));
         assert_eq!(resolve("/workspace/Blue/cue/202.1/start", &workspace), None);
+    }
+
+    #[test]
+    fn qlab_workspace_transport_requires_an_allowlist_and_exact_workspace() {
+        use NetworkWorkspaceAction::*;
+        let workspace = Workspace::new("Blue");
+        for (path, expected) in [
+            ("/go", Go),
+            ("/stop", Stop),
+            ("/panic", Stop),
+            ("/hardStop", HardStop),
+            ("/pause", SetPaused(true)),
+            ("/resume", SetPaused(false)),
+            ("/reset", Reset),
+            ("/playhead/none", ClearStandby),
+            ("/playhead/next", Step { forward: true, sequence: false }),
+            ("/playbackPosition/previous", Step { forward: false, sequence: false }),
+            ("/playbackPosition/previousSequence", Step { forward: false, sequence: true }),
+        ] {
+            let addr = format!("/workspace/Blue{path}");
+            assert!(matches!(authorized_action(&addr, &[], false), OscAction::Unmatched));
+            assert!(matches!(authorized_action(path, &[], false), OscAction::Unmatched));
+            assert!(matches!(authorized_action(&addr, &[rosc::OscType::Int(1)], true), OscAction::Unmatched));
+            let message = parse_text_message(addr.as_bytes()).unwrap();
+            assert!(matches!(authorized_action(&message.addr, &message.args, true),
+                OscAction::WorkspaceTransport { workspace: Some(selector), action }
+                    if action == expected && selector.matches(&workspace)));
+            assert!(matches!(authorized_action(path, &[], true),
+                OscAction::WorkspaceTransport { workspace: None, action } if action == expected));
+        }
+        assert!(matches!(authorized_action("/workspace/blue/reset", &[], true),
+            OscAction::WorkspaceTransport { workspace: Some(selector), .. } if !selector.matches(&workspace)));
+        assert!(matches!(authorized_action("/cue/12/reset", &[], true),
+            OscAction::AddressedCue { action: NetworkCueAction::Reset, number: "12", .. }));
+        assert!(matches!(authorized_action("/cue/12/reset", &[], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/workspace/*/reset", &[], true), OscAction::Unmatched));
     }
 
     #[test]
@@ -1277,7 +1359,7 @@ mod tests {
             "", "/go 2", "/inkue/go\0", "/inkue/go\n/inkue/stop", "/inkue/go /inkue/stop",
             "/inkue/cue//go", "/inkue/cue/*/go", "/cue/all/stop", "/cue/selected/stop",
             "/cue/selected/start", "/cue/102/start 1", "/cue/*/start", "/inkue/cue/102/seek/relative/extra 1", "/inkue/cue/102/seek",
-            "/playhead/active", "/playbackPosition/previous", "/playhead/1.5 1", "/playhead/*", "/playhead/1.5/extra",
+            "/playhead/active", "/playbackPosition/previous/extra", "/playhead/1.5 1", "/playhead/*", "/playhead/1.5/extra",
             "/inkue/cue/102/seek NaN", "/inkue/cue/102/seek/percent 1.2", "/unknown",
         ] {
             assert!(parse_text_message(input.as_bytes()).is_none(), "{input:?}");
@@ -1358,7 +1440,7 @@ mod tests {
                     if number == cue_number && action == expected), "{address}");
             }
         }
-        for invalid in ["/inkue/cue//start", "/cue/all/stop", "/playhead/next", "/cue/*/stop",
+        for invalid in ["/inkue/cue//start", "/cue/all/stop", "/playhead/next/extra", "/cue/*/stop",
             "/playhead/1.5/extra", "/select/1.5", "/workspace/show/playhead/1.5", "/cue/1.5/go",
             "/cue/selected/pause", "/cue/all/resume", "/cue/*/pause", "/cue/3/resume/extra"]
         {

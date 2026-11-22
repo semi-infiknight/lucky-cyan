@@ -182,6 +182,7 @@ pub(crate) enum NetworkCueAction {
     Start,
     Select,
     Stop,
+    Reset,
     SetPause(NetworkPauseAction),
 }
 
@@ -217,7 +218,63 @@ pub(crate) fn address_numbered_network_cue(
         }
         NetworkCueAction::Select => super::cue_cmds::set_playhead_in_list(cue_list, Some(id), app_handle),
         NetworkCueAction::Stop => stop_cue_in_list(&mut transport, cue_list, id, app_handle),
+        NetworkCueAction::Reset => {
+            let result = transport.reset_cue(cue_list, id).map_err(|error| error.to_string());
+            let _ = app_handle.emit("cue-list-refresh", ());
+            result
+        }
         NetworkCueAction::SetPause(action) => network_pause_in_list(&transport.context, cue_list, Some(id), action, app_handle),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NetworkWorkspaceAction {
+    Go,
+    Stop,
+    HardStop,
+    Reset,
+    SetPaused(bool),
+    Step { forward: bool, sequence: bool },
+    ClearStandby,
+}
+
+pub(crate) fn control_network_workspace(
+    state: &AppState,
+    app_handle: &tauri::AppHandle,
+    action: NetworkWorkspaceAction,
+    matches_workspace: impl FnOnce(&Workspace) -> bool,
+) -> Result<(), String> {
+    use NetworkWorkspaceAction::*;
+    let mut show = state.workspace.lock().map_err(|error| error.to_string())?;
+    if !matches_workspace(&show) {
+        return Ok(());
+    }
+    match action {
+        Go => go_locked(state, app_handle, &mut show).map(|_| ()),
+        Stop | HardStop => stop_locked(state, app_handle, &mut show, action == HardStop),
+        Reset => reset_workspace_locked(state, app_handle, &mut show),
+        SetPaused(paused) => {
+            let context = workspace_context(state, &show);
+            let mut first_error = None;
+            for list in &mut show.cue_lists {
+                if let Err(error) = crate::show::cue_list_window::set_list_paused(list, &context, paused) {
+                    first_error.get_or_insert(error);
+                }
+            }
+            let _ = app_handle.emit("cue-list-refresh", ());
+            first_error.map_or(Ok(()), |error| Err(error.to_string()))
+        }
+        Step { forward, sequence } => {
+            let Some(list) = show.active_cue_list_mut() else { return Ok(()) };
+            if list.step_standby(forward, sequence).map_err(|error| error.to_string())? {
+                emit_playhead(app_handle, list.playhead_cue_id);
+            }
+            Ok(())
+        }
+        ClearStandby => {
+            let Some(list) = show.active_cue_list_mut().filter(|list| !list.independent_pads()) else { return Ok(()) };
+            super::cue_cmds::set_playhead_in_list(list, None, app_handle)
+        }
     }
 }
 
@@ -494,12 +551,22 @@ pub fn reset_workspace_transport(
     if show.instance_id() != workspace_id {
         return Err("The workspace changed before it could be reset.".into());
     }
-    let mut transport = Transport::new(workspace_context(&state, &show));
+    reset_workspace_locked(&state, &app_handle, &mut show)
+}
+
+fn reset_workspace_locked(
+    state: &AppState, app_handle: &tauri::AppHandle, show: &mut Workspace,
+) -> Result<(), String> {
+    let mut transport = Transport::new(workspace_context(state, show));
     transport.reset_workspace(&mut show.cue_lists).map_err(|error| error.to_string())?;
     let standby = show.active_cue_list().and_then(|list| list.playhead_cue_id);
+    emit_playhead(app_handle, standby);
+    Ok(())
+}
+
+fn emit_playhead(app_handle: &tauri::AppHandle, standby: Option<CueId>) {
     let _ = app_handle.emit("playhead-moved", serde_json::json!({ "cue_id": standby }));
     let _ = app_handle.emit("cue-list-refresh", ());
-    Ok(())
 }
 
 /// An operator-selected action on the local desk. The ordinary hard stop, ESC,

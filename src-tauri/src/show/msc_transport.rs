@@ -5,7 +5,7 @@ use anyhow::Result;
 use crate::cue::{
     msc::{MscAction, MscTransport},
     traits::Cue,
-    types::{ContinueMode, CueState, CueType},
+    types::{CueState, CueType},
 };
 use crate::engine::midi_transport::MidiTransportAction;
 
@@ -118,8 +118,14 @@ pub(super) fn apply(
             }
             Ok(true)
         }
-        MscAction::Step { forward, sequence } => step_standby(list, forward, sequence),
-        MscAction::Reset(Some(number)) => transport.reset_numbered_cue(list, &number),
+        MscAction::Step { forward, sequence } => list.step_standby(forward, sequence),
+        MscAction::Reset(Some(number)) => {
+            let Some(id) = list.unique_numbered_cue(&number).map(|cue| cue.id()) else {
+                return Ok(false);
+            };
+            transport.reset_cue(list, id)?;
+            Ok(true)
+        }
         MscAction::Pause(Some(ref number)) | MscAction::Resume(Some(ref number)) | MscAction::Load(Some(ref number)) => {
             let Some(id) = list.unique_numbered_cue(number).map(|cue| cue.id()) else {
                 return Ok(false);
@@ -156,48 +162,10 @@ fn resume(transport: &Transport, cue: &mut dyn Cue) -> Result<bool> {
     Ok(true)
 }
 
-fn step_standby(list: &mut CueList, forward: bool, sequence: bool) -> Result<bool> {
-    if list.independent_pads() {
-        return Ok(false);
-    }
-    let current = list.cues.iter().position(|cue| Some(cue.id()) == list.playhead_cue_id);
-    let target = if sequence {
-        sequence_destination(list, current, forward).and_then(|index| list.cues.get(index))
-    } else if forward {
-        let start = current.map_or(0, |index| index + 1);
-        list.cues[start..].iter().find(|cue| !cue.is_disabled())
-    } else {
-        list.cues[..current.unwrap_or(list.cues.len())].iter().rev().find(|cue| !cue.is_disabled())
-    };
-    let Some(id) = target.map(|cue| cue.id()) else { return Ok(false) };
-    list.set_playhead(Some(id))?;
-    Ok(true)
-}
-
-fn sequence_destination(list: &CueList, current: Option<usize>, forward: bool) -> Option<usize> {
-    // A QLab cue sequence is a run of Auto-Continue/Auto-Follow links.
-    // Only armed cues participate in Inkue's continuation path.
-    let mut head = true;
-    let mut starts = Vec::new();
-    for (index, cue) in list.cues.iter().enumerate().filter(|(_, cue)| !cue.is_disabled()) {
-        if head { starts.push(index); }
-        head = cue.continue_mode() == ContinueMode::DoNotContinue;
-    }
-    match (current, forward) {
-        (None, true) => starts.first().copied(),
-        (None, false) => starts.last().copied(),
-        (Some(current), true) => starts.into_iter().find(|&index| index > current),
-        (Some(current), false) => {
-            let current_sequence = starts.partition_point(|&start| start <= current);
-            current_sequence.checked_sub(2).and_then(|index| starts.get(index).copied())
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cue::{audio_cue::AudioCue, wait_cue::WaitCue};
+    use crate::cue::{audio_cue::AudioCue, types::ContinueMode, wait_cue::WaitCue};
     use std::{sync::Arc, time::Duration};
 
     #[test]

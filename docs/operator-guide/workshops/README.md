@@ -120,7 +120,16 @@ Send one UTF-8 command of up to 1,024 bytes per datagram. Inkue addresses for `s
 2. Re-enable the plain text listener with `127.0.0.1` in the allowlist. In the terminal command above, send `/workspace/RehearsalBlue.inkue/cue/201/start`. Check the running cue in **Cue Monitor** and confirm that standby stays on 101. Use the same path with `pause`, `resume`, and `stop`.
 3. Send the same command with a different filename and confirm 201 stays idle. Give a cue in the first list the number 201 and confirm that the scoped command leaves both cues idle. Restore the numbers and the network settings when you finish.
 
-Workspace-scoped `start`, `stop`, `pause`, and `resume` accept no arguments and require an explicitly allowlisted sender on either receive port. Use the exact address-compatible workspace title, the exact saved filename, or the UUID returned by a binary OSC query. The UUID changes when the workspace reopens. The number must be unique across the workspace, including nested cues. Targets must be top-level cues or cart pads. Scoped lookups cover up to 4,096 lists and 4,096 cue rows. [Read-only OSC queries](#read-standby-and-cue-state-from-an-osc-controller)
+Workspace-scoped `start`, `stop`, `pause`, `resume`, and `reset` accept no arguments and require an explicitly allowlisted sender on either receive port. Use the exact address-compatible workspace title, the exact saved filename, or the UUID returned by a binary OSC query. The UUID changes when the workspace reopens. The number must be unique across the workspace, including nested cues. Targets must be top-level cues or cart pads. Scoped lookups cover up to 4,096 lists and 4,096 cue rows. [Read-only OSC queries](#read-standby-and-cue-state-from-an-osc-controller)
+
+### Run workspace transport from a controller
+
+1. Allowlist the controller's IP under **Preferences → Network**. Open a rehearsal workspace saved as `RehearsalBlue.inkue`. In the controller, send the argument-free address `/workspace/RehearsalBlue.inkue/go`. Check that only the active list advances.
+2. Start a second Wait in another list. Send `/workspace/RehearsalBlue.inkue/pause` to pause both waits and `/workspace/RehearsalBlue.inkue/resume` to resume them. Media prepared by Load stays held for a separate start.
+3. Send `/workspace/RehearsalBlue.inkue/playhead/nextSequence` to move standby without starting a cue. The navigation also accepts `next`, `previous`, `previousSequence`, and `none`. Use either `playhead` or `playbackPosition` in the address.
+4. Send `/workspace/RehearsalBlue.inkue/reset` to stop the desk and return each sequential list to its first cue. To reset one top-level cue, send `/workspace/RehearsalBlue.inkue/cue/201/reset`. Try a different workspace name and confirm the command leaves the rehearsal desk alone.
+
+The same workspace prefix supports `stop` and `panic` for a soft stop and `hardStop` for an immediate cut. With binary OSC, the argument-free addresses also work without a workspace prefix on the currently open workspace. These controls require an explicitly allowlisted sender. [QLab OSC workspace dictionary](https://qlab.app/docs/v5/scripting/osc-dictionary-v5/#workspace-commands)
 
 ## Bind a footswitch and check its release
 

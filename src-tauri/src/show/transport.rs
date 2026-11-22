@@ -699,14 +699,10 @@ impl Transport {
         stopped.and(reset)
     }
 
-    pub(crate) fn reset_numbered_cue(&self, list: &mut CueList, number: &str) -> Result<bool> {
-        let Some(id) = list.unique_numbered_cue(number).map(|cue| cue.id()) else {
-            return Ok(false);
-        };
+    pub(crate) fn reset_cue(&self, list: &mut CueList, id: CueId) -> Result<()> {
         list.cancel_enter_follow_for(id);
-        let cue = list.get_mut(&id).ok_or_else(|| anyhow!("Cue {number} no longer exists"))?;
-        self.reset_cue_state(cue)?;
-        Ok(true)
+        let cue = list.get_mut(&id).ok_or_else(|| anyhow!("Cue {id} no longer exists"))?;
+        self.reset_cue_state(cue)
     }
 
     pub(crate) fn reset_workspace(&mut self, lists: &mut [CueList]) -> Result<()> {
