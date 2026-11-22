@@ -31,4 +31,13 @@ describe("cue trigger keys", () => {
     expect(from({ key: "1", getModifierState: modifier => modifier === "AltGraph" })).toBeNull();
     expect(from({ key: "9", ctrlKey: true })).toBeNull();
   });
+
+  it("accepts function keys for hardware controllers while preserving desk shortcuts", () => {
+    expect(from({ key: "F2" })).toBe("F2");
+    expect(from({ key: "F13", shiftKey: true })).toBe("Shift+F13");
+    expect(from({ key: "F24" })).toBe("F24");
+    for (const key of ["F1", "F5", "F9", "F10", "F11", "F12", "F25"]) {
+      expect(from({ key, shiftKey: true })).toBeNull();
+    }
+  });
 });

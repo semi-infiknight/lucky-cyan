@@ -69,7 +69,7 @@ export function useKeyboardShortcuts(
       const agentControl = target.closest?.("[data-agent-controls]");
       if (agentControl && e.key !== "Escape") return;
       const binding = cueHotkey(e);
-      if (binding && e.isTrusted && !e.repeat && document.hasFocus() && !target.isContentEditable &&
+      if (binding && e.isTrusted && document.hasFocus() && !target.isContentEditable &&
           !target.closest?.("input, textarea, select, [role='textbox']") &&
           target.closest?.("[data-cue-hotkeys]") &&
           !document.querySelector("[aria-modal='true'], dialog[open], [data-cue-hotkeys-blocked]")) {
@@ -78,7 +78,9 @@ export function useKeyboardShortcuts(
         const owner = cue?.cue_list_owner;
         if (cue && owner && owner.workspace_id === workspaceInfo?.instance_id && owner.list_id === activeCueListId) {
           e.preventDefault();
-          await fireCueHotkey(owner.workspace_id, owner.list_id, cue.id, binding).catch(console.error);
+          if (!e.repeat) {
+            await fireCueHotkey(owner.workspace_id, owner.list_id, cue.id, binding).catch(console.error);
+          }
           return;
         }
       }

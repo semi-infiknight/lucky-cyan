@@ -21,12 +21,13 @@ The selection can include cues inside a group. The desk keeps other cue numbers 
 
 ## Call a rehearsal cue by keyboard
 
-A keyboard trigger starts the addressed cue in the active list. A sequential list follows its usual playhead and continue rules. An independent cart fires its addressed pad. An assignment can use **0–9** or a letter with optional **Shift**. Inkue reserves **G**, **P** and **S** for desk controls. The assignment follows the character in the current keyboard layout.
+A keyboard trigger starts the addressed cue in the active list. A sequential list follows its usual playhead and continue rules. An independent cart fires its addressed pad. An assignment can use **0–9**, a letter other than **G**, **P**, or **S**, or a function key from the picker. Hold **Shift** for a separate binding with letters and function keys. The assignment follows the key reported by the current keyboard layout.
 
 1. In a practice copy, add two five-second Wait cues. Set each to **Do Not Continue**. On the second cue, open **Triggers → Keyboard trigger** and choose **Shift+J**. Save the show.
 2. Click the first cue row to give the list keyboard focus. Press **Shift+J**. Watch the second Wait start. Holding the keys should produce one start. Type the same letter into a cue name or the search field and check that it only edits text.
 3. Disarm the second cue and try the key again with the list focused. Both Wait cues should stay idle after the previous run finishes. Re-arm it, reopen the saved show, and repeat with focus in Show Mode. On an independent cart, focus a pad in **Trigger pads** mode.
 4. Try assigning **Shift+J** to the other cue in the same list. The inspector identifies the existing assignment. To move it, choose **Unassigned** on its original cue first.
+5. If your keypad or button controller sends keyboard events, set one button to **F13**, capture it in the inspector, then press it once with the cue list focused. The picker includes **F2–F4**, **F6–F8**, and **F13–F24**. Rehearse with the controller attached to the performance machine.
 
 Assign keys to top-level cues or to direct children of a top-level Sequential group or Playlist. To start a Simultaneous or Start Random group, assign its group row. Moving a bound cue into an ineligible position leaves its assignment inactive. Keyboard triggers work in the focused main desk. Recreate QLab hotkeys in the Inkue inspector after import. [QLab 5 Hotkey Trigger](https://qlab.app/docs/v5/fundamentals/inspector/#hotkey-trigger)
 

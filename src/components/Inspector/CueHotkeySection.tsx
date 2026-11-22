@@ -1,7 +1,7 @@
 import { useId, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { setCueHotkey } from "../../lib/commands";
-import { cueHotkey, CUE_HOTKEY_DIGITS, CUE_HOTKEY_LETTERS } from "../../lib/shortcuts";
+import { cueHotkey, CUE_HOTKEY_DIGITS, CUE_HOTKEY_FUNCTION_KEYS, CUE_HOTKEY_LETTERS } from "../../lib/shortcuts";
 import type { CueSummary } from "../../lib/types";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 
@@ -49,7 +49,7 @@ export function CueHotkeySection({ cue, onSave }: { cue: CueSummary; onSave?: ()
     if (["Shift", "Control", "Alt", "Meta"].includes(event.key)) return;
     const key = cueHotkey(event.nativeEvent);
     if (!key) {
-      setError("Use 0–9 or a letter other than G, P or S. Shift is available for letters.");
+      setError("Use a key from the list. Shift is available for letters and function keys.");
       return;
     }
     setCapture(null);
@@ -70,6 +70,11 @@ export function CueHotkeySection({ cue, onSave }: { cue: CueSummary; onSave?: ()
           <optgroup label="Number">
             {CUE_HOTKEY_DIGITS.map(digit => <option key={digit} disabled={!eligible} value={digit}>{digit}</option>)}
           </optgroup>
+          {["", "Shift+"].map(prefix => <optgroup key={prefix} label={prefix ? "Function key with Shift" : "Function key"}>
+            {CUE_HOTKEY_FUNCTION_KEYS.map(key => <option key={key} disabled={!eligible} value={prefix + key}>
+              {prefix + key}
+            </option>)}
+          </optgroup>)}
         </select>
       </label>
       <button type="button" aria-pressed={Boolean(capture)} aria-describedby={hint} aria-disabled={busy || !eligible}

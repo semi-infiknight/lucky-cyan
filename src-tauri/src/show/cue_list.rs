@@ -188,9 +188,14 @@ fn valid_hotkey(key: &str) -> bool {
     if matches!(key.as_bytes(), [b'0'..=b'9']) {
         return true;
     }
+    let unshifted = key.strip_prefix("Shift+").unwrap_or(key);
     matches!(
-        key.strip_prefix("Shift+").unwrap_or(key).as_bytes(),
+        unshifted.as_bytes(),
         [b'A'..=b'F' | b'H'..=b'O' | b'Q'..=b'R' | b'T'..=b'Z']
+    ) || matches!(
+        unshifted,
+        "F2" | "F3" | "F4" | "F6" | "F7" | "F8" | "F13" | "F14" | "F15" | "F16"
+            | "F17" | "F18" | "F19" | "F20" | "F21" | "F22" | "F23" | "F24"
     )
 }
 
@@ -2253,19 +2258,21 @@ mod tests {
         list.push(first);
         list.push(second);
         for invalid in ["Junk", "Space", "Escape", "Ctrl+J", "Shift+S", "shift+J", "P", "G", "ß",
-            "00", "Shift+4", "Numpad4", " 4", "４"] {
+            "00", "Shift+4", "Numpad4", " 4", "４", "F1", "Shift+F5", "F9", "F11", "F25", "F02"] {
             assert!(list.check_hotkey(a, Some(invalid)).is_err());
         }
         list.check_hotkey(a, Some("Shift+J")).unwrap();
         list.hotkeys.insert(a, "Shift+J".into());
         assert!(list.check_hotkey(b, Some("Shift+J")).is_err());
-        list.check_hotkey(b, Some("J")).unwrap();
+        list.check_hotkey(b, Some("F2")).unwrap();
+        list.replace_hotkey(b, Some("Shift+F13".into())).unwrap();
         let saved = list.to_json();
         let mut loaded = CueList::from_json(saved.clone(), &registry).unwrap();
         assert_eq!(loaded.hotkeys.get(&a).map(String::as_str), Some("Shift+J"));
+        assert_eq!(loaded.hotkeys.get(&b).map(String::as_str), Some("Shift+F13"));
         loaded.remove(&a).unwrap();
         loaded.check_hotkey(b, Some("Shift+J")).unwrap();
-        assert_eq!(loaded.to_json()["hotkeys"], serde_json::json!({}));
+        assert_eq!(loaded.to_json()["hotkeys"], serde_json::json!({ (b.to_string()): "Shift+F13" }));
         let mut legacy = saved.clone();
         legacy.as_object_mut().unwrap().remove("hotkeys");
         assert!(CueList::from_json(legacy, &registry).unwrap().hotkeys.is_empty());
