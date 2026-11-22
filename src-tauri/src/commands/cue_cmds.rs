@@ -19,7 +19,8 @@ use crate::{
             apply_decoded_audio_to_copy, assign_fresh_ids, assign_fresh_ids_to_copies, collect_decoded_audio,
         },
         traits::Cue,
-        types::{ContinueMode, CueColor, CueState, CueType, GroupMode, PlaylistSecondTrigger},
+        types::{ContinueMode, CueColor, CueState, CueType, GroupMode, PlaylistSecondTrigger, SliceList, PLAY_COUNT_INFINITE},
+        video_cue::VideoCue,
     },
     engine::audition::AuditionClip,
     show::{
@@ -67,6 +68,8 @@ pub struct CueSummary {
     pub pre_wait_ms: u64,
     #[serde(default)]
     pub supports_timeline_entrance: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_slices: Option<TimelineSliceGuides>,
     /// Owner captured with the Simultaneous Group and its direct child rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline_owner: Option<GroupTimelineOwner>,
@@ -216,6 +219,65 @@ fn supports_timeline_entrance(kind: CueType) -> bool {
         | CueType::Midi | CueType::MidiFile | CueType::Timecode | CueType::Group)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineSliceGuides {
+    offsets_ms: Vec<u64>,
+    duration_ms: Option<u64>,
+}
+
+fn project_timeline_slices(slices: &SliceList, start_ms: u64, end_ms: u64, rate: f64) -> Option<TimelineSliceGuides> {
+    if !rate.is_finite() || rate <= 0.0 { return None; }
+    let segments = slices.segments(start_ms, end_ms);
+    if segments.is_empty() { return None; }
+    let mut offsets_ms = Vec::with_capacity(segments.len() - 1);
+    let mut played_ms = 0u64;
+    let wall_time = |file_ms: u64| (file_ms as f64 / rate).round() as u64;
+    for (index, &(start, end, count)) in segments.iter().enumerate() {
+        if count == PLAY_COUNT_INFINITE {
+            return Some(TimelineSliceGuides { offsets_ms, duration_ms: None });
+        }
+        played_ms = played_ms.saturating_add((end - start).saturating_mul(u64::from(count)));
+        if index + 1 < segments.len() {
+            let offset = wall_time(played_ms);
+            if offset != 0 && offsets_ms.last() != Some(&offset) { offsets_ms.push(offset); }
+        }
+    }
+    Some(TimelineSliceGuides { offsets_ms, duration_ms: Some(wall_time(played_ms)) })
+}
+
+fn cue_timeline_slices(cue: &dyn Cue) -> Option<TimelineSliceGuides> {
+    let data = cue as &dyn std::any::Any;
+    let (slices, start, end, rate) = if let Some(audio) = data.downcast_ref::<AudioCue>() {
+        (&audio.slices, audio.start_time, audio.end_time, audio.rate)
+    } else {
+        let video = data.downcast_ref::<VideoCue>()?;
+        (&video.slices, video.start_time, video.end_time, 1.0)
+    };
+    if slices.is_empty() { return None; }
+    let end = match (cue.file_duration(), end) {
+        (Some(file), Some(trim)) => file.min(trim),
+        (length, trim) => length.or(trim)?,
+    };
+    project_timeline_slices(slices, start.unwrap_or_default().as_millis() as u64, end.as_millis() as u64, rate)
+}
+
+#[cfg(test)]
+#[test]
+fn timeline_slice_guides_follow_trim_rate_repeats_and_indefinite_vamps() {
+    let mut slices = SliceList {
+        markers: vec![500, 1_000, 3_000, 5_000],
+        play_counts: vec![1, 2, 3, 1, 1],
+    };
+    let projected = project_timeline_slices(&slices, 500, 4_000, 2.0).unwrap();
+    assert_eq!(projected.offsets_ms, [500, 3_500]);
+    assert_eq!(projected.duration_ms, Some(4_000));
+    slices.play_counts[2] = PLAY_COUNT_INFINITE;
+    let vamped = project_timeline_slices(&slices, 500, 4_000, 2.0).unwrap();
+    assert_eq!(vamped.offsets_ms, [500]);
+    assert_eq!(vamped.duration_ms, None);
+    assert!(project_timeline_slices(&slices, 5_500, 6_000, 1.0).is_none());
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupTimelineOwner {
     workspace_id: Uuid,
@@ -242,8 +304,13 @@ fn summarise(
     let advancing_playlist = (cue.playlist_advance_playhead() == Some(true))
         .then(|| (cue as &dyn std::any::Any).downcast_ref::<GroupCue>()).flatten();
     let second_color = list.second_colors.get(&cue.id()).copied();
+    let has_timeline = cue.group_mode() == Some(GroupMode::Simultaneous);
     let children: Option<Vec<CueSummary>> = cue.child_cues().map(|children| {
-        children.iter().map(|child| summarise(child.as_ref(), list, owner, workspace_dir, patches, starts, missing)).collect()
+        children.iter().map(|child| {
+            let mut summary = summarise(child.as_ref(), list, owner, workspace_dir, patches, starts, missing);
+            if has_timeline { summary.timeline_slices = cue_timeline_slices(child.as_ref()); }
+            summary
+        }).collect()
     });
     CueSummary {
         flagged: list.flagged_cues.contains(&cue.id()),
@@ -267,7 +334,8 @@ fn summarise(
         display_color: second_color.filter(|_| starts.is_some_and(|starts| starts.contains(&cue.id()))),
         pre_wait_ms: cue.pre_wait().as_millis() as u64,
         supports_timeline_entrance: supports_timeline_entrance(cue.cue_type()),
-        timeline_owner: (cue.group_mode() == Some(GroupMode::Simultaneous)).then_some(owner),
+        timeline_slices: None,
+        timeline_owner: has_timeline.then_some(owner),
         post_wait_ms: cue.post_wait().as_millis() as u64,
         duration_ms: cue.duration().map(|d| d.as_millis() as u64),
         file_path: cue.media_file_path().map(|p| p.to_string_lossy().into_owned()),

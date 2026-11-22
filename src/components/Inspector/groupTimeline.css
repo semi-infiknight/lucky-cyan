@@ -42,6 +42,7 @@
   font: inherit;
 }
 .group-timeline-zoom button[aria-disabled="true"] { opacity: .5; }
+.group-timeline-zoom button[aria-pressed="true"] { border-color: var(--wc-accent); }
 .group-timeline-zoom button[aria-disabled="false"]:hover { background: var(--wc-bg-deepest); }
 .group-timeline-zoom output {
   min-width: 2.1em;
@@ -180,6 +181,13 @@
   top: 0;
   bottom: 0;
   border-inline-start: 1px dashed var(--wc-text);
+  pointer-events: none;
+}
+.group-timeline-slice {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  border-inline-start: 1px dotted var(--wc-text-secondary);
   pointer-events: none;
 }
 .group-timeline-entrance {

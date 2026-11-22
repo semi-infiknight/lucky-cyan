@@ -16,8 +16,18 @@ export function timelineActionTime(sample: CueTiming | undefined, workspaceId: s
   return Math.max(0, sample.action_elapsed_ms);
 }
 
-export function timelineSpanMs(children: { pre_wait_ms: number; duration_ms: number | null }[]): number {
-  const last = children.reduce((end, cue) => Math.max(end, cue.pre_wait_ms + (cue.duration_ms ?? 0)), 0);
+type TimelineCueLength = Pick<CueSummary, "pre_wait_ms" | "duration_ms" | "timeline_slices">;
+
+export function timelineDuration(cue: TimelineCueLength): number | null {
+  return cue.timeline_slices ? cue.timeline_slices.duration_ms : cue.duration_ms;
+}
+
+export function timelineSpanMs(children: TimelineCueLength[]): number {
+  const last = children.reduce((end, cue) => {
+    const offsets = cue.timeline_slices?.offsets_ms;
+    const lastSlice = offsets?.[offsets.length - 1] ?? 0;
+    return Math.max(end, cue.pre_wait_ms + Math.max(timelineDuration(cue) ?? 0, lastSlice));
+  }, 0);
   const interval = Math.max(1000, (last * 1.05) / 4);
   const power = 10 ** Math.floor(Math.log10(interval));
   const step = [1, 2, 2.5, 5, 10].find(value => value * power >= interval) ?? 10;
@@ -55,14 +65,18 @@ export function dragEntranceMs(startMs: number, deltaPx: number, widthPx: number
 }
 
 type TimelineGuideCue = Pick<CueSummary,
-  "id" | "pre_wait_ms" | "duration_ms" | "is_disabled" | "supports_timeline_entrance">;
+  "id" | "pre_wait_ms" | "duration_ms" | "timeline_slices" | "is_disabled" | "supports_timeline_entrance">;
 
-export function timelineGuideTimes(children: TimelineGuideCue[], movingId: string): number[] {
+export function timelineGuideTimes(children: TimelineGuideCue[], movingId: string, includeSlices = false): number[] {
   const times = new Set([0]);
   for (const child of children) {
     if (child.id === movingId || !child.supports_timeline_entrance || child.is_disabled) continue;
     times.add(child.pre_wait_ms);
-    if (child.duration_ms !== null) times.add(child.pre_wait_ms + child.duration_ms);
+    const duration = timelineDuration(child);
+    if (duration !== null) times.add(child.pre_wait_ms + duration);
+    if (includeSlices) {
+      for (const offset of child.timeline_slices?.offsets_ms ?? []) times.add(child.pre_wait_ms + offset);
+    }
   }
   return [...times].filter(ms => ms <= MAX_PRE_WAIT_MS).sort((first, second) => first - second);
 }

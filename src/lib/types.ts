@@ -268,6 +268,8 @@ export interface CueSummary {
   display_color?: CueColor;
   pre_wait_ms: number;
   supports_timeline_entrance?: boolean;
+  /** Programmed slice boundaries on a direct Simultaneous Group child's clock. */
+  timeline_slices?: { offsets_ms: number[]; duration_ms: number | null };
   timeline_owner?: GroupTimelineOwner;
   post_wait_ms: number;
   duration_ms: number | null;

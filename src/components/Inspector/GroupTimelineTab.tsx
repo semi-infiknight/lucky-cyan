@@ -7,7 +7,7 @@ import { useTimingStore } from "../../stores/timingStore";
 import {
   dragEntranceMs, matchingTimelineOwner, MAX_PRE_WAIT_MS, nudgeTimelineEntrance, parseEntranceSeconds,
   snapTimelineEntrance, timelineGuideTimes, timelinePointerDelta, timelineSpanMs,
-  timelineActionTime, timelineReferenceOrder, timelineZoomScrollLeft, TIMELINE_ZOOM_LEVELS,
+  timelineActionTime, timelineDuration, timelineReferenceOrder, timelineZoomScrollLeft, TIMELINE_ZOOM_LEVELS,
 } from "./groupTimeline";
 import "./groupTimeline.css";
 
@@ -27,6 +27,7 @@ interface RowProps {
   onPin: (childId: string, button: HTMLButtonElement) => void;
   spanMs: number;
   sharedGuideMs: number | null;
+  showSlices: boolean;
   guidesFor: (movingId: string) => number[];
   onGuide: (ms: number | null) => void;
   commit: (expected: number, ms: number) => Promise<void>;
@@ -34,7 +35,7 @@ interface RowProps {
 }
 
 function TimelineRow({
-  child, locked, pinned, onPin, spanMs, sharedGuideMs, guidesFor, onGuide, commit, onError,
+  child, locked, pinned, onPin, spanMs, sharedGuideMs, showSlices, guidesFor, onGuide, commit, onError,
 }: RowProps) {
   const drag = useRef<EntranceDrag | null>(null);
   const entryStart = useRef<number | null>(null);
@@ -45,9 +46,10 @@ function TimelineRow({
   const label = [child.number, child.name || "Untitled cue"].filter(Boolean).join(" ");
   const entranceMs = timed ? (preview ?? child.pre_wait_ms) : 0;
   const start = Math.min(100, entranceMs * 100 / spanMs);
-  const duration = timed ? child.duration_ms : null;
+  const duration = timed ? timelineDuration(child) : null;
   const length = Math.min(100 - start, (duration ?? 0) * 100 / spanMs);
-  const detail = timed ? (duration === null ? "Duration unknown" : duration / 1000 + " s") : "No timed entrance";
+  const detail = !timed ? "No timed entrance" : duration !== null ? `${duration / 1000} s`
+    : child.timeline_slices ? "Vamp holds duration open" : "Duration unknown";
 
   const save = async (expected: number, ms: number) => {
     if (editable && expected !== ms) {
@@ -153,6 +155,10 @@ function TimelineRow({
       </div>
       <div className="group-timeline-track" aria-hidden="true">
         {length > 0 && <span className="group-timeline-duration" style={{ left: start + "%", width: length + "%" }} />}
+        {showSlices && child.timeline_slices?.offsets_ms.map(offset => (
+          <span key={offset} className="group-timeline-slice"
+            style={{ left: `${Math.min(100, (entranceMs + offset) * 100 / spanMs)}%` }} />
+        ))}
         {sharedGuideMs !== null && <span className="group-timeline-guide" style={{ left: sharedGuideMs * 100 / spanMs + "%" }} />}
         <span className="group-timeline-entrance" data-timed={timed} data-editable={editable}
           style={{ left: start + "%" }}
@@ -204,6 +210,7 @@ export function GroupTimelineTab({ group, workspaceId, listId, onRefresh }: Time
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [guideMs, setGuideMs] = useState<number | null>(null);
+  const [showSlices, setShowSlices] = useState(false);
   const [referenceId, setReferenceId] = useState<string | null>(null);
   const referenceButton = useRef<HTMLButtonElement | null>(null);
   const viewport = useRef<HTMLDivElement>(null);
@@ -320,6 +327,9 @@ export function GroupTimelineTab({ group, workspaceId, listId, onRefresh }: Time
               onClick={() => changeZoom(zoomIndex + 1)}>+</button>
             <button type="button" aria-label="Fit timeline" aria-disabled={zoomIndex === 0}
               onClick={() => changeZoom(0)}>Fit</button>
+            {children.some(child => child.timeline_slices?.offsets_ms.length) &&
+              <button type="button" aria-pressed={showSlices}
+                onClick={() => setShowSlices(show => !show)}>Slice guides</button>}
           </div>
           <div className="group-timeline-viewport" ref={viewport} tabIndex={0}
             role="region" aria-label="Timeline ruler and cue tracks"
@@ -336,8 +346,8 @@ export function GroupTimelineTab({ group, workspaceId, listId, onRefresh }: Time
               <ul className="group-timeline-rows">
                 {timelineReferenceOrder(children, referenceId).map(child => <TimelineRow
                   key={child.id} child={child} spanMs={spanMs} pinned={child.id === referenceId}
-                  onPin={toggleReference} locked={active || pending} sharedGuideMs={guideMs}
-                  guidesFor={(movingId) => timelineGuideTimes(children, movingId)} onGuide={setGuideMs}
+                  onPin={toggleReference} locked={active || pending} sharedGuideMs={guideMs} showSlices={showSlices}
+                  guidesFor={(movingId) => timelineGuideTimes(children, movingId, showSlices)} onGuide={setGuideMs}
                   commit={(expected, ms) => commit(child, expected, ms)} onError={setError} />)}
               </ul>
               {active && <TimelinePlayhead groupId={group.id} workspaceId={owner.workspace_id} spanMs={spanMs} />}

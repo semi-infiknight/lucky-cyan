@@ -97,6 +97,8 @@ In a rehearsal group with several direct Wait children, find an early timing ref
 
 Run the group with Timeline open. The vertical line follows the time since the group’s action began, so you can see when it crosses each programmed entrance. Pause to hold the line and resume to continue from the same point. Stop the group to edit its entrances again.
 
+To align a cue with an Audio or Video slice, add the sliced media and a Wait as direct children of a Simultaneous group. Give the media a known clip end, then open **Timeline → Slice guides**. Drag the Wait entrance to a dotted marker. Inkue projects each boundary from the cue’s saved clip window, rate and finite repeat counts. A vamp keeps later times open until it releases, so guides stop at its entrance. [QLab Timeline](https://qlab.app/docs/v5/fundamentals/group-cues/#the-timeline-tab)
+
 ### Rotate through alternate cues with Start Random
 
 1. In a practice show, put three short Wait cues in a Group, name them **A**, **B**, and **C**, and add a Memo after the Group. Set the Group mode to **Start Random** and turn on **Advance playhead after GO**.

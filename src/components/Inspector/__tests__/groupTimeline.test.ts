@@ -23,6 +23,16 @@ describe("Group Timeline entrances", () => {
     expect(timelineSpanMs([{ pre_wait_ms: 3000, duration_ms: 5000 }])).toBe(10000);
   });
 
+  it("offers optional slice snaps and leaves the end of a vamp open", () => {
+    const track = { id: "audio", pre_wait_ms: 1000, duration_ms: 4000, is_disabled: false,
+      supports_timeline_entrance: true, timeline_slices: { offsets_ms: [500, 3500], duration_ms: null } };
+    expect(timelineSpanMs([track])).toBe(8000);
+    expect(timelineGuideTimes([track], "wait")).toEqual([0, 1000]);
+    expect(timelineGuideTimes([track], "wait", true)).toEqual([0, 1000, 1500, 4500]);
+    expect(timelineGuideTimes([track], "audio", true)).toEqual([0]);
+    expect(timelineGuideTimes([{ ...track, is_disabled: true }], "wait", true)).toEqual([0]);
+  });
+
   it("moves from the original entrance by pixel delta and keeps zero motion a no-op", () => {
     expect(dragEntranceMs(1250, 50, 400, 4000)).toBe(1750);
     expect(dragEntranceMs(1250, -200, 400, 4000)).toBe(0);
