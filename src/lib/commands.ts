@@ -59,6 +59,8 @@ import type {
   ParamTarget,
   PatchedChannel,
   PatchedFixture,
+  FixtureLibrary,
+  FixtureLibraryEntry,
   RecoveryInfo,
   RelinkResult,
   ScreenInfo,
@@ -671,9 +673,17 @@ export const loadFixturePatch = (workspaceId: string) =>
 export const readFixtureProfile = (path: string) => invoke<FixtureType>("read_fixture_profile", { path });
 export const exportFixtureProfile = (path: string, workspaceId: string, fixtureId: string, expected: FixtureType) =>
   invoke<void>("export_fixture_profile", { path, workspaceId, fixtureId, expected });
-export const patchImportedFixture = (edit: {
-  workspace_id: string; label: string; universe: number; base_address: number; profile: FixtureType;
-}) => invoke<PatchedFixture>("patch_imported_fixture", { edit });
+type FixturePlacement = { workspace_id: string; label: string; universe: number; base_address: number };
+export const patchImportedFixture = (edit: FixturePlacement & { profile: FixtureType }) =>
+  invoke<PatchedFixture>("patch_imported_fixture", { edit });
+export const listFixtureLibrary = () => invoke<FixtureLibrary>("list_fixture_library");
+export const saveLibraryFixtureProfile = (profile: FixtureType) =>
+  invoke<FixtureLibraryEntry>("save_library_fixture_profile", { profile });
+export const savePatchedFixtureToLibrary = (workspaceId: string, fixtureId: string, expected: FixtureType) =>
+  invoke<FixtureLibraryEntry>("save_patched_fixture_to_library", { workspaceId, fixtureId, expected });
+export const patchLibraryFixture = (edit: FixturePlacement & { profile_id: string }) =>
+  invoke<PatchedFixture>("patch_library_fixture", { edit });
+export const removeLibraryFixtureProfile = (id: string) => invoke<void>("remove_library_fixture_profile", { id });
 
 export const addFixture = (
   label: string,

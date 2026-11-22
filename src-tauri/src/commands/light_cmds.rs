@@ -5,7 +5,6 @@
 //! `dmx_get_snapshot` command is only a one-shot fallback for initial paint.
 
 use serde::{Deserialize, Serialize};
-use std::io::Read;
 use std::path::Path;
 use std::sync::MutexGuard;
 use tauri::{Emitter, State};
@@ -15,11 +14,12 @@ use crate::cue::light_cue::ParamTarget;
 use crate::engine::dmx_engine::{ChannelWidth, DmxChannelLevel, DmxSnapshot};
 use crate::engine::dmx_sink::{UniverseOutput, DMX_UNIVERSE_SIZE};
 use crate::engine::fixture::{
-    builtin_fixture_types, check_color_patch, decode_fixture_profile, encode_fixture_profile, find_conflicts,
+    builtin_fixture_types, check_color_patch, find_conflicts,
     fixture_spans_overlap, validate_fixture_profile, FixtureColorChannels, FixtureColorModel,
     FixtureConflict, FixtureGroup, FixtureType, PatchedChannel, PatchedFixture,
 };
 use crate::engine::DmxEngine;
+use crate::fixture_library::{self, FixtureLibrary, FixtureLibraryEntry};
 use crate::show::Workspace;
 use crate::state::AppState;
 
@@ -142,8 +142,6 @@ pub fn load_fixture_patch(workspace_id: Uuid, state: State<'_, AppState>) -> Res
     Ok(FixturePatchState { fixtures: ws.fixtures.clone(), conflicts: find_conflicts(&ws.fixtures) })
 }
 
-const MAX_PROFILE_BYTES: usize = 512 * 1024;
-
 fn fixture_profile_path(path: &str) -> Result<&Path, String> {
     let path = Path::new(path);
     if !path.extension().and_then(|extension| extension.to_str())
@@ -157,19 +155,7 @@ fn fixture_profile_path(path: &str) -> Result<&Path, String> {
 /// Return a reusable profile definition without changing the patch.
 #[tauri::command(async)]
 pub fn read_fixture_profile(path: String) -> Result<FixtureType, String> {
-    let path = fixture_profile_path(&path)?;
-    let metadata = std::fs::metadata(path).map_err(|error| format!("Could not open fixture profile: {error}"))?;
-    if !metadata.is_file() {
-        return Err("Choose a fixture profile file.".into());
-    }
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|file| file.take((MAX_PROFILE_BYTES + 1) as u64).read_to_end(&mut bytes))
-        .map_err(|error| format!("Could not open fixture profile: {error}"))?;
-    if bytes.len() > MAX_PROFILE_BYTES {
-        return Err("The fixture profile exceeds 512 KiB.".into());
-    }
-    decode_fixture_profile(&bytes)
+    fixture_library::read_profile_file(fixture_profile_path(&path)?)
 }
 
 /// Export the exact saved profile that the patch editor displayed.
@@ -182,20 +168,45 @@ pub fn export_fixture_profile(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let path = fixture_profile_path(&path)?;
-    let profile = {
-        let ws = lock_dashboard(&state, workspace_id)?;
-        let fixture = ws.fixtures.iter().find(|fixture| fixture.id == fixture_id)
-            .ok_or("The fixture is no longer patched.")?;
-        if fixture.fixture_type != expected {
-            return Err("The saved profile changed. Reopen it before exporting.".into());
-        }
-        fixture.fixture_type.clone()
-    };
-    let bytes = encode_fixture_profile(&profile)?;
-    if bytes.len() > MAX_PROFILE_BYTES {
-        return Err("The fixture profile exceeds 512 KiB.".into());
-    }
+    let profile = saved_fixture_profile(&state, workspace_id, fixture_id, expected)?;
+    let bytes = fixture_library::profile_bytes(&profile)?;
     crate::recovery::write_document(path, &bytes).map_err(|error| format!("Could not save fixture profile: {error}"))
+}
+
+fn saved_fixture_profile(state: &AppState, workspace_id: Uuid, fixture_id: Uuid, expected: FixtureType) -> Result<FixtureType, String> {
+    let ws = lock_dashboard(state, workspace_id)?;
+    let fixture = ws.fixtures.iter().find(|fixture| fixture.id == fixture_id)
+        .ok_or("The fixture is no longer patched.")?;
+    if fixture.fixture_type != expected {
+        return Err("The saved profile changed. Reopen it before copying it.".into());
+    }
+    Ok(expected)
+}
+
+#[tauri::command(async)]
+pub fn list_fixture_library() -> Result<FixtureLibrary, String> {
+    fixture_library::list(&fixture_library::folder())
+}
+
+#[tauri::command(async)]
+pub fn save_library_fixture_profile(profile: FixtureType) -> Result<FixtureLibraryEntry, String> {
+    fixture_library::save(&fixture_library::folder(), profile)
+}
+
+#[tauri::command(async)]
+pub fn save_patched_fixture_to_library(
+    workspace_id: Uuid,
+    fixture_id: Uuid,
+    expected: FixtureType,
+    state: State<'_, AppState>,
+) -> Result<FixtureLibraryEntry, String> {
+    let profile = saved_fixture_profile(&state, workspace_id, fixture_id, expected)?;
+    fixture_library::save(&fixture_library::folder(), profile)
+}
+
+#[tauri::command(async)]
+pub fn remove_library_fixture_profile(id: String) -> Result<(), String> {
+    fixture_library::remove(&fixture_library::folder(), &id)
 }
 
 #[derive(Deserialize)]
@@ -237,6 +248,32 @@ pub fn patch_imported_fixture(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<PatchedFixture, String> {
+    patch_fixture_profile(edit, &state, &app_handle)
+}
+
+#[derive(Deserialize)]
+pub struct LibraryFixturePatch {
+    workspace_id: Uuid,
+    label: String,
+    universe: u16,
+    base_address: u16,
+    profile_id: String,
+}
+
+#[tauri::command(async)]
+pub fn patch_library_fixture(
+    edit: LibraryFixturePatch,
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<PatchedFixture, String> {
+    let profile = fixture_library::read(&fixture_library::folder(), &edit.profile_id)?;
+    patch_fixture_profile(ImportedFixturePatch {
+        workspace_id: edit.workspace_id, label: edit.label, universe: edit.universe,
+        base_address: edit.base_address, profile,
+    }, &state, &app_handle)
+}
+
+fn patch_fixture_profile(edit: ImportedFixturePatch, state: &AppState, app_handle: &tauri::AppHandle) -> Result<PatchedFixture, String> {
     let mut ws = state.workspace.lock().map_err(|error| error.to_string())?;
     let fixture = apply_imported_fixture(&mut ws, edit)?;
     drop(ws);

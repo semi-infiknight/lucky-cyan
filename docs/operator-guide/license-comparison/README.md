@@ -65,7 +65,7 @@ Start with the rows your show actually uses. The reference is QLab 5.6.5 with al
 | Patch DMX addresses | Add real fixtures and check for overlaps. Test the highest needed address on each universe. |
 | Address multiple universes | Configure Art-Net or sACN, check the monitor, then identify each receiving node. Unbounded scale remains unqualified. |
 | Pick colors in multiple color spaces | Author CMY, HSI and HSV looks and apply them live for fixtures and compatible groups with explicit color roles. Verify channel values and the physical color. QLab’s RGB+ auto-mix and virtual color-map import remain open. |
-| Define instruments | Export an Inkue fixture definition and reuse it at a separately validated address. Native roles, defaults, and adjacent or separated coarse and fine slots travel with the file. Direct QLab definition-file import remains open. [Profile exercise](../lighting/README.md#reuse-a-fixture-profile-in-another-workspace) |
+| Define instruments | Keep saved fixture profiles in the machine’s library or export a definition for another machine. Patch it at a separately validated address. Roles, defaults, and adjacent or separated coarse and fine slots travel with the definition. Direct QLab definition-file import remains open. [Profile exercise](../lighting/README.md#reuse-a-fixture-profile-in-another-workspace) |
 
 [Lighting exercise](../lighting/README.md)
 

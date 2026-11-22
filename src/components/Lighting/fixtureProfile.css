@@ -9,4 +9,4 @@
 .fixture-profile table { border-collapse: collapse; width: 100%; margin-top: 8px; }
 .fixture-profile th, .fixture-profile td { text-align: left; padding: 2px; border-bottom: 1px solid var(--wc-border); }
 .fixture-profile p { line-height: 1.4; color: var(--wc-text-muted); }
-.fixture-profile-actions { display: flex; align-items: center; gap: 6px; }
+.fixture-profile-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }

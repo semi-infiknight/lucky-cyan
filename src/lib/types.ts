@@ -1070,6 +1070,19 @@ export interface FixtureType {
   parameters: FixtureParam[];
 }
 
+export interface FixtureLibraryEntry {
+  id: string;
+  name: string;
+  manufacturer: string;
+  mode: string;
+  channels: number;
+}
+
+export interface FixtureLibrary {
+  profiles: FixtureLibraryEntry[];
+  unreadable: number;
+}
+
 /** A fixture placed at a DMX address in the workspace patch. */
 export interface PatchedFixture {
   id: string;

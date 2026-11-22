@@ -23,6 +23,12 @@ Preview and Replace update cue data only. The dashboard and test channel in **Li
 
 ## Reuse a fixture profile in another workspace
 
+Use the machine’s **Fixture library** for profiles you want available whenever you open the patch. Open a patched fixture’s **Profile** and choose **Add saved profile to library**. To keep a profile file you just opened, choose **Add imported profile to library** instead.
+
+In another workspace, select the definition under **Fixture library** in the patch picker. Choose the universe and starting address, then select **Patch fixture**. Inkue checks the address and gives the fixture its own ID and a copy of the profile. To retire a library entry, select it and choose **Remove from library…**. Existing shows keep their patched copies.
+
+Use a portable file to take the profile to another machine.
+
 1. In a rehearsal copy, open **DMX → Patch** and add **Moving Head 16-bit (8ch)**. Open **Profile**, give it a distinct model and mode, and save the profile. Reopen **Profile** and choose **Export saved profile…**. Save `Tour moving head.inkue-fixture`.
 2. Open a second rehearsal workspace. Choose **DMX → Patch → Import profile…** and select the file. Check the selected name, mode and footprint. Choose a free universe and start address, then use **Patch fixture**. Import and patch prepare fixture data without sending DMX. The selected profile can be patched again at another free address.
 3. Open the new fixture’s **Profile** and verify the roles and both addresses on each 16-bit row. Try patching the same profile at an already used address to see the conflict. Save and reopen the workspace to confirm the new fixture carries its own copy of the definition. The format carries channel roles, defaults, and coarse and fine slots relative to the fixture start address. [QLab Light Library](https://qlab.app/docs/v5/lighting/light-library/)

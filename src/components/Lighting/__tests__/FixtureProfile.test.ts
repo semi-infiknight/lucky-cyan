@@ -34,10 +34,11 @@ describe("fixture profiles", () => {
       ] },
     };
     const html = renderToStaticMarkup(createElement(FixtureProfile, {
-      fixture, save: async () => {}, exportSaved: async () => {}, close() {},
+      fixture, save: async () => {}, exportSaved: async () => {}, saveToLibrary: async () => {}, close() {},
     }));
     expect(html).toContain("<td>50–51</td>");
     expect(html).toContain("Export saved profile…");
+    expect(html).toContain("Add saved profile to library");
     fixture.fixture_type.parameters[0].fine_channel_offset = 7;
     const separated = renderToStaticMarkup(createElement(FixtureProfile, {
       fixture, save: async () => {}, close() {},

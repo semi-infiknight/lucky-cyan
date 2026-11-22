@@ -10,6 +10,7 @@ pub mod bundled_fonts;
 pub mod commands;
 pub mod cue;
 pub mod engine;
+mod fixture_library;
 pub mod health;
 pub mod logger;
 pub mod media_usage;
@@ -68,9 +69,10 @@ use commands::{
         dmx_get_outputs, dmx_get_snapshot, dmx_set_blackout, dmx_set_channel, dmx_set_fixture_cmy,
         dmx_set_fixture_hsi, dmx_set_fixture_hsv, dmx_set_fixture_param, dmx_set_group_color,
         dmx_set_outputs, dmx_test_fixture,
-        export_fixture_profile, get_fixture_conflicts, list_builtin_fixture_types, list_fixture_groups, list_fixtures,
-        load_fixture_dashboard, load_fixture_patch, patch_imported_fixture, read_fixture_profile,
-        remove_fixture, remove_fixture_group, update_fixture, update_fixture_group,
+        export_fixture_profile, get_fixture_conflicts, list_builtin_fixture_types, list_fixture_groups, list_fixture_library, list_fixtures,
+        load_fixture_dashboard, load_fixture_patch, patch_imported_fixture, patch_library_fixture, read_fixture_profile,
+        remove_fixture, remove_fixture_group, remove_library_fixture_profile, save_library_fixture_profile,
+        save_patched_fixture_to_library, update_fixture, update_fixture_group,
     },
     midi_cmds::{
         clear_midi_learn, get_cue_midi_trigger, get_midi_trigger_config, get_midi_trigger_override, learn_midi_trigger,
@@ -778,6 +780,11 @@ pub fn run() {
             read_fixture_profile,
             export_fixture_profile,
             patch_imported_fixture,
+            list_fixture_library,
+            save_library_fixture_profile,
+            save_patched_fixture_to_library,
+            patch_library_fixture,
+            remove_library_fixture_profile,
             add_fixture,
             update_fixture,
             remove_fixture,

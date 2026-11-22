@@ -4,19 +4,24 @@
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { ask, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   addFixture,
   dmxTestFixture,
   exportFixtureProfile,
   listBuiltinFixtureTypes,
+  listFixtureLibrary,
   loadFixturePatch,
   patchImportedFixture,
+  patchLibraryFixture,
   readFixtureProfile,
   removeFixture,
+  removeLibraryFixtureProfile,
+  saveLibraryFixtureProfile,
+  savePatchedFixtureToLibrary,
   updateFixture,
 } from "../../lib/commands";
-import type { FixtureConflict, FixtureType, PatchedFixture } from "../../lib/types";
+import type { FixtureConflict, FixtureLibrary, FixtureLibraryEntry, FixtureType, PatchedFixture } from "../../lib/types";
 import { fixtureFootprint } from "../../lib/fixtureChannels";
 import { FixtureProfile } from "./FixtureProfile";
 import { Select } from "../common/Select";
@@ -34,7 +39,10 @@ export function FixturePatch({ workspaceId }: { workspaceId: string }) {
   identifyingRef.current = identifying;
 
   const [profileId, setProfileId] = useState<string | null>(null);
-  const [newTypeIdx, setNewTypeIdx] = useState<number | "imported">(0);
+  const [profileChoice, setProfileChoice] = useState("builtin:0");
+  const [library, setLibrary] = useState<FixtureLibrary>({ profiles: [], unreadable: 0 });
+  const [libraryStatus, setLibraryStatus] = useState("");
+  const libraryRequests = useRef(0);
   const [importedProfile, setImportedProfile] = useState<FixtureType | null>(null);
   const [patchBusy, setPatchBusy] = useState(false);
   const [patchError, setPatchError] = useState("");
@@ -46,24 +54,33 @@ export function FixturePatch({ workspaceId }: { workspaceId: string }) {
     setFixtures(patch.fixtures);
     setConflicts(patch.conflicts);
   }, [workspaceId]);
+  const refreshLibrary = useCallback(async () => {
+    const request = ++libraryRequests.current;
+    const data = await listFixtureLibrary();
+    if (request === libraryRequests.current) setLibrary(data);
+  }, []);
 
   useEffect(() => {
     listBuiltinFixtureTypes().then(setTypes).catch(console.error);
     refresh().catch(error => setPatchError(String(error)));
+    refreshLibrary().catch(error => setPatchError(String(error)));
     // Turn any active identify off when the panel closes.
     return () => {
       if (identifyingRef.current) dmxTestFixture(identifyingRef.current, false).catch(() => {});
     };
-  }, [refresh]);
+  }, [refresh, refreshLibrary]);
 
   const conflictIds = new Set(conflicts.flatMap((c) => [c.fixture_a, c.fixture_b]));
+  const libraryProfile = library.profiles.find(profile => profileChoice === `library:${profile.id}`);
+  const localProfile = profileChoice === "imported" ? importedProfile
+    : profileChoice.startsWith("builtin:") ? types[Number(profileChoice.slice("builtin:".length))] : undefined;
+  const profileName = libraryProfile?.name ?? localProfile?.name;
+  const profileChannels = libraryProfile?.channels ?? (localProfile ? fixtureFootprint(localProfile) : 0);
 
   const handleAdd = async () => {
-    if (patchBusy) return;
-    const t = newTypeIdx === "imported" ? importedProfile : types[newTypeIdx];
-    if (!t) return;
+    if (patchBusy || !profileName) return;
     // Give repeated copies distinguishable labels until the operator renames them.
-    const base = t.name.trim().split(/\s+/)[0];
+    const base = profileName.trim().split(/\s+/)[0];
     let n = 1;
     const labels = new Set(fixtures.map(fixture => fixture.label));
     while (labels.has(`${base} ${n}`)) n += 1;
@@ -72,13 +89,17 @@ export function FixturePatch({ workspaceId }: { workspaceId: string }) {
     setPatchBusy(true);
     setPatchError("");
     try {
-      if (newTypeIdx === "imported") {
-        await patchImportedFixture({ workspace_id: workspaceId, label, universe: newUniverse,
-          base_address: newAddress, profile: t });
-      } else {
-        await addFixture(label, newUniverse, newAddress, t);
+      const placement = { workspace_id: workspaceId, label, universe: newUniverse, base_address: newAddress };
+      if (libraryProfile) {
+        await patchLibraryFixture({ ...placement, profile_id: libraryProfile.id });
+      } else if (localProfile) {
+        if (profileChoice === "imported") {
+          await patchImportedFixture({ ...placement, profile: localProfile });
+        } else {
+          await addFixture(label, newUniverse, newAddress, localProfile);
+        }
       }
-      setNewAddress(Math.min(512, newAddress + fixtureFootprint(t)));
+      setNewAddress(Math.min(512, newAddress + profileChannels));
       await refresh();
     } catch (error) {
       setPatchError(String(error));
@@ -95,13 +116,51 @@ export function FixturePatch({ workspaceId }: { workspaceId: string }) {
       const path = await openDialog({ multiple: false, filters: [profileFilter] });
       if (typeof path !== "string") return;
       setImportedProfile(await readFixtureProfile(path));
-      setNewTypeIdx("imported");
+      setProfileChoice("imported");
     } catch (error) {
       setPatchError(String(error));
     } finally {
       setPatchBusy(false);
     }
   };
+
+  async function selectLibrarySave(entry: FixtureLibraryEntry) {
+    setLibraryStatus(`Saved ${entry.name} to the fixture library.`);
+    await refreshLibrary();
+    setProfileChoice(`library:${entry.id}`);
+  }
+
+  async function rememberImportedProfile() {
+    if (!importedProfile || patchBusy) return;
+    setPatchBusy(true);
+    setPatchError("");
+    try {
+      await selectLibrarySave(await saveLibraryFixtureProfile(importedProfile));
+    } catch (cause) {
+      setPatchError(String(cause));
+    } finally {
+      setPatchBusy(false);
+    }
+  }
+
+  async function removeFromLibrary(profile: FixtureLibraryEntry) {
+    if (patchBusy) return;
+    setPatchBusy(true);
+    setPatchError("");
+    try {
+      if (!await ask(`Remove ${profile.name} from this machine’s fixture library? Patched shows keep their own copies.`, {
+        title: "Remove fixture profile", kind: "warning",
+      })) return;
+      await removeLibraryFixtureProfile(profile.id);
+      setProfileChoice("builtin:0");
+      setLibraryStatus(`Removed ${profile.name} from the fixture library.`);
+      await refreshLibrary();
+    } catch (cause) {
+      setPatchError(String(cause));
+    } finally {
+      setPatchBusy(false);
+    }
+  }
 
   async function exportProfile(fixture: PatchedFixture) {
     const name = fixture.fixture_type.name.replace(/[<>:"/\\|?*]/g, "_");
@@ -185,6 +244,7 @@ export function FixturePatch({ workspaceId }: { workspaceId: string }) {
           </div>
           {profileId === f.id && <FixtureProfile fixture={f} close={() => setProfileId(null)}
             exportSaved={() => exportProfile(f)}
+            saveToLibrary={async () => selectLibrarySave(await savePatchedFixtureToLibrary(workspaceId, f.id, f.fixture_type))}
             save={async fixture_type => { await updateFixture({ ...f, fixture_type }); await refresh(); }} />}
           </Fragment>
         );
@@ -203,13 +263,18 @@ export function FixturePatch({ workspaceId }: { workspaceId: string }) {
         <Select
           style={{ ...selStyle, flex: 1, minWidth: 0 }}
           aria-label="Fixture profile to patch"
-          value={newTypeIdx}
+          value={profileChoice}
           disabled={patchBusy}
-          onChange={(e) => setNewTypeIdx(e.target.value === "imported" ? "imported" : Number(e.target.value))}
+          onChange={e => { setProfileChoice(e.target.value); setLibraryStatus(""); }}
         >
-          {types.map((t, i) => (
-            <option key={i} value={i}>{t.name}</option>
-          ))}
+          <optgroup label="Built-in profiles">
+            {types.map((t, i) => <option key={i} value={`builtin:${i}`}>{t.name}</option>)}
+          </optgroup>
+          {library.profiles.length > 0 && <optgroup label="Fixture library">
+            {library.profiles.map(profile => <option key={profile.id} value={`library:${profile.id}`}>
+              {[profile.manufacturer, profile.name, profile.mode].filter(Boolean).join(" · ")}
+            </option>)}
+          </optgroup>}
           {importedProfile && <option value="imported">{importedProfile.name} · imported</option>}
         </Select>
         <label style={lblStyle}>U</label>
@@ -224,16 +289,24 @@ export function FixturePatch({ workspaceId }: { workspaceId: string }) {
           style={{ ...numStyle, width: 48 }} min={1} max={512} value={newAddress}
           onChange={(e) => setNewAddress(Number(e.target.value))}
         />
-        <button type="button" style={{ ...smallBtn, color: "#a855f7" }} disabled={patchBusy}
-          onClick={handleAdd}>{newTypeIdx === "imported" ? "Patch fixture" : "+ add"}</button>
+        <button type="button" style={{ ...smallBtn, color: "#a855f7" }} disabled={patchBusy || !profileName}
+          onClick={handleAdd}>Patch fixture</button>
       </div>
       <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
         <button type="button" style={smallBtn} disabled={patchBusy} onClick={importProfile}>Import profile…</button>
-        {importedProfile && newTypeIdx === "imported" && <small role="status" style={{ color: "var(--wc-text-secondary)" }}>
-          {[importedProfile.manufacturer, importedProfile.mode, `${fixtureFootprint(importedProfile)} channels`]
-            .filter(Boolean).join(" · ")}
+        {importedProfile && profileChoice === "imported" && <button type="button" style={smallBtn}
+          disabled={patchBusy} onClick={rememberImportedProfile}>Add imported profile to library</button>}
+        {libraryProfile && <button type="button" style={smallBtn} disabled={patchBusy}
+          onClick={() => void removeFromLibrary(libraryProfile)}>Remove from library…</button>}
+        {(libraryProfile || profileChoice === "imported") && profileName && <small style={{ color: "var(--wc-text-secondary)" }}>
+          {[libraryProfile?.manufacturer ?? localProfile?.manufacturer, libraryProfile?.mode ?? localProfile?.mode,
+            `${profileChannels} channels`].filter(Boolean).join(" · ")}
         </small>}
       </div>
+      {libraryStatus && <p role="status">{libraryStatus}</p>}
+      {library.unreadable > 0 && <p role="status">
+        {library.unreadable} fixture library {library.unreadable === 1 ? "file could" : "files could"} not be read.
+      </p>}
       {patchError && <p role="alert">{patchError}</p>}
     </div>
   );

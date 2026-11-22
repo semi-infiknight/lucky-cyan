@@ -9,10 +9,11 @@ const roles: ParamKind[] = [
 ];
 const roleLabels: Partial<Record<ParamKind, string>> = { hsi_intensity: "HSI intensity", hsv_value: "HSV value" };
 
-export function FixtureProfile({ fixture, save, exportSaved, close }: {
+export function FixtureProfile({ fixture, save, exportSaved, saveToLibrary, close }: {
   fixture: PatchedFixture;
   save: (profile: FixtureType) => Promise<void>;
   exportSaved?: () => Promise<void>;
+  saveToLibrary?: () => Promise<void>;
   close: () => void;
 }) {
   const [draft, setDraft] = useState(fixture.fixture_type);
@@ -40,12 +41,12 @@ export function FixtureProfile({ fixture, save, exportSaved, close }: {
       setBusy(false);
     }
   }
-  async function exportProfile() {
-    if (!exportSaved || busy) return;
+  async function copySavedProfile(copy: () => Promise<void>) {
+    if (busy) return;
     setBusy(true);
     setError("");
     try {
-      await exportSaved();
+      await copy();
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -79,7 +80,8 @@ export function FixtureProfile({ fixture, save, exportSaved, close }: {
       <p>Assign red, green and blue to link additive channels to the color picker. Repeated RGB roles move together. Assign one cyan, magenta and yellow for CMY. For HSI or HSV, assign one hue, one saturation and one matching HSI intensity or HSV value. Use intensity for a separate master dimmer.</p>
       <div className="fixture-profile-actions">
         <button type="button" onClick={apply} disabled={!draft.name.trim()}>Save profile</button>
-        {exportSaved && <button type="button" onClick={exportProfile}>Export saved profile…</button>}
+        {exportSaved && <button type="button" onClick={() => void copySavedProfile(exportSaved)}>Export saved profile…</button>}
+        {saveToLibrary && <button type="button" onClick={() => void copySavedProfile(saveToLibrary)}>Add saved profile to library</button>}
         <button type="button" onClick={close}>Cancel</button>
         {error && <span role="alert">{error}</span>}
       </div>
