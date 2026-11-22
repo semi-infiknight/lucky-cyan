@@ -154,6 +154,7 @@ impl ImageCue {
             end_ms: None,
             output: self.output_id,
             audio_voice_id: None,
+            require_soundtrack: false,
             display_duration_ms: self.display_duration_ms,
             hold_last_frame: false,
             geometry: self.geometry,

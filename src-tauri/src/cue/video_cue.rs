@@ -109,6 +109,7 @@ pub struct VideoCue {
     play_generation: u64,
     clock_run: Option<(Uuid, ClockRun)>,
     positioned_run: bool,
+    pending_soundtrack_reveal: bool,
     loaded_time: Option<LoadedVideoTime>,
     /// Prevents double-firing of Auto-Continue.
     auto_continue_fired: bool,
@@ -192,6 +193,7 @@ impl VideoCue {
             play_generation: 0,
             clock_run: None,
             positioned_run: false,
+            pending_soundtrack_reveal: false,
             loaded_time: None,
             auto_continue_fired: false,
             elapsed_before_pause: Duration::ZERO,
@@ -293,10 +295,16 @@ impl VideoCue {
     /// Output Patch routing — exactly like an Audio Cue — so video audio gets
     /// the full professional signal path (routing, master volume, VU, fades).
     /// Returns `Ok(None)` when the video has no audio track.
-    fn submit_paused_audio(&self, context: &CueContext, entry: Option<&PositionedEntry>) -> Result<Option<VoiceId>> {
+    fn submit_paused_audio(&self, context: &CueContext, entry: Option<&PositionedEntry>) -> Result<Option<(VoiceId, bool)>> {
+        let patch = context.resolve_patch(self.output_patch_id);
+        let require_soundtrack = patch.is_some_and(|patch| patch.has_audio_effects());
         let samples = match &self.decoded_samples {
             Some(s) => Arc::clone(s),
-            None => return Ok(None), // Silent video — no audio voice.
+            None => {
+                anyhow::ensure!(!require_soundtrack || self.has_verified_silent_soundtrack(),
+                    "Wait for this Video’s soundtrack to finish loading before using its Output Patch effects.");
+                return Ok(None);
+            }
         };
 
         let gain = db_to_linear(self.volume_db) as f32;
@@ -361,7 +369,8 @@ impl VideoCue {
         }
 
         let mut patch_device: Option<String> = None;
-        if let Some(patch) = context.resolve_patch(self.output_patch_id) {
+        if let Some(patch) = patch {
+            voice.output_patch_id = Some(patch.id);
             if let Some(&ch_l) = patch.channels.first() {
                 voice.out_l = ch_l as usize;
             }
@@ -378,13 +387,13 @@ impl VideoCue {
                 .position(|p| p.id == patch.id)
                 .map(|i| i as u8);
             patch_device = Some(patch.device_id.clone());
+            if require_soundtrack {
+                voice.named_output = patch.named_output().map_err(anyhow::Error::msg)?;
+            }
         }
 
         if let Some(spec) = &self.level_matrix {
-            let patch_channels: Vec<u16> = context
-                .resolve_patch(self.output_patch_id)
-                .map(|p| p.channels.clone())
-                .unwrap_or_default();
+            let patch_channels = patch.map(|patch| patch.cue_mixer_channels()).unwrap_or_default();
             if let Some(matrix) =
                 crate::cue::audio_cue::build_level_matrix(spec, &patch_channels, self.matrix_mirror_mono)
             {
@@ -393,7 +402,8 @@ impl VideoCue {
             }
         }
 
-        Ok(Some(context.audio_engine.play_voice_paused_routed(voice, patch_device.as_deref())?))
+        let id = context.audio_engine.play_voice_paused_routed(voice, patch_device.as_deref())?;
+        Ok(Some((id, require_soundtrack)))
     }
 
     /// Kick off video playback.  Called directly from `go()` when there is no
@@ -414,6 +424,7 @@ impl VideoCue {
             self.state = CueState::Standby;
             self.started_at = None;
             self.in_pre_wait = false;
+            self.pending_soundtrack_reveal = false;
         }
         result
     }
@@ -424,9 +435,10 @@ impl VideoCue {
                 Ok(true) => {
                     self.preloaded = false;
                     self.in_pre_wait = false;
-                    self.action_started_at = Some(Instant::now() - self.action_elapsed_before_pause);
-                    crate::media_usage::start(context.media_show.as_ref(), self);
-                    context.announce_action_started(self.id);
+                    if !self.pending_soundtrack_reveal {
+                        self.action_started_at = Some(Instant::now() - self.action_elapsed_before_pause);
+                        self.announce_picture_start(context);
+                    }
                     return Ok(());
                 }
                 Err(error) => {
@@ -459,6 +471,10 @@ impl VideoCue {
         if let Some(video) = (cue as &mut dyn std::any::Any).downcast_mut::<Self>() {
             video.silent_verified_for = video.file_path.clone();
         }
+    }
+
+    pub(crate) fn has_verified_silent_soundtrack(&self) -> bool {
+        self.file_path.is_some() && self.silent_verified_for == self.file_path
     }
 
     fn positionable_clip(&self) -> Result<(&Path, (Duration, Duration))> {
@@ -532,13 +548,12 @@ impl VideoCue {
         let end_ms = self.end_time.map(|d| d.as_millis() as u64);
         let fade_in_ms = self.video_fade_in.as_ref().map(|f| f.duration_ms as u32).unwrap_or(0);
 
-        // Submit the audio voice (paused) first so it is ready to resume the
-        // instant the video's first frame is presented.
-        let audio_voice_id = self.submit_paused_audio(context, entry.as_ref())?;
-
         let path = self.file_path.as_ref().ok_or_else(|| {
             anyhow!("VideoCue '{}': no file assigned — set a file in the inspector", self.name)
         })?;
+        // Prepare the soundtrack without playing it until the picture reveals.
+        let (audio_voice_id, require_soundtrack) = self.submit_paused_audio(context, entry.as_ref())?
+            .map_or((None, false), |(id, required)| (Some(id), required));
 
         let slices: Vec<(f64, f64, u32)> = self
             .slice_segments_ms()
@@ -558,6 +573,7 @@ impl VideoCue {
             end_ms,
             output: self.output_id,
             audio_voice_id,
+            require_soundtrack,
             display_duration_ms: None,
             hold_last_frame: self.hold_last_frame,
             geometry: self.geometry,
@@ -574,10 +590,14 @@ impl VideoCue {
         self.active_voice_id = Some(voice_id);
         self.silent_speed_run = self.allow_silent_speed;
         self.positioned_run = entry.is_some();
+        self.pending_soundtrack_reveal = require_soundtrack;
         if self.preloading {
             return Ok(());
         }
-        self.action_started_at = Some(positioned_origin.unwrap_or_else(Instant::now));
+        self.action_started_at = (!require_soundtrack).then(|| positioned_origin.unwrap_or_else(Instant::now));
+        if require_soundtrack {
+            self.action_elapsed_before_pause = entry.as_ref().map_or(Duration::ZERO, |entry| entry.elapsed);
+        }
         if let Some(origin) = positioned_origin {
             self.started_at = Some(origin);
         }
@@ -586,9 +606,15 @@ impl VideoCue {
         self.eof_audio_fade_started = false;
         self.preloaded = false;
 
+        if !require_soundtrack {
+            self.announce_picture_start(context);
+        }
+        Ok(())
+    }
+
+    fn announce_picture_start(&self, context: &CueContext) {
         crate::media_usage::start(context.media_show.as_ref(), self);
         context.announce_action_started(self.id);
-        Ok(())
     }
 }
 
@@ -608,7 +634,7 @@ impl Cue for VideoCue {
         play_generation, clock_run, positioned_run, loaded_time, silent_verified_for, auto_continue_fired, elapsed_before_pause,
         action_elapsed_before_pause, eof_fade_started, eof_audio_fade_started, preloading,
         preloaded,
-        silent_speed_run,
+        silent_speed_run, pending_soundtrack_reveal,
     );
 
     // -----------------------------------------------------------------------
@@ -740,6 +766,7 @@ impl Cue for VideoCue {
 
     fn stop(&mut self, context: &CueContext) -> Result<()> {
         self.clock_run = None;
+        self.pending_soundtrack_reveal = false;
         if self.cancel_loaded_time() {
             context.request_cue_refresh();
         }
@@ -809,9 +836,11 @@ impl Cue for VideoCue {
         }
         self.clock_run = None;
         self.started_at = Some(Instant::now() - self.elapsed_before_pause);
-        self.action_started_at = Some(Instant::now() - self.action_elapsed_before_pause);
+        if !self.pending_soundtrack_reveal {
+            self.action_started_at = Some(Instant::now() - self.action_elapsed_before_pause);
+        }
         self.state = CueState::Running;
-        if self.active_voice_id.is_some() {
+        if self.active_voice_id.is_some() && !self.pending_soundtrack_reveal {
             crate::media_usage::resume(context.media_show.as_ref(), self);
         }
         Ok(())
@@ -838,6 +867,7 @@ impl Cue for VideoCue {
 
     fn hard_stop(&mut self, context: &CueContext) -> Result<()> {
         self.clock_run = None;
+        self.pending_soundtrack_reveal = false;
         if self.cancel_loaded_time() {
             context.request_cue_refresh();
         }
@@ -863,6 +893,7 @@ impl Cue for VideoCue {
 
     fn reset(&mut self) -> Result<()> {
         self.clock_run = None;
+        self.pending_soundtrack_reveal = false;
         self.cancel_loaded_time();
         crate::media_usage::end(self, "released");
         self.state = CueState::Standby;
@@ -889,12 +920,23 @@ impl Cue for VideoCue {
                 log::warn!("VideoCue '{}' failed to start action: {e}", self.name);
             }
         }
+        if self.pending_soundtrack_reveal {
+            if !self.active_voice_id.is_some_and(|voice| context.output_engine.soundtrack_revealed(voice)) {
+                return Ok(());
+            }
+            self.pending_soundtrack_reveal = false;
+            self.action_started_at = Instant::now().checked_sub(self.action_elapsed_before_pause);
+            if self.positioned_run {
+                self.started_at = self.action_started_at;
+            }
+            self.announce_picture_start(context);
+        }
         self.tick_eof_fade(context);
         Ok(())
     }
 
     fn is_action_started(&self) -> bool {
-        !self.in_pre_wait
+        !self.in_pre_wait && !self.pending_soundtrack_reveal
     }
 
     fn supports_silent_speed(&self) -> bool {
@@ -1273,6 +1315,34 @@ mod tests {
         assert!(cue.visual_geometry().unwrap().is_default());
         let json = cue.serialize();
         assert_eq!(json["hold_last_frame"], false);
+    }
+
+    #[test]
+    fn processed_video_soundtrack_is_prepared_before_the_picture_starts() {
+        use crate::engine::{cue_effects::CueEffect, device_manager::OutputPatch};
+        use crate::test_support::{recording_context, EngineCall};
+
+        let (mut context, _, calls) = recording_context();
+        let mut patch = OutputPatch::new("Stage", "hw:CARD=Stage", vec![0, 1]);
+        patch.require_named_device = true;
+        patch.audio_effects.push(CueEffect::HighPass {
+            id: Uuid::new_v4(), enabled: true, frequency_hz: 600.0,
+        });
+        let mut cue = VideoCue::new();
+        cue.file_path = Some("with-sound.mp4".into());
+        cue.output_patch_id = Some(patch.id);
+        context.output_patches = Arc::new(vec![patch]);
+        assert!(cue.go(&context).is_err());
+        assert!(calls.lock().unwrap().is_empty());
+        assert_eq!(cue.state(), CueState::Standby);
+
+        cue.accept_preloaded_audio(Arc::new(vec![0.1; 4800]), 1, 48_000, Duration::from_millis(100));
+        cue.go(&context).unwrap();
+        assert!(!cue.is_action_started());
+        assert!(matches!(calls.lock().unwrap().as_slice(), [
+            EngineCall::AudioPlayPausedRouted { device: Some(device) },
+            EngineCall::OutputShowContent { .. },
+        ] if device == "hw:CARD=Stage"));
     }
 
     #[test]

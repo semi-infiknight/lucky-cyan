@@ -148,7 +148,7 @@ pub fn set_output_patch(
             if reroute { updated.validate_cue_output_effects()?; }
             if reroute && updated.has_audio_effects() {
                 if state.audio_engine.patch_has_active_audio(id)? {
-                    return Err("Stop File Audio using this patch before changing its effects route.".into());
+                    return Err("Stop Audio and Video using this patch before changing its effects route.".into());
                 }
                 updated.named_output()?;
             }
@@ -268,7 +268,7 @@ fn edit_output_patch_effects(
         return Ok(());
     }
     if state.audio_engine.patch_has_active_audio(patch_id)? {
-        return Err("Stop File Audio using this patch before editing its effects.".into());
+        return Err("Stop Audio and Video using this patch before editing its effects.".into());
     }
     if updated.has_audio_effects() {
         updated.named_output()?;
@@ -294,7 +294,7 @@ pub fn remove_output_patch(
     if ws.output_patches.iter().any(|patch| patch.id == id && patch.has_audio_effects())
         && state.audio_engine.patch_has_active_audio(id)?
     {
-        return Err("Stop File Audio using this patch before removing its effects route.".into());
+        return Err("Stop Audio and Video using this patch before removing its effects route.".into());
     }
     let before = ws.output_patches.len();
     ws.output_patches.retain(|p| p.id != id);

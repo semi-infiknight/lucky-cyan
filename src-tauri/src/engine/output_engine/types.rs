@@ -611,6 +611,8 @@ pub struct ContentRequest<'a> {
     pub output: Option<OutputId>,
     /// The AudioEngine voice carrying this video's audio track, if any.
     pub audio_voice_id: Option<VoiceId>,
+    /// Hold the picture until this processed soundtrack can play on its named output.
+    pub require_soundtrack: bool,
     /// Image cues: how long the image stays before auto-completing
     /// (`None` = hold until stopped).
     pub display_duration_ms: Option<u64>,

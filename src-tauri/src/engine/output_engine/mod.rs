@@ -631,6 +631,8 @@ impl OutputEngine {
         let Some(lib) = self.lib.as_ref() else {
             return Err(anyhow!("{NO_VIDEO_OUTPUT}"));
         };
+        anyhow::ensure!(!req.require_soundtrack || req.audio_voice_id.is_some(),
+            "A required soundtrack must be prepared before the Video cue can start.");
         anyhow::ensure!(!req.require_positioned_frame
             || (req.start_ms.is_some() && !req.is_image && !req.live_source && !req.preload),
             "A positioned video start requires a file and a source position.");
@@ -664,12 +666,13 @@ impl OutputEngine {
         let slot = slot::acquire_slot(&output, lib, &self.audio_engine, req.preload)?;
         let jpeg_checks_before_reveal = still_raster.is_some()
             && source_placement::is_jpeg_still(req.file_path);
-        if !req.preload && !jpeg_checks_before_reveal {
+        if !req.preload && !jpeg_checks_before_reveal && !req.require_soundtrack {
             output.set_overlay_alpha(0);
         }
         slot::load_into_slot(&slot, slot::SlotLoad {
             voice_id,
             audio_voice_id: req.audio_voice_id,
+            require_soundtrack: req.require_soundtrack,
             url: req.file_path.to_string_lossy().replace('\\', "/"),
             is_image: req.is_image,
             allow_silent_speed: req.allow_silent_speed,
@@ -971,9 +974,11 @@ impl OutputEngine {
         let Some(slot) = output::slot_for_voice(voice_id) else { return Ok(false) };
         let Some(output) = self.live_output(slot.output_id) else { return Ok(false) };
         self.place_output(&output)?;
-        let jpeg_lifts_at_reveal = slot.state.lock().is_ok_and(|state| state.jpeg_lifts_blackout_on_reveal());
+        let lifts_at_reveal = slot.state.lock().is_ok_and(|state| {
+            state.jpeg_lifts_blackout_on_reveal() || state.require_soundtrack
+        });
         let started = slot::start_preloaded(&slot);
-        if started && !jpeg_lifts_at_reveal {
+        if started && !lifts_at_reveal {
             output.set_overlay_alpha(0);
         }
         Ok(started)
@@ -1108,6 +1113,7 @@ impl OutputEngine {
             end_ms,
             output,
             audio_voice_id: None,
+            require_soundtrack: false,
             display_duration_ms: None,
             hold_last_frame: false,
             geometry: VideoGeometry::default(),
@@ -1132,7 +1138,7 @@ impl OutputEngine {
     }
 
     pub fn pause_voice(&self, voice_id: VoiceId) -> Result<()> {
-        if output::slot_for_voice(voice_id).is_some_and(|slot| slot::hold_positioned_reveal(&slot, voice_id, true)) {
+        if output::slot_for_voice(voice_id).is_some_and(|slot| slot::hold_pending_reveal(&slot, voice_id, true)) {
             return Ok(());
         }
         if self.queue_silent_pause(voice_id, true) { return Ok(()); }
@@ -1148,19 +1154,56 @@ impl OutputEngine {
     }
 
     pub fn resume_voice(&self, voice_id: VoiceId) -> Result<()> {
-        if output::slot_for_voice(voice_id).is_some_and(|slot| slot::hold_positioned_reveal(&slot, voice_id, false)) {
+        let slot = output::slot_for_voice(voice_id);
+        if slot.as_ref().is_some_and(|slot| slot::hold_pending_reveal(slot, voice_id, false)) {
             return Ok(());
         }
         if self.queue_silent_pause(voice_id, false) { return Ok(()); }
+        let soundtrack = slot.as_ref().and_then(|slot| {
+            let state = slot.state.lock().ok()?;
+            if state.voice_id != Some(voice_id) { return None; }
+            state.audio_voice_id.map(|audio| (audio, state.require_soundtrack))
+        });
+        if let (Some(slot), Some((audio, true))) = (&slot, soundtrack) {
+            if let Err(error) = self.audio_engine.resume_required_soundtrack(audio) {
+                slot::withdraw_required_soundtrack(slot, audio);
+                return Err(error);
+            }
+        }
         if let (Some(lib), Some(ctx)) = (self.try_mpv_lib(), self.voice_mpv_ctx(voice_id)) {
             unsafe {
                 (lib.mpv_set_property_string)(ctx, cs("pause").as_ptr(), cs("no").as_ptr());
             }
         }
-        if let Some(aid) = self.video_audio_voice(voice_id) {
+        if let Some((aid, false)) = soundtrack {
             let _ = self.audio_engine.resume_voice(aid);
         }
         Ok(())
+    }
+
+    pub(crate) fn withdraw_required_soundtrack(&self, voice: VoiceId) {
+        for slot in output::all_slots() {
+            if slot::withdraw_required_soundtrack(&slot, voice) { break; }
+        }
+    }
+
+    pub(crate) fn finish_required_soundtrack(&self, voice: VoiceId) {
+        for slot in output::all_slots() {
+            if let Ok(mut state) = slot.state.lock() {
+                if state.require_soundtrack && state.audio_voice_id == Some(voice) {
+                    // The soundtrack can end before the movie's last frame.
+                    state.audio_voice_id = None;
+                    state.require_soundtrack = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn soundtrack_revealed(&self, voice: VoiceId) -> bool {
+        output::slot_for_voice(voice).is_some_and(|slot| slot.state.lock().is_ok_and(|state| {
+            state.voice_id == Some(voice) && state.soundtrack_revealed && !state.pending_unload
+        }))
     }
 
     fn queue_silent_pause(&self, voice: VoiceId, paused: bool) -> bool {

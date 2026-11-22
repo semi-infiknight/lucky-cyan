@@ -623,15 +623,17 @@ fn tick(
                 pending_playback.completed.push(voice_id);
             }
             AudioStatus::OutputWithdrawn { voice_id } => {
+                output_engine.withdraw_required_soundtrack(voice_id);
                 crate::health::set(crate::health::HealthAlert::new(
                     "output-patch-device",
                     crate::health::HealthLevel::Error,
-                    "An Audio cue lost its required output. Check the Output Patch before restarting the cue.",
+                    "A cue lost its required audio output. Check the Output Patch before restarting the cue.",
                 ));
                 crate::media_usage::output_error(voice_id, "Required audio output lost");
                 pending_playback.resets.insert(voice_id);
             }
             AudioStatus::Completed { voice_id } => {
+                output_engine.finish_required_soundtrack(voice_id);
                 pending_playback.completed.push(voice_id);
             }
             AudioStatus::MasterLevels { peak_l, peak_r } => {

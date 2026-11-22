@@ -170,19 +170,24 @@ fn capture_checks(
         let mut named_device = None;
         let mut needs_main_output_for_effects = false;
         if let Some(patch) = patch.filter(|p| p.require_named_device || p.has_audio_effects()) {
+            let verified_silent = (cue.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<crate::cue::video_cue::VideoCue>()
+                .is_some_and(crate::cue::video_cue::VideoCue::has_verified_silent_soundtrack);
             match cue.cue_type() {
-                CueType::Audio => match patch.named_output() {
+                cue_type if cue_type == CueType::Audio
+                    || (cue_type == CueType::Video && patch.has_audio_effects() && !verified_silent) => match patch.named_output() {
                     Ok(route) => {
                         needs_main_output_for_effects = patch.has_audio_effects();
                         named_device = route.map(|route| route.device_id);
                     }
                     Err(message) => issues.push(CueIssue::error(message)),
                 },
+                CueType::Video if verified_silent => {}
                 cue_type if matches!(cue_type, CueType::Video | CueType::Mic)
                     || (cue_type == CueType::Timecode && cue.output_patch_id().is_some()) =>
                 {
                     let setting = if patch.has_audio_effects() {
-                        format!("Output Patch “{}” applies its output effects and named-device GO requirement to File Audio. This cue uses its existing dry path.", patch.name)
+                        format!("Output Patch “{}” applies its effects to File Audio and Video soundtracks. This cue uses its existing dry path.", patch.name)
                     } else {
                         format!("The named-device GO requirement on Output Patch “{}” applies to Audio file cues. Check this cue’s routing separately.", patch.name)
                     };

@@ -778,9 +778,9 @@ export interface OutputPatch {
   gain_db: number;
   /** File Audio starts only on this named device. Older patches omit this. */
   require_named_device?: boolean;
-  /** Native effects on the summed File Audio output of this patch. */
+  /** Native effects on the summed file audio and Video soundtracks of this patch. */
   audio_effects?: CueEffect[];
-  /** File Audio effects on logical patch outputs before device routing. */
+  /** Effects on logical outputs from Audio and Video cues before device routing. */
   cue_output_effects?: Array<{ output: number; effects: CueEffect[] }>;
 }
 

@@ -690,8 +690,18 @@ impl AudioEngine {
     /// after the producer's health check, before any samples were rendered.
     pub fn play_voice(&self, mut voice: Voice) -> Result<VoiceId> {
         let (stream, deadline) = self.ready_output()?;
+        self.prepare_main_voice(&mut voice, stream.as_ref())?;
+        let id = voice.id;
+        voice.start_deadline_us.store(deadline, std::sync::atomic::Ordering::Relaxed);
+        voice.set_playing();
+        self.voices.push(Arc::new(voice)).map_err(|_| anyhow!("voices mutex poisoned"))?;
+        crate::health::clear("audio-start");
+        Ok(id)
+    }
+
+    fn prepare_main_voice(&self, voice: &mut Voice, stream: Option<&MainOutput>) -> Result<()> {
         if let Some(route) = &voice.named_output {
-            check_named_output(route, stream.as_ref().and_then(|s| s.exact_device_id.as_deref()), self.output_channels())?;
+            check_named_output(route, stream.and_then(|s| s.exact_device_id.as_deref()), self.output_channels())?;
             if route.has_audio_effects() {
                 voice.patch_effects = Some(match self.available_patch_bus(route)? {
                     Some(bus) => bus,
@@ -699,14 +709,9 @@ impl AudioEngine {
                 });
             }
         }
-        self.apply_default_offset(&mut voice);
-        self.check_channel_bounds(&voice, self.output_channels());
-        let id = voice.id;
-        voice.start_deadline_us.store(deadline, std::sync::atomic::Ordering::Relaxed);
-        voice.set_playing();
-        self.voices.push(Arc::new(voice)).map_err(|_| anyhow!("voices mutex poisoned"))?;
-        crate::health::clear("audio-start");
-        Ok(id)
+        self.apply_default_offset(voice);
+        self.check_channel_bounds(voice, self.output_channels());
+        Ok(())
     }
 
     fn available_patch_bus(&self, route: &NamedOutput) -> Result<Option<Arc<PatchBus>>> {
@@ -749,9 +754,8 @@ impl AudioEngine {
     /// Pair a paused output voice with the first video frame. Resume checks
     /// device health again because the output may disappear while waiting.
     pub fn play_voice_paused(&self, mut voice: Voice) -> Result<VoiceId> {
-        let (_stream, _) = self.ready_output()?;
-        self.apply_default_offset(&mut voice);
-        self.check_channel_bounds(&voice, self.output_channels());
+        let (stream, _) = self.ready_output()?;
+        self.prepare_main_voice(&mut voice, stream.as_ref())?;
         let id = voice.id;
         voice.set_paused();
         self.voices.push(Arc::new(voice)).map_err(|_| anyhow!("voices mutex poisoned"))?;
@@ -950,10 +954,15 @@ impl AudioEngine {
     /// [`Self::play_voice_paused`] with Output Patch device routing.
     /// Used for a video's audio track when its patch targets another device.
     pub fn play_voice_paused_routed(&self, voice: Voice, device_id: Option<&str>) -> Result<VoiceId> {
-        anyhow::ensure!(
-            !voice.named_output.as_ref().is_some_and(NamedOutput::has_audio_effects),
-            "Output Patch effects currently apply to File Audio starts."
-        );
+        if let Some(route) = &voice.named_output {
+            anyhow::ensure!(device_id == Some(route.device_id.as_str()),
+                "No matching device selected for the Video soundtrack’s Output Patch.");
+            anyhow::ensure!(self.main_has_named_output(&route.device_id)?,
+                "Select this patch’s device as the named main output before using effects on a Video soundtrack.");
+            let voice = self.play_voice_paused(voice)?;
+            crate::health::clear("output-patch-device");
+            return Ok(voice);
+        }
         if self.routes_to_main(device_id) {
             crate::health::clear("output-patch-device");
             return self.play_voice_paused(voice);
@@ -1319,6 +1328,24 @@ impl AudioEngine {
         } else {
             self.broadcast_command(AudioCommand::Resume { voice_id })
         }
+    }
+
+    /// Admit a held soundtrack immediately before revealing its picture.
+    /// A paused load has no deadline until the picture requests playback.
+    pub(crate) fn resume_required_soundtrack(&self, voice_id: VoiceId) -> Result<()> {
+        use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+        let (stream, deadline) = self.ready_output()?;
+        let voice = self.voices.with(|pool| pool.iter().find(|voice| voice.id == voice_id).cloned())
+            .flatten().ok_or_else(|| anyhow!("The required Video soundtrack is no longer prepared."))?;
+        let route = voice.named_output.as_ref().ok_or_else(|| anyhow!("The Video soundtrack has no required output."))?;
+        check_named_output(route, stream.as_ref().and_then(|stream| stream.exact_device_id.as_deref()), self.output_channels())?;
+        let previous = voice.start_deadline_us.load(Acquire);
+        anyhow::ensure!(previous == 0 || previous >= audio_clock_us(), "{OUTPUT_START_MESSAGE}");
+        if voice.voice_state() == VoiceState::Playing { return Ok(()); }
+        voice.start_deadline_us.store(deadline, Relaxed);
+        voice.state.compare_exchange(VoiceState::Paused as u8, VoiceState::Playing as u8, Release, Relaxed)
+            .map_err(|_| anyhow!("The required Video soundtrack was withdrawn."))?;
+        Ok(())
     }
 
     pub fn set_voice_gain(&self, voice_id: VoiceId, gain: f32) -> Result<()> {

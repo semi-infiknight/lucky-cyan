@@ -175,6 +175,9 @@ pub(super) struct SlotState {
     pub voice_id: Option<VoiceId>,
     /// The AudioEngine voice carrying this content's audio track, if any.
     pub audio_voice_id: Option<VoiceId>,
+    pub require_soundtrack: bool,
+    pub soundtrack_revealed: bool,
+    soundtrack_held: bool,
     /// Cue geometry, kept for the pixel-crop at `VIDEO_RECONFIG`.
     pub geometry: VideoGeometry,
     /// An opted-in still whose texture keeps the entire source extent.
@@ -242,7 +245,7 @@ struct PositionedStart {
 enum RevealExpiry {
     None,
     Fallback,
-    Failed { voice: VoiceId, audio: Option<VoiceId> },
+    Failed { voice: VoiceId, audio: Option<VoiceId>, message: &'static str },
 }
 
 /// Slice program for one slot: `(start_s, end_s, play_count)` per segment;
@@ -350,6 +353,9 @@ impl SlotState {
         Self {
             voice_id: None,
             audio_voice_id: None,
+            require_soundtrack: false,
+            soundtrack_revealed: false,
+            soundtrack_held: false,
             geometry: VideoGeometry::default(),
             still_raster: None,
             jpeg_admission: None,
@@ -567,6 +573,9 @@ impl SlotState {
         if self.preloaded || self.pending_unload || self.voice_id.is_none() || self.jpeg_waiting() {
             return None;
         }
+        if self.require_soundtrack && (!self.first_frame_ready || self.soundtrack_held) {
+            return None;
+        }
         if self.positioned_start.as_ref().is_some_and(|start| start.held || !self.first_frame_ready) {
             return None;
         }
@@ -605,7 +614,7 @@ impl SlotState {
             return RevealExpiry::None;
         }
         self.reveal_deadline = None;
-        if self.positioned_start.is_none() {
+        if self.positioned_start.is_none() && (!self.require_soundtrack || self.first_frame_ready) {
             return RevealExpiry::Fallback;
         }
         let Some(voice) = self.voice_id else { return RevealExpiry::None };
@@ -615,7 +624,12 @@ impl SlotState {
         self.pending_reveal = None;
         self.pending_unload = true;
         self.anim.set(0.0);
-        RevealExpiry::Failed { voice, audio: self.audio_voice_id.take() }
+        let message = if self.positioned_start.is_some() {
+            "Video did not decode a frame at the timecode entry position."
+        } else {
+            "Video did not decode its first frame. The required soundtrack was held."
+        };
+        RevealExpiry::Failed { voice, audio: self.audio_voice_id.take(), message }
     }
 }
 
@@ -961,8 +975,21 @@ pub(super) enum UnloadReport {
 /// Immediately cut a slot's content: stop mpv, stop its audio voice, clear
 /// the state, and tell the show as `report` says so the owning cue resets.
 pub(super) fn hard_unload(slot: &Arc<VideoSlot>, report: UnloadReport) {
+    hard_unload_matching(slot, report, |_| true);
+}
+
+pub(super) fn withdraw_required_soundtrack(slot: &Arc<VideoSlot>, sound: VoiceId) -> bool {
+    hard_unload_matching(slot, UnloadReport::Withdrawn, |st| {
+        st.require_soundtrack && st.audio_voice_id == Some(sound)
+    })
+}
+
+fn hard_unload_matching(
+    slot: &Arc<VideoSlot>, report: UnloadReport, matches: impl FnOnce(&SlotState) -> bool,
+) -> bool {
     let (voice, audio, crossfade, defer_stop) = {
-        let Ok(mut st) = slot.state.lock() else { return };
+        let Ok(mut st) = slot.state.lock() else { return false };
+        if !matches(&st) { return false; }
         st.generation = st.generation.wrapping_add(1);
         slot.clear_movie_worker_failures(&mut st);
         let voice = st.voice_id.take();
@@ -993,12 +1020,14 @@ pub(super) fn hard_unload(slot: &Arc<VideoSlot>, report: UnloadReport) {
         }
     }
     slot.wake();
+    true
 }
 
 /// Parameters for [`load_into_slot`].
 pub(super) struct SlotLoad {
     pub voice_id: VoiceId,
     pub audio_voice_id: Option<VoiceId>,
+    pub require_soundtrack: bool,
     pub url: String,
     pub is_image: bool,
     pub allow_silent_speed: bool,
@@ -1039,6 +1068,9 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) -> Result<()
         slot.clear_movie_worker_failures(&mut st);
         st.voice_id = Some(load.voice_id);
         st.audio_voice_id = load.audio_voice_id;
+        st.require_soundtrack = load.require_soundtrack;
+        st.soundtrack_revealed = false;
+        st.soundtrack_held = false;
         st.geometry = load.geometry;
         st.still_raster = load.still_raster;
         st.jpeg_admission = verify_jpeg.then_some(JpegAdmission::Loading);
@@ -1261,12 +1293,12 @@ pub(super) fn tick_slot(slot: &Arc<VideoSlot>) -> (f32, bool) {
             log::warn!("[slot {}] reveal watchdog fired — forcing unpause", slot.index);
             reveal(slot, None);
         }
-        RevealExpiry::Failed { voice, audio } => {
+        RevealExpiry::Failed { voice, audio, message } => {
             if let Some(audio) = audio {
                 let _ = slot.audio_engine.stop_voice(audio, 0, crate::engine::ring_command::FadeCurve::Linear);
             }
             slot.send_status(OutputStatus::Error {
-                voice_id: voice, message: "Video did not decode a frame at the timecode entry position.".into(),
+                voice_id: voice, message: message.into(),
             });
         }
     }
@@ -1415,12 +1447,16 @@ pub(super) fn start_preloaded(slot: &Arc<VideoSlot>) -> bool {
     true
 }
 
-pub(super) fn hold_positioned_reveal(slot: &Arc<VideoSlot>, voice: VoiceId, paused: bool) -> bool {
+pub(super) fn hold_pending_reveal(slot: &Arc<VideoSlot>, voice: VoiceId, paused: bool) -> bool {
     let (ready, generation) = {
         let Ok(mut state) = slot.state.lock() else { return false };
-        if !state.positioned_reveal_pending(voice) { return false; }
+        let soundtrack_pending = state.voice_id == Some(voice) && state.require_soundtrack && state.pending_reveal.is_some();
+        if !state.positioned_reveal_pending(voice) && !soundtrack_pending { return false; }
         if let Some(start) = &mut state.positioned_start {
             start.held = paused;
+        }
+        if soundtrack_pending {
+            state.soundtrack_held = paused;
         }
         (!paused && state.first_frame_ready, state.generation)
     };
@@ -1433,23 +1469,36 @@ pub(super) fn hold_positioned_reveal(slot: &Arc<VideoSlot>, voice: VoiceId, paus
 /// Reveal a paused video load: resume its audio voice, unpause mpv, start the
 /// opacity fade-in.  Called on `PLAYBACK_RESTART` (or the watchdog).
 fn reveal(slot: &Arc<VideoSlot>, expected_generation: Option<u64>) {
-    let (fade_in_ms, base, audio, silent_generation, jpeg_generation, positioned_generation, owns_jpeg_worker) = {
+    let (fade_in_ms, base, audio, silent_generation, jpeg_generation, positioned_generation, soundtrack_generation, owns_jpeg_worker) = {
         let Ok(mut st) = slot.state.lock() else { return };
         if expected_generation.is_some_and(|expected| expected != st.generation) { return; }
         let Some((fade, generation)) = st.take_reveal() else { return };
         let jpeg_generation = st.jpeg_lifts_blackout_on_reveal().then_some(st.generation);
         let positioned_generation = st.positioned_start.is_some().then_some(st.generation);
+        let soundtrack_generation = st.require_soundtrack.then_some(st.generation);
         // Pin the approved JPEG's decoder until its native unpause returns.
         let owns_jpeg_worker = jpeg_generation.is_some() && !st.silent_worker_busy;
         st.silent_worker_busy |= owns_jpeg_worker;
-        (fade, st.base_opacity, st.audio_voice_id, generation, jpeg_generation, positioned_generation, owns_jpeg_worker)
+        (fade, st.base_opacity, st.audio_voice_id, generation, jpeg_generation, positioned_generation, soundtrack_generation, owns_jpeg_worker)
     };
 
     if silent_generation.is_some() {
         slot.wake_event_worker();
     } else {
         if let Some(aid) = audio {
-            let _ = slot.audio_engine.resume_voice(aid);
+            if soundtrack_generation.is_some() {
+                if let Err(error) = slot.audio_engine.resume_required_soundtrack(aid) {
+                    if withdraw_required_soundtrack(slot, aid) {
+                        crate::health::set(crate::health::HealthAlert::new(
+                            "output-patch-device", crate::health::HealthLevel::Error,
+                            format!("Video held for its required soundtrack. {error}"),
+                        ));
+                    }
+                    return;
+                }
+            } else {
+                let _ = slot.audio_engine.resume_voice(aid);
+            }
         }
         unsafe {
             (slot.lib.mpv_set_property_string)(
@@ -1465,16 +1514,19 @@ fn reveal(slot: &Arc<VideoSlot>, expected_generation: Option<u64>) {
                 slot.wake_event_worker();
             }
         }
-        if silent_generation.or(jpeg_generation).or(positioned_generation)
+        if silent_generation.or(jpeg_generation).or(positioned_generation).or(soundtrack_generation)
             .is_some_and(|generation| generation != st.generation)
-            || ((jpeg_generation.is_some() || positioned_generation.is_some()) && st.pending_unload)
+            || ((jpeg_generation.is_some() || positioned_generation.is_some() || soundtrack_generation.is_some()) && st.pending_unload)
         {
             return;
         }
-        if jpeg_generation.is_some() {
+        if jpeg_generation.is_some() || soundtrack_generation.is_some() {
             if let Some(output) = slot.output.upgrade() {
                 output.set_overlay_alpha(0);
             }
+        }
+        if soundtrack_generation.is_some() {
+            st.soundtrack_revealed = true;
         }
         if let Some(link) = st.crossfade.as_mut() {
             // A crossfade replaces the configured fade-in: the dissolve starts
@@ -2229,9 +2281,33 @@ mod tests {
         assert!(state.take_reveal().is_some());
 
         let mut failed = prepare();
-        assert!(matches!(failed.expire_reveal(now), RevealExpiry::Failed { voice: id, audio: Some(sound) } if id == voice && sound == audio));
+        assert!(matches!(failed.expire_reveal(now), RevealExpiry::Failed { voice: id, audio: Some(sound), .. } if id == voice && sound == audio));
         assert!(failed.pending_unload);
         assert!(failed.take_reveal().is_none());
+    }
+
+    #[test]
+    fn required_soundtrack_waits_for_a_frame_and_respects_a_held_entrance() {
+        let voice = Uuid::new_v4();
+        let audio = Uuid::new_v4();
+        let mut state = SlotState::idle();
+        state.voice_id = Some(voice);
+        state.audio_voice_id = Some(audio);
+        state.require_soundtrack = true;
+        state.pending_reveal = Some(0);
+        assert!(state.take_reveal().is_none());
+        state.first_frame_ready = true;
+        state.soundtrack_held = true;
+        assert!(state.take_reveal().is_none());
+        state.soundtrack_held = false;
+        assert!(state.take_reveal().is_some());
+
+        state.pending_reveal = Some(0);
+        state.first_frame_ready = false;
+        let now = Instant::now();
+        state.reveal_deadline = Some(now);
+        assert!(matches!(state.expire_reveal(now), RevealExpiry::Failed { voice: id, audio: Some(sound), .. }
+            if id == voice && sound == audio));
     }
 
     fn visible_picture(voice: VoiceId) -> SlotState {

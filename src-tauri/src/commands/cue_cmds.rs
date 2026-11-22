@@ -1184,12 +1184,13 @@ pub fn apply_cue_properties(
         .and_then(|id| ws.output_patches.iter().find(|patch| patch.id == id));
     if matrix_changed {
         if let Some(voice) = old.playing_voice_id() {
+            let voice = output.video_audio_voice(voice).unwrap_or(voice);
             check_live_matrix_patch(audio, voice, patch)?;
         }
     }
     let mix_channels = if matrix_changed {
         patch.map(|patch| {
-            if edited.cue_type() == CueType::Audio {
+            if matches!(edited.cue_type(), CueType::Audio | CueType::Video) {
                 patch.cue_mixer_channels()
             } else {
                 std::borrow::Cow::Borrowed(patch.channels.as_slice())
@@ -1569,9 +1570,10 @@ pub fn set_live_crosspoint(
         .output_patch_id()
         .or(ws.default_output_patch_id)
         .and_then(|pid| ws.output_patches.iter().find(|p| p.id == pid));
-    check_live_matrix_patch(state.audio_engine.as_ref(), params.voice_id, patch)?;
+    let voice = state.output_engine.video_audio_voice(params.voice_id).unwrap_or(params.voice_id);
+    check_live_matrix_patch(state.audio_engine.as_ref(), voice, patch)?;
     let patch_channels = patch.map(|patch| {
-        if cue.cue_type() == CueType::Audio {
+        if matches!(cue.cue_type(), CueType::Audio | CueType::Video) {
             patch.cue_mixer_channels()
         } else {
             std::borrow::Cow::Borrowed(patch.channels.as_slice())
@@ -1592,10 +1594,6 @@ pub fn set_live_crosspoint(
             }
         }
     }
-    let voice = state
-        .output_engine
-        .video_audio_voice(params.voice_id)
-        .unwrap_or(params.voice_id);
     state
         .audio_engine
         .set_voice_crosspoint(voice, input, device, gain, params.matrix_mirror_mono)

@@ -259,6 +259,7 @@ pub trait OutputEngineApi: Send + Sync {
     /// Reveal + unpause content that was preloaded by a Load Cue.
     /// `false` = this voice was not preloaded.
     fn start_preloaded(&self, voice_id: VoiceId) -> Result<bool>;
+    fn soundtrack_revealed(&self, _voice_id: VoiceId) -> bool { false }
     /// Start a crossfade: the request's incoming content dissolves in while its
     /// outgoing layers leave, from the incoming content's first frame.
     /// `false` = the incoming content is not on an output.
@@ -362,6 +363,9 @@ impl OutputEngineApi for OutputEngine {
     }
     fn start_preloaded(&self, voice_id: VoiceId) -> Result<bool> {
         OutputEngine::start_preloaded(self, voice_id)
+    }
+    fn soundtrack_revealed(&self, voice_id: VoiceId) -> bool {
+        OutputEngine::soundtrack_revealed(self, voice_id)
     }
     fn link_crossfade(&self, request: &CrossfadeRequest) -> bool {
         OutputEngine::link_crossfade(self, request)

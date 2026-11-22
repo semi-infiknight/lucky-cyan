@@ -280,7 +280,7 @@ export function OutputPatchesPanel({ backend }: { backend?: string }) {
           )}
           <details style={{ gridColumn: "2 / -1", fontSize: 12 }}>
             <summary>Output FX</summary>
-            <p>Processes File Audio on this patch’s named main output. Enable the required-device check and stop this patch’s Audio cues before editing.</p>
+            <p>Processes Audio files and Video soundtracks on this patch’s named main output. Enable the required-device check and stop playback on this patch before editing.</p>
             <fieldset disabled={savingEffects} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
               <OrderedAudioEffects effects={patch.audio_effects ?? []} onChange={effects => void saveEffects(patch.id, effects)} />
             </fieldset>
@@ -288,7 +288,7 @@ export function OutputPatchesPanel({ backend }: { backend?: string }) {
           {!!patch.channels.length && patch.channels.length <= 32 && (
             <details style={{ gridColumn: "2 / -1", fontSize: 12 }}>
               <summary>Cue Output FX</summary>
-              <p>Filters one File Audio cue output before device routing. Stop this patch’s Audio cues before editing.</p>
+              <p>Filters one cue output of Audio files and Video soundtracks before device routing. Stop playback on this patch before editing.</p>
               <fieldset disabled={savingEffects || patch.dirty} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
                 <Select aria-label={`Cue output for effects on ${patch.name}`} value={String(effectOutput)}
                   onChange={event => setEffectOutputs({ ...effectOutputs, [patch.id]: Number(event.target.value) })}>
