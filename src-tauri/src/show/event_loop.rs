@@ -48,8 +48,18 @@ const TIMER_TICK_MS: u64 = 16;
 /// ~tens-of-ms gap, below a perceptible delay.
 const AUDIO_FREEZE_MS: u64 = 250;
 
+#[derive(Default, Clone, Copy)]
+enum TimecodeTriggerMode {
+    #[default]
+    Live,
+    Suspended,
+    RestoreAfter(Instant),
+    BaselineAt(Instant),
+}
+
 #[derive(Default)]
-struct TimecodeDispatch {
+pub(crate) struct TimecodeDispatch {
+    mode: TimecodeTriggerMode,
     receiver: Weak<TimecodeReceiver>,
     previous: Option<TcPosition>,
     locks: HashMap<uuid::Uuid, (TcRate, ClockLock)>,
@@ -105,6 +115,22 @@ impl TimecodeBatch {
 }
 
 impl TimecodeDispatch {
+    pub(crate) fn suspended(&self) -> bool {
+        matches!(self.mode, TimecodeTriggerMode::Suspended)
+    }
+
+    pub(crate) fn set_suspended(&mut self, suspended: bool, lists: &mut [CueList], now: Instant) {
+        if self.suspended() == suspended { return; }
+        self.mode = if suspended { TimecodeTriggerMode::Suspended } else { TimecodeTriggerMode::RestoreAfter(now) };
+        self.previous = None;
+        self.locks.clear();
+        if suspended {
+            for list in lists {
+                list.detach_timecode_runs();
+            }
+        }
+    }
+
     fn expire_locks(&mut self, lists: &[CueList], now: Instant, batch: &mut TimecodeBatch) {
         for list in lists {
             if let Some((_, lock)) = self.locks.get_mut(&list.id) {
@@ -138,6 +164,9 @@ impl TimecodeDispatch {
             for observation in receiver.events() {
                 let event = observation.event;
                 batch.status = Some(event);
+                if self.suspended() || matches!(self.mode, TimecodeTriggerMode::RestoreAfter(at) if observation.at <= at) {
+                    continue;
+                }
                 if matches!(event, TcEvent::Stopped | TcEvent::Located(_)) {
                     // Account for a loss that already happened before the barrier.
                     // A locate then suspends deadline inference until another frame.
@@ -164,6 +193,18 @@ impl TimecodeDispatch {
                     _ => {}
                 }
                 if let Some(window) = TcTriggerWindow::advance(&mut self.previous, event) {
+                    // A quarter-frame message can span restore. LTC can also
+                    // publish several decoded addresses from one input block.
+                    // Use the whole first observation timestamp as a baseline.
+                    match self.mode {
+                        TimecodeTriggerMode::RestoreAfter(_) => {
+                            self.mode = TimecodeTriggerMode::BaselineAt(observation.at);
+                            continue;
+                        }
+                        TimecodeTriggerMode::BaselineAt(at) if observation.at == at => continue,
+                        TimecodeTriggerMode::BaselineAt(_) => self.mode = TimecodeTriggerMode::Live,
+                        _ => {}
+                    }
                     for list in lists {
                         batch.fire.extend(list.tc_triggers_crossed(window).into_iter()
                             .map(|id| (list.id, id)));
@@ -177,13 +218,14 @@ impl TimecodeDispatch {
 }
 
 /// Entry point for the event loop thread.  Loops indefinitely.
-pub fn run(
+pub(crate) fn run(
     handle: tauri::AppHandle,
     audio_engine: Arc<AudioEngine>,
     output_engine: Arc<OutputEngine>,
     dmx_engine: Arc<DmxEngine>,
     workspace: Arc<Mutex<Workspace>>,
     tc_receiver: Arc<Mutex<Option<Arc<TimecodeReceiver>>>>,
+    timecode_dispatch: Arc<Mutex<TimecodeDispatch>>,
     midi_listener: Arc<Mutex<Option<Arc<crate::engine::midi_trigger::MidiTriggerListener>>>>,
 ) {
     // Spawn a dedicated thread that refreshes the OSD timer overlay at ~60 fps.
@@ -200,7 +242,6 @@ pub fn run(
 
     // Maps a completed cue's ID to the deadline and the ID of its cue list.
     let mut auto_follow_pending: HashMap<CueId, (Instant, uuid::Uuid)> = HashMap::new();
-    let mut timecode_dispatch = TimecodeDispatch::default();
     let mut midi_workspace = None;
     // Per-group snapshot: (active_child_id, any_child_running).
     // Used to detect inner-sequence progress and emit cue-list-refresh.
@@ -229,7 +270,7 @@ pub fn run(
             &tc_receiver,
             &midi_listener,
             &mut midi_workspace,
-            &mut timecode_dispatch,
+            &timecode_dispatch,
             &mut auto_follow_pending,
             &mut prev_group_state,
             &mut prev_monitor_structure,
@@ -525,7 +566,7 @@ fn tick(
     tc_receiver:    &Arc<Mutex<Option<Arc<TimecodeReceiver>>>>,
     midi_listener:   &Arc<Mutex<Option<Arc<crate::engine::midi_trigger::MidiTriggerListener>>>>,
     midi_workspace: &mut Option<uuid::Uuid>,
-    timecode_dispatch: &mut TimecodeDispatch,
+    timecode_dispatch: &Mutex<TimecodeDispatch>,
     auto_follow_pending: &mut HashMap<CueId, (Instant, uuid::Uuid)>,
     prev_group_state:    &mut HashMap<CueId, (Option<CueId>, bool)>,
     prev_monitor_structure: &mut MonitorStructure,
@@ -759,7 +800,9 @@ fn tick(
     // Reconcile clock ownership while the workspace is locked, ahead of
     // ticking and completing existing runs. Starts remain at the GO stage.
     let mut timecode = tc_receiver.lock().ok()
-        .map(|slot| timecode_dispatch.collect(slot.as_ref(), &ws.cue_lists, Instant::now()))
+        .and_then(|slot| timecode_dispatch.lock().ok().map(|mut dispatch| {
+            dispatch.collect(slot.as_ref(), &ws.cue_lists, Instant::now())
+        }))
         .unwrap_or_default();
     let tc_status = timecode.status;
     let clock_changes = timecode.apply_existing_runs(&mut ws.cue_lists, &tick_ctx);
@@ -2003,6 +2046,59 @@ mod tests {
         assert!(removed.detached);
         assert!(removed.fire.is_empty());
         assert!(removed.edges.is_empty());
+    }
+
+    #[test]
+    fn timecode_override_monitors_frames_and_restores_only_fresh_clock_ownership() {
+        use crate::engine::timecode_types::TcTrigger;
+        let (context, _, _) = crate::test_support::recording_context();
+        let mut transport = Transport::new(context.clone());
+        let mut list = CueList::new("Clock override");
+        list.tc_config.enabled = true;
+        list.tc_config.rate = TcRate::Fps25;
+        list.tc_config.freewheel_ms = 200;
+        list.tc_config.on_stop = TcOnStop::Pause;
+        let pos = |frame| TcPosition::from_frame_number(frame, TcRate::Fps25);
+        let mut marks = Vec::new();
+        for frame in [20, 22, 23, 24, 25, 26] {
+            let wait = WaitCue::new();
+            marks.push((list.id, wait.id()));
+            list.tc_triggers.insert(wait.id(), TcTrigger { position: pos(frame), real_time: false });
+            list.push(Box::new(wait));
+        }
+        let mut lists = [list];
+        let (receiver, tx) = TimecodeReceiver::test_channel();
+        let mut dispatch = TimecodeDispatch::default();
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let send = |frame, ms| {
+            tx.send(TcObservation { event: TcEvent::Position(pos(frame), 2), at: at(ms) }).unwrap();
+        };
+
+        send(20, 0);
+        let mut first = dispatch.collect(Some(&receiver), &lists, start);
+        first.apply_existing_runs(&mut lists, &context);
+        assert_eq!(first.fire, [marks[0]]);
+        transport.go_from_timecode(&mut lists[0], &marks[0].1).unwrap();
+        dispatch.set_suspended(true, &mut lists, at(10));
+        send(22, 400);
+        let muted = dispatch.collect(Some(&receiver), &lists, at(900));
+        assert_eq!(muted.status, Some(TcEvent::Position(pos(22), 2)));
+        assert!(muted.fire.is_empty() && muted.edges.is_empty());
+
+        // The desk was busy: mark 23 is still queued at the instant of restore.
+        send(23, 950);
+        dispatch.set_suspended(false, &mut lists, at(1000));
+        send(24, 1040);
+        send(25, 1040); // another decoded position from the same capture block
+        send(26, 1120);
+        let resumed = dispatch.collect(Some(&receiver), &lists, at(1120));
+        assert_eq!(resumed.fire, [marks[5]]);
+        assert!(resumed.edges.is_empty());
+        transport.go_from_timecode(&mut lists[0], &marks[5].1).unwrap();
+        let mut loss = dispatch.collect(Some(&receiver), &lists, at(1400));
+        assert_eq!(loss.apply_existing_runs(&mut lists, &context), [(marks[5].1, CueState::Running, CueState::Paused)]);
+        assert!(lists[0].get(&marks[0].1).unwrap().is_running());
     }
 
     #[test]

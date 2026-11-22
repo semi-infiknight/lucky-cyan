@@ -146,6 +146,14 @@ Inkue starts cues at received marks during forward playback. A forward jump can 
 
 Freewheel measures time since the last decoded frame observation, with a minimum of two normal observation intervals. At 25 fps that minimum is about 160 ms for MTC or 80 ms for LTC. A paused Wait excludes the time from the freewheel deadline until the next moving frame. The transport clock indicator has its own timeout, so it can change at a different moment. Only directly clock-started top-level Wait cues use this loss policy. Audio, Video, and cues reached through groups or continuation need separate support. Switching the receiver, disabling the list, or choosing **Keep cues running** relinquishes any clock-owned hold. Resume that Wait from the desk. [Figure 53 timecode settings](https://qlab.app/docs/v5/fundamentals/cue-lists/#the-timecode-tab)
 
+### Monitor the clock without firing cues
+
+1. Set two upcoming marks on short Wait cues several seconds apart. Enable the receiver and the cue list’s **TC Sync**, then open **Preferences → Network → Timecode Receive**. Select **Suspend timecode triggers and clock-loss actions for this session**.
+2. Roll MTC or LTC through the first mark. Check the moving address next to the suspension message in the transport bar. The first Wait stays idle. Manual GO still works.
+3. While the address is moving between the marks, select **Restore timecode triggers** in the transport bar. The desk takes the first fresh clock update as a starting position. Only the second Wait fires when its mark arrives.
+
+Suspension applies to all lists and workspaces until restored or Inkue quits. A Wait running when you suspend keeps running. A Wait already paused by clock loss stays paused for manual Resume. Clock-loss actions apply again to Waits subsequently started by timecode. Saved cue marks, receiver settings and outgoing Timecode cues keep their programming.
+
 A **Timecode cue** generates outgoing MTC or LTC. To test that path, route its selected MIDI output or LTC audio patch to an independent monitor, pick a frame rate and set an end time. Keep outgoing timecode disconnected from this exercise’s receiving port until the routing is understood.
 
 ## Coordinate a sound and lighting mark

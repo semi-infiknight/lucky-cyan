@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { dmxGetBlackout, dmxSetBlackout, go, hardStopAll, hardStopBlackout, stopAll, pauseCue, resumeCue, openMixerWindow } from "../../lib/commands";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useTransportStore } from "../../stores/transportStore";
-import { useMidiTriggerOverride } from "../../hooks/useMidiTriggerOverride";
+import { useTriggerOverride } from "../../hooks/useTriggerOverride";
 import { OscMonitor } from "../Osc/OscMonitor";
 import { CueMonitor } from "../Operator/CueMonitor";
 import { LightingPanel } from "../Lighting/LightingPanel";
@@ -29,7 +29,8 @@ export function TransportBar({ onRefresh, showMode, onInspectCue }: {
   const [error, setError] = useState("");
   const workspaceId = useWorkspaceStore(s => s.workspaceInfo?.instance_id);
   const combinedEnabled = useWorkspaceStore(s => s.generalPrefs.show_hard_stop_blackout);
-  const midiOverride = useMidiTriggerOverride();
+  const midiOverride = useTriggerOverride("midi");
+  const tcOverride = useTriggerOverride("timecode");
   const [blackout, setBlackout] = useState<boolean | null>(null);
   const blackoutRead = useRef(0);
   const readBlackout = useCallback(async () => {
@@ -130,6 +131,12 @@ export function TransportBar({ onRefresh, showMode, onInspectCue }: {
         <button type="button" disabled={midiOverride.pending}
           onClick={() => void midiOverride.change(false)}>Restore MIDI triggers</button>
         {midiOverride.error && <span role="alert">{midiOverride.error}</span>}
+      </div>}
+      {tcOverride.suspended && <div className="desk-trigger-status">
+        <strong role="status">Timecode cue triggers suspended</strong>
+        <button type="button" disabled={tcOverride.pending}
+          onClick={() => void tcOverride.change(false)}>Restore timecode triggers</button>
+        {tcOverride.error && <span role="alert">{tcOverride.error}</span>}
       </div>}
       <TcStatusIndicator />
       <div className="desk-tool-buttons">

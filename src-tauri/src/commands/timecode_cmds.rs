@@ -53,6 +53,24 @@ pub fn set_tc_config(
     Ok(())
 }
 
+#[tauri::command]
+pub fn get_tc_trigger_override(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.timecode_dispatch.lock().map_err(|e| e.to_string())?.suspended())
+}
+
+#[tauri::command]
+pub fn set_tc_trigger_override(
+    suspended: bool, state: State<'_, AppState>, app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    // Serialize the change with both loss handling and the final GO for
+    // marks collected in a transport tick.
+    let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    let mut dispatch = state.timecode_dispatch.lock().map_err(|e| e.to_string())?;
+    dispatch.set_suspended(suspended, &mut ws.cue_lists, std::time::Instant::now());
+    let _ = app_handle.emit("timecode-trigger-override", suspended);
+    Ok(())
+}
+
 /// Current interpolated TC position (for the status widget in the UI).
 /// Returns `null` when TC is not running.
 #[tauri::command]

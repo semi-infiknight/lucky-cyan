@@ -7,7 +7,7 @@
 import { useEffect, useState } from "react";
 import type { MidiTriggerConfig } from "../../lib/types";
 import { getMidiTriggerConfig, setMidiTriggerConfig, listMidiInputPorts } from "../../lib/commands";
-import { useMidiTriggerOverride } from "../../hooks/useMidiTriggerOverride";
+import { useTriggerOverride } from "../../hooks/useTriggerOverride";
 import { Select } from "../common/Select";
 
 const inputStyle: React.CSSProperties = {
@@ -30,7 +30,7 @@ const labelStyle: React.CSSProperties = {
 export function MidiTriggerPreferences() {
   const [config, setConfig] = useState<MidiTriggerConfig>({ enabled: false, port: null });
   const [ports, setPorts] = useState<string[]>([]);
-  const override = useMidiTriggerOverride();
+  const override = useTriggerOverride("midi");
 
   useEffect(() => {
     getMidiTriggerConfig().then(setConfig).catch(console.error);

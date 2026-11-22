@@ -543,6 +543,8 @@ export const refreshDevices = () => invoke<void>("refresh_devices");
 // ---------------------------------------------------------------------------
 
 export const listTcMidiInputPorts = () => invoke<string[]>("list_tc_midi_input_ports");
+export const getTcTriggerOverride = () => invoke<boolean>("get_tc_trigger_override");
+export const setTcTriggerOverride = (suspended: boolean) => invoke<void>("set_tc_trigger_override", { suspended });
 export const getTcConfig = () => invoke<TcMachineConfig>("get_tc_config");
 export const setTcConfig = (config: TcMachineConfig) => invoke<void>("set_tc_config", { config });
 export const getTcPosition = () => invoke<TcPosition | null>("get_tc_position");

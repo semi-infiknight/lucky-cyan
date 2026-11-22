@@ -58,7 +58,7 @@ use commands::{
     review_history_cmds::get_cue_review_history,
     input_cmds::{add_input_patch, list_input_patches, remove_input_patch, update_input_patch},
     timecode_cmds::{
-        get_tc_config, set_tc_config, get_tc_position,
+        get_tc_config, set_tc_config, get_tc_position, get_tc_trigger_override, set_tc_trigger_override,
         list_tc_midi_input_ports,
         get_cue_tc_trigger, set_cue_tc_trigger,
         get_cuelist_tc_config, set_cuelist_tc_config,
@@ -293,6 +293,7 @@ pub fn run() {
             let d_engine = Arc::clone(&dmx_engine);
             let workspace = app.state::<AppState>().workspace.clone();
             let tc_receiver = app.state::<AppState>().tc_receiver.clone();
+            let tc_dispatch = app.state::<AppState>().timecode_dispatch.clone();
 
             // Start the per-cue MIDI trigger listener if this machine has it on.
             let midi_listener = app.state::<AppState>().midi_listener.clone();
@@ -313,7 +314,7 @@ pub fn run() {
                 .name("inkue-event-loop".to_string())
                 .spawn(move || {
                     crate::show::event_loop::run(
-                        handle, a_engine, o_engine, d_engine, workspace, tc_receiver,
+                        handle, a_engine, o_engine, d_engine, workspace, tc_receiver, tc_dispatch,
                         midi_listener_for_loop,
                     );
                 })
@@ -682,6 +683,8 @@ pub fn run() {
             get_tc_config,
             set_tc_config,
             get_tc_position,
+            get_tc_trigger_override,
+            set_tc_trigger_override,
             list_tc_midi_input_ports,
             get_cue_tc_trigger,
             set_cue_tc_trigger,

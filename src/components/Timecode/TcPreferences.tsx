@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import type { TcMachineConfig, DeviceInfo } from "../../lib/types";
 import { getTcConfig, setTcConfig, listTcMidiInputPorts, listInputDevices } from "../../lib/commands";
+import { useTriggerOverride } from "../../hooks/useTriggerOverride";
 import { Select } from "../common/Select";
 
 const inputStyle: React.CSSProperties = {
@@ -24,6 +25,7 @@ const labelStyle: React.CSSProperties = {
 };
 
 export function TcPreferences() {
+  const override = useTriggerOverride("timecode");
   const [config, setConfigState] = useState<TcMachineConfig>({
     enabled: false,
     receiver_config: { source: "mtc", midi_port: null, ltc_device_id: null },
@@ -57,6 +59,13 @@ export function TcPreferences() {
           />
           Enable TC receive
         </label>
+        {(config.enabled || override.suspended) && <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, marginTop: 8 }}>
+          <input type="checkbox" checked={override.suspended === true}
+            disabled={override.suspended === null || override.pending}
+            onChange={event => void override.change(event.target.checked)} />
+          Suspend timecode triggers and clock-loss actions for this session
+        </label>}
+        {override.error && <div role="alert" style={{ fontSize: 11 }}>{override.error}</div>}
       </div>
 
       {config.enabled && (
