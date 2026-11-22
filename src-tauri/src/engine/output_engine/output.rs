@@ -15,7 +15,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::thread::JoinHandle;
 
 use super::slot::VideoSlot;
-use super::confidence::CaptureQueue;
+use super::confidence::{CaptureQueue, PreviewQueue};
 use super::MaskImage;
 use super::types::{FadeAnimState, MpvCtx, OutputId, OutputTransform, VoiceId};
 use super::window::NativeWindow;
@@ -63,6 +63,7 @@ pub(crate) struct Output {
     /// window is "hidden" would make it appear at startup.
     pub(super) visible: AtomicBool,
     pub(super) captures: CaptureQueue,
+    pub(super) preview: PreviewQueue,
     /// Physical window size, written on resize / screen move, read by the
     /// render thread to resize its GL surface.
     pub(super) width: AtomicU32,
@@ -112,6 +113,7 @@ impl Output {
             signal: Arc::new((Mutex::new(false), Condvar::new())),
             visible: AtomicBool::new(false),
             captures: CaptureQueue::default(),
+            preview: PreviewQueue::default(),
             width: AtomicU32::new(1920),
             height: AtomicU32::new(1080),
             text_overlay_active: AtomicBool::new(false),

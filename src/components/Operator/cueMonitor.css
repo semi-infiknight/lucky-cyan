@@ -50,7 +50,7 @@
 .stage-confidence-stills[data-comparing="true"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .stage-confidence-result figure { margin: 0; min-width: 0; }
 .stage-confidence-result p + .stage-confidence-stills { margin-top: 8px; }
-.stage-confidence-result img { display: block; max-width: 100%; background: black; border-radius: 4px; }
+.stage-confidence-result :is(img, canvas) { display: block; max-width: 100%; background: black; border-radius: 4px; }
 .stage-confidence-result figcaption { margin-top: 6px; }
 .cue-monitor-sheet { min-height: 0; overflow: auto; padding: 12px; }
 .cue-monitor-lists { display: grid; gap: 10px; }

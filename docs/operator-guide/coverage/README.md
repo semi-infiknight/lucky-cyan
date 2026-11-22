@@ -48,7 +48,7 @@ Program a show in the cue list or cart. Check the imported report before trustin
 
 ## Workflow tools
 
-Use Find, the inspector, Check Workspace, relink, Show Mode, the mixer and the floating timer. Cue monitor shows standby and active playback across lists, compares stage stills, and shows saved audio map marks alongside digital peaks from the assigned main-device channels. Stereo file audition can use its own named headphone sink. Group, video and full-effects audition, global overrides, full-motion output and input monitors, and separate audio-map windows remain open. [Cue monitor exercise](../programming/README.md#monitor-the-show-from-the-desk) · [Stage snapshot exercise](../video/README.md#check-the-stage-picture-from-the-desk) · [Live desk](../live/README.md)
+Use Find, the inspector, Check Workspace, relink, Show Mode, the mixer and the floating timer. Cue monitor shows standby and active playback across lists, compares stage stills, previews finished stage motion in a thumbnail, and shows saved audio map marks alongside digital peaks from the assigned main-device channels. Stereo file audition can use its own named headphone sink. Group, video and full-effects audition, global overrides, full-resolution output monitoring, input monitors, and separate audio-map windows remain open. [Cue monitor exercise](../programming/README.md#monitor-the-show-from-the-desk) · [Stage snapshot exercise](../video/README.md#check-the-stage-picture-from-the-desk) · [Live desk](../live/README.md)
 
 Paste selected groups between existing Audio and Video cues as one undoable edit while transport is idle. [Property paste exercise](../programming/README.md#paste-selected-settings-onto-existing-cues)
 

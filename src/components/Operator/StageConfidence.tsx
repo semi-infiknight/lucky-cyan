@@ -1,13 +1,21 @@
-import { useEffect, useState } from "react";
-import { captureStageSnapshot } from "../../lib/commands";
+import { useEffect, useRef, useState } from "react";
+import { captureStageSnapshot, readStagePreview, setStagePreview } from "../../lib/commands";
 import { MAIN_OUTPUT_ID, type StageSnapshot } from "../../lib/types";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { Select } from "../common/Select";
+import { decodeStagePreview } from "./stagePreviewFrame";
 
 // A capture queued for an old selection may still be completing. Do not
 // start another render readback if the operator changes or reopens the view.
 let captureInFlight: Promise<StageSnapshot> | null = null;
-const LIVE_CAPTURE_INTERVAL_MS = 500;
+const PREVIEW_INTERVAL_MS = 1000 / 24;
+let previewControl = Promise.resolve();
+
+function changePreview(workspaceId: string, outputId: string, sessionId: string, enabled: boolean) {
+  const request = previewControl.then(() => setStagePreview(workspaceId, outputId, sessionId, enabled));
+  previewControl = request.catch(() => {});
+  return request;
+}
 
 export function requestStageStill(workspaceId: string, outputId: string): Promise<StageSnapshot> | null {
   if (captureInFlight) return null;
@@ -39,27 +47,49 @@ function StagePicture({ workspaceId, outputId }: { workspaceId: string; outputId
   const [reference, setReference] = useState<StageSnapshot | null>(null);
   const [waiting, setWaiting] = useState(false);
   const [live, setLive] = useState(false);
+  const [liveSize, setLiveSize] = useState<{ width: number; height: number } | null>(null);
   const [failure, setFailure] = useState("");
+  const previewCanvas = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     if (!live) return;
+    if (document.hidden) { setLive(false); return; }
+    const session = crypto.randomUUID();
     let active = true;
+    let after = 0;
     let timer: number | undefined;
+    const started = changePreview(workspaceId, outputId, session, true);
+    const report = (error: unknown) => {
+      if (!active) return;
+      setFailure(String(error));
+      setLive(false);
+    };
 
     const readFrame = async () => {
       if (!active || document.hidden) return;
-      const request = requestStageStill(workspaceId, outputId);
-      if (request) {
-        try {
-          const frame = await request;
-          if (active && !document.hidden) setLatest(frame);
-        } catch (error) {
-          if (active && !document.hidden) setFailure(String(error));
-          if (active) setLive(false);
-          return;
+      const startedAt = performance.now();
+      try {
+        const reply = await readStagePreview(workspaceId, outputId, session, after);
+        if (!active || document.hidden) return;
+        const frame = decodeStagePreview(reply);
+        if (frame) {
+          const canvas = previewCanvas.current;
+          const context = canvas?.getContext("2d", { alpha: false });
+          if (!canvas || !context) throw new Error("The live preview canvas is unavailable.");
+          if (canvas.width !== frame.width || canvas.height !== frame.height) {
+            canvas.width = frame.width;
+            canvas.height = frame.height;
+          }
+          context.putImageData(new ImageData(frame.pixels, frame.width, frame.height), 0, 0);
+          after = frame.serial;
+          setLiveSize(prior => prior?.width === frame.sourceWidth && prior.height === frame.sourceHeight
+            ? prior : { width: frame.sourceWidth, height: frame.sourceHeight });
         }
+      } catch (error) {
+        report(error);
+        return;
       }
-      if (active && !document.hidden) timer = window.setTimeout(readFrame, LIVE_CAPTURE_INTERVAL_MS);
+      if (active) timer = window.setTimeout(readFrame, Math.max(0, PREVIEW_INTERVAL_MS - (performance.now() - startedAt)));
     };
 
     const stopIfHidden = () => {
@@ -70,12 +100,12 @@ function StagePicture({ workspaceId, outputId }: { workspaceId: string; outputId
       }
     };
     document.addEventListener("visibilitychange", stopIfHidden);
-    stopIfHidden();
-    void readFrame();
+    void started.then(readFrame, report);
     return () => {
       active = false;
       window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", stopIfHidden);
+      void changePreview(workspaceId, outputId, session, false).catch(() => {});
     };
   }, [live, workspaceId, outputId]);
 
@@ -89,6 +119,7 @@ function StagePicture({ workspaceId, outputId }: { workspaceId: string; outputId
     setWaiting(true);
     try {
       setLatest(await request);
+      setLiveSize(null);
       setFailure("");
     } catch (error) {
       setFailure(String(error));
@@ -97,24 +128,42 @@ function StagePicture({ workspaceId, outputId }: { workspaceId: string; outputId
     }
   };
 
+  const keepReference = () => {
+    const canvas = previewCanvas.current;
+    if (liveSize && canvas) {
+      const png = canvas.toDataURL("image/png").split(",", 2)[1];
+      if (png) setReference({ source_width: liveSize.width, source_height: liveSize.height, png_base64: png });
+    } else if (latest) {
+      setReference(latest);
+    }
+  };
+
   return <>
     <button type="button" onClick={() => void takeSnapshot()} disabled={waiting || live}>
-      {latest ? "Retake frame" : "Capture frame"}
+      {latest || liveSize ? "Retake frame" : "Capture frame"}
     </button>
     <button type="button" disabled={waiting} onClick={() => {
       setFailure("");
+      if (!live) setLiveSize(null);
       setLive(!live);
     }}>{live ? "Stop live preview" : "Start live preview"}</button>
-    {latest && <button type="button" onClick={() => setReference(latest)} disabled={waiting || reference === latest}>
+    {(liveSize || (!live && latest)) && <button type="button" onClick={keepReference}
+      disabled={waiting || (!liveSize && reference === latest)}>
       {reference ? "Replace reference" : "Set reference"}
     </button>}
     {reference && <button type="button" onClick={() => setReference(null)}>Clear reference</button>}
     <div className="stage-confidence-result" aria-busy={waiting}>
-      {!latest && !waiting && !live && !failure && <p>Show the selected output, then capture a frame from the desk.</p>}
+      {!latest && !liveSize && !waiting && !live && !failure && <p>Show the selected output, then capture a frame from the desk.</p>}
       {waiting && <p role="status">Reading the output…</p>}
-      {live && <p role="status">Live preview · up to 2 frames per second</p>}
+      {live && <p role="status">{liveSize ? "Live preview · up to 24 frames per second" : "Waiting for a stage frame…"}</p>}
       {failure && <p role="alert">{failure}</p>}
-      {latest && <StageStillComparison latest={latest} reference={reference} />}
+      {(live || liveSize) ? <div className="stage-confidence-stills" data-comparing={reference !== null}>
+        {reference && <StageStill label="Reference frame" frame={reference} />}
+        <figure hidden={!liveSize}>
+          <canvas ref={previewCanvas} role="img" aria-label="Stage preview" />
+          {liveSize && <figcaption>{live ? "Live preview" : "Held preview frame"} · {liveSize.width} × {liveSize.height} output</figcaption>}
+        </figure>
+      </div> : latest && <StageStillComparison latest={latest} reference={reference} />}
     </div>
   </>;
 }

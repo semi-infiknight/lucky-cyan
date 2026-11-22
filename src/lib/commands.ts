@@ -311,6 +311,10 @@ export const clearTestPattern = (outputId?: string | null) =>
 export const listVideoOutputs = () => invoke<VideoOutputInfo[]>("list_video_outputs");
 export const captureStageSnapshot = (workspaceId: string, outputId: string) =>
   invoke<StageSnapshot>("capture_stage_snapshot", { workspaceId, outputId });
+export const setStagePreview = (workspaceId: string, outputId: string, sessionId: string, enabled: boolean) =>
+  invoke<void>("set_stage_preview", { workspaceId, outputId, sessionId, enabled });
+export const readStagePreview = (workspaceId: string, outputId: string, sessionId: string, after: number) =>
+  invoke<ArrayBuffer | number[]>("read_stage_preview", { workspaceId, outputId, sessionId, after });
 export type OutputSplitDirection = "horizontal" | "vertical";
 export interface OutputSplitSetup {
   document: string;

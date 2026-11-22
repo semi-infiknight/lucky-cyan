@@ -12,7 +12,7 @@ use tauri::{Emitter, State};
 use uuid::Uuid;
 
 use crate::cue::traits::Cue;
-use crate::engine::output_engine::confidence::{StageSnapshot, CAPTURE_TIMEOUT};
+use crate::engine::output_engine::confidence::{PreviewOwner, StageSnapshot, CAPTURE_TIMEOUT};
 use crate::engine::output_engine::{
     OutputConfig, OutputId, OutputRegions, OutputSplitDirection, OutputTransform, MAIN_OUTPUT,
 };
@@ -109,6 +109,39 @@ pub(crate) async fn capture_stage_snapshot(
     let ws = state.workspace.lock().map_err(|error| error.to_string())?;
     check_capture_owner(&ws, workspace_id, output_id)?;
     Ok(shot)
+}
+
+#[tauri::command]
+pub(crate) fn set_stage_preview(
+    workspace_id: Uuid, output_id: OutputId, session_id: Uuid, enabled: bool, state: State<'_, AppState>,
+) -> Result<(), String> {
+    let owner = PreviewOwner { workspace: workspace_id, session: session_id };
+    if enabled {
+        let ws = state.workspace.lock().map_err(|error| error.to_string())?;
+        check_capture_owner(&ws, workspace_id, output_id)?;
+        state.output_engine.start_stage_preview(output_id, owner)
+    } else {
+        state.output_engine.stop_stage_preview(output_id, owner);
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn read_stage_preview(
+    workspace_id: Uuid, output_id: OutputId, session_id: Uuid, after: u32, state: State<'_, AppState>,
+) -> Result<tauri::ipc::Response, String> {
+    let owner = PreviewOwner { workspace: workspace_id, session: session_id };
+    let frame = {
+        let ws = match state.workspace.try_lock() {
+            Ok(workspace) => workspace,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(tauri::ipc::Response::new(Vec::new())),
+            Err(error) => return Err(error.to_string()),
+        };
+        check_capture_owner(&ws, workspace_id, output_id)?;
+        state.output_engine.read_stage_preview(output_id, owner, after)?
+    };
+    let bytes = frame.map(|(serial, frame)| frame.preview_bytes(serial)).unwrap_or_default();
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[derive(Serialize)]

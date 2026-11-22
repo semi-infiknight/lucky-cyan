@@ -530,6 +530,28 @@ impl OutputEngine {
         Ok(receiver)
     }
 
+    pub(crate) fn start_stage_preview(&self, id: OutputId, owner: confidence::PreviewOwner) -> Result<(), String> {
+        let output = self.live_output(id).filter(|out| out.is_visible())
+            .ok_or("Show this video output before starting preview")?;
+        output.preview.start(owner, Instant::now())?;
+        output.wake();
+        Ok(())
+    }
+
+    pub(crate) fn stop_stage_preview(&self, id: OutputId, owner: confidence::PreviewOwner) {
+        if let Some(output) = self.live_output(id) {
+            output.preview.stop(owner);
+        }
+    }
+
+    pub(crate) fn read_stage_preview(&self, id: OutputId, owner: confidence::PreviewOwner, after: u32)
+        -> Result<Option<(u32, Arc<confidence::RawStageFrame>)>, String>
+    {
+        let output = self.live_output(id).filter(|out| out.is_visible())
+            .ok_or("The video output is hidden or closed")?;
+        output.preview.latest(owner, after, Instant::now())
+    }
+
     /// Snapshot of every live output.
     fn live_outputs(&self) -> Vec<Arc<Output>> {
         self.outputs.lock().unwrap().values().cloned().collect()

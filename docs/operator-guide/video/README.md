@@ -198,7 +198,7 @@ The speed change applies to one active picture. Inkue confirms that the loaded m
 2. Select **Set reference** to keep the current frame beside the updating preview. Select **Stop live preview** to hold the latest thumbnail. Use **Retake frame** when you want one new still.
 3. Hide the output or change the selected output. A hidden output ends preview at the next capture. Changing output or closing the view ends preview immediately. Select **Start live preview** again when you want to watch the new output.
 
-The thumbnail refreshes up to twice a second. Use the actual stage to judge motion and frame timing. The preview takes one finished frame at a time, including the selected output's masks and blackout. [QLab video output monitors](https://qlab.app/docs/v5/tools/monitor-windows/#video-output-monitor-windows)
+The live preview uses a thumbnail up to 320 × 180 pixels and up to 24 frames per second. It reads finished stage frames, including masks and blackout, and displays the newest available frame. The stage output stays in charge of presentation timing. Use the physical display to verify frame timing, latency, or fine detail. [QLab video output monitors](https://qlab.app/docs/v5/tools/monitor-windows/#video-output-monitor-windows)
 
 Each request reads a reduced copy of the final rendered picture, including the on-output text, regions, masks, and blackout. It works on an already visible output. Test the signal path, projector optics, and audience-side brightness on the physical display.
 

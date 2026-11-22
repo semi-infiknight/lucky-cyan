@@ -90,7 +90,7 @@ use commands::{
     output_cmds::{
         add_video_output, apply_output_split, capture_stage_snapshot, delete_video_output, export_projection_chart,
         get_output_mask_image, get_output_split_setup, list_video_outputs, rename_video_output,
-        set_output_mask_image, set_video_output_screen,
+        read_stage_preview, set_output_mask_image, set_stage_preview, set_video_output_screen,
     },
     settings_transfer_cmds::{apply_workspace_settings, export_settings_file, get_settings_snapshot, read_settings_file},
     preferences_cmds::{
@@ -607,6 +607,8 @@ pub fn run() {
             identify_output_screen,
             list_video_outputs,
             capture_stage_snapshot,
+            read_stage_preview,
+            set_stage_preview,
             get_output_split_setup,
             apply_output_split,
             export_projection_chart,

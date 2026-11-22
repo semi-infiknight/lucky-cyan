@@ -35,7 +35,7 @@ use crate::engine::mpv_sys::{
     MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, MPV_RENDER_UPDATE_FRAME,
 };
 use super::crossfade::{self, MixLink};
-use super::confidence::{CaptureSender, RawStageFrame, thumbnail_size};
+use super::confidence::{CAPTURE_TIMEOUT, CaptureSender, PreviewOwner, RawStageFrame, preview_size, thumbnail_size};
 use super::output::Output;
 use super::slot;
 use super::source_placement::SourcePlacement;
@@ -316,6 +316,7 @@ fn render_thread_main(
     let mut pingpong: [Option<WarpTarget>; 2] = [None, None];
     let mut mix_targets: [Option<WarpTarget>; 2] = [None, None];
     let mut capture_target = None;
+    let mut capture_pack = None;
     let mut stage_readback: Option<StageReadback> = None;
 
     // Opt-in output frame-rate cap (Linux).  `INKUE_OUTPUT_FPS=30` makes the render
@@ -341,8 +342,9 @@ fn render_thread_main(
         if output.shutdown.load(Ordering::Acquire) {
             crate::health::clear(&mask_alert);
             if let Some(readback) = stage_readback.take() {
-                readback.complete(&gl, Err("The video output closed before the capture".into()));
+                readback.complete(&gl, &output, Err("The video output closed before the capture".into()));
             }
+            retire_stage_pack(&gl, &mut capture_pack);
             release_render_contexts(&lib, &output, render_ctx);
             log::info!("[render] output '{}' render thread ended", output.name());
             return Ok(());
@@ -398,7 +400,8 @@ fn render_thread_main(
         if let Some(capture) = &stage_readback {
             let visible = output.is_visible() && !output.shutdown.load(Ordering::Acquire);
             if let Some(result) = capture.poll(&gl, visible) {
-                stage_readback.take().unwrap().complete(&gl, result);
+                if result.is_err() { retire_stage_pack(&gl, &mut capture_pack); }
+                stage_readback.take().unwrap().complete(&gl, &output, result);
             }
         }
 
@@ -498,7 +501,8 @@ fn render_thread_main(
         // changes in idle mode).
         if !has_frame && !any_slot_frame && alpha == 0 && !text_active && !warp_dirty
             && !needs_animation && layers.is_empty()
-            && (stage_readback.is_some() || !output.captures.pending()) { continue; }
+            && (stage_readback.is_some() || (!output.captures.pending()
+                && !output.preview.needs_first_frame(Instant::now()))) { continue; }
 
         // Opt-in FPS cap: drop video frames arriving faster than the target interval.
         // Never throttle a fade animation or a Text overlay redraw (must stay smooth);
@@ -648,24 +652,30 @@ fn render_thread_main(
 
         if alpha > 0 { draw_fade_quad(&gl, fade_program, fade_vao, alpha as f32 / 255.0); }
 
-        let capture_request = if stage_readback.is_none() {
-            output.captures.take(std::time::Instant::now())
-        } else {
-            None
-        };
-        if let Some((deadline, reply)) = capture_request {
-            let submitted = if output.is_visible() && !output.shutdown.load(Ordering::Acquire) {
-                submit_stage_readback(&gl, &mut capture_target, [w_px, h_px])
-            } else {
-                Err(anyhow!("The video output was hidden before the capture"))
-            };
-            match submitted {
-                Ok((buffer, fence, size)) => {
-                    stage_readback = Some(StageReadback {
-                        buffer, fence, source_size: [w_px, h_px], size, deadline, reply,
-                    });
+        if stage_readback.is_none() {
+            let now = Instant::now();
+            let request = output.captures.take(now)
+                .map(|(deadline, reply)| (deadline, StageReply::Still(reply), thumbnail_size(w_px, h_px)))
+                .or_else(|| output.preview.reserve(now).map(|owner| {
+                    (now + CAPTURE_TIMEOUT, StageReply::Preview(owner), preview_size(w_px, h_px))
+                }));
+            if let Some((deadline, reply, size)) = request {
+                let submitted = if output.is_visible() && !output.shutdown.load(Ordering::Acquire) {
+                    submit_stage_readback(&gl, &mut capture_target, &mut capture_pack, [w_px, h_px], size)
+                } else {
+                    Err(anyhow!("The video output was hidden before the capture"))
+                };
+                match submitted {
+                    Ok((buffer, fence)) => {
+                        stage_readback = Some(StageReadback {
+                            buffer, fence, source_size: [w_px, h_px], size, deadline, reply,
+                        });
+                    }
+                    Err(error) => {
+                        retire_stage_pack(&gl, &mut capture_pack);
+                        reply.finish(&output, Err(error.to_string()));
+                    }
                 }
-                Err(error) => { let _ = reply.try_send(Err(error.to_string())); }
             }
         }
 
@@ -833,7 +843,32 @@ struct StageReadback {
     source_size: [u32; 2],
     size: [u32; 2],
     deadline: std::time::Instant,
-    reply: CaptureSender,
+    reply: StageReply,
+}
+
+enum StageReply {
+    Still(CaptureSender),
+    Preview(PreviewOwner),
+}
+
+impl StageReply {
+    fn finish(self, output: &Output, frame: Result<RawStageFrame, String>) {
+        match self {
+            Self::Still(reply) => { let _ = reply.try_send(frame); }
+            Self::Preview(owner) => output.preview.publish(owner, frame, Instant::now()),
+        }
+    }
+}
+
+struct StagePackBuffer {
+    handle: glow::Buffer,
+    bytes: i32,
+}
+
+fn retire_stage_pack(gl: &glow::Context, pack: &mut Option<StagePackBuffer>) {
+    if let Some(StagePackBuffer { handle, .. }) = pack.take() {
+        unsafe { gl.delete_buffer(handle); }
+    }
 }
 
 impl StageReadback {
@@ -865,21 +900,21 @@ impl StageReadback {
         }
     }
 
-    fn complete(self, gl: &glow::Context, frame: Result<RawStageFrame, String>) {
+    fn complete(self, gl: &glow::Context, output: &Output, frame: Result<RawStageFrame, String>) {
         unsafe {
             gl.delete_sync(self.fence);
-            gl.delete_buffer(self.buffer);
         }
-        let _ = self.reply.try_send(frame);
+        self.reply.finish(output, frame);
     }
 }
 
 /// Submit a GPU-side copy of the finished back buffer, including warp, masks and blackout.
 fn submit_stage_readback(
-    gl: &glow::Context, target: &mut Option<WarpTarget>, source_size: [u32; 2],
-) -> Result<(glow::Buffer, glow::Fence, [u32; 2])> {
+    gl: &glow::Context, target: &mut Option<WarpTarget>, pack: &mut Option<StagePackBuffer>,
+    source_size: [u32; 2], size: [u32; 2],
+) -> Result<(glow::Buffer, glow::Fence)> {
     let [source_w, source_h] = source_size;
-    let [width, height] = thumbnail_size(source_w, source_h);
+    let [width, height] = size;
     ensure_warp_target(gl, target, width, height)?;
     let target = target.as_ref().ok_or_else(|| anyhow!("Stage capture target is unavailable"))?;
     unsafe {
@@ -887,9 +922,23 @@ fn submit_stage_readback(
         for _ in 0..8 {
             if gl.get_error() == glow::NO_ERROR { break; }
         }
-        let buffer = gl.create_buffer().map_err(|error| anyhow!("Stage capture buffer: {error}"))?;
+        if pack.is_none() {
+            let handle = gl.create_buffer().map_err(|error| anyhow!("Stage capture buffer: {error}"))?;
+            *pack = Some(StagePackBuffer { handle, bytes: 0 });
+        }
+        let pack = pack.as_mut().unwrap();
+        let buffer = pack.handle;
         gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(buffer));
-        gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (width * height * 4) as i32, glow::STREAM_READ);
+        let bytes = (width * height * 4) as i32;
+        if pack.bytes < bytes {
+            gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, bytes, glow::STREAM_READ);
+            let error = gl.get_error();
+            if error != glow::NO_ERROR {
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                return Err(anyhow!("Could not allocate the stage capture buffer (OpenGL {error:#x})"));
+            }
+            pack.bytes = bytes;
+        }
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
         gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(target.fbo));
         gl.disable(glow::SCISSOR_TEST);
@@ -910,15 +959,11 @@ fn submit_stage_readback(
         gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         if error != glow::NO_ERROR {
-            gl.delete_buffer(buffer);
             return Err(anyhow!("Could not submit the stage capture (OpenGL {error:#x})"));
         }
         match gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
-            Ok(fence) => Ok((buffer, fence, [width, height])),
-            Err(error) => {
-                gl.delete_buffer(buffer);
-                Err(anyhow!("Could not fence the stage capture: {error}"))
-            }
+            Ok(fence) => Ok((buffer, fence)),
+            Err(error) => Err(anyhow!("Could not fence the stage capture: {error}")),
         }
     }
 }
