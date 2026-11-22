@@ -2073,6 +2073,45 @@ mod tests {
     }
 
     #[test]
+    fn timecode_positioned_video_starts_picture_and_audio_at_the_same_source_offset() {
+        use crate::{cue::video_cue::VideoCue, test_support::EngineCall};
+
+        let (mut context, _, calls) = crate::test_support::recording_context();
+        let frames = crate::test_support::record_audio_launch_positions(&mut context, &calls);
+        let transport = Transport::new(context);
+        let mut list = CueList::new("Rehearsal video");
+        let standby = WaitCue::new();
+        let parked = standby.id();
+        list.push(Box::new(standby));
+        let mut video = VideoCue::new();
+        video.file_path = Some("show.mov".into());
+        video.set_runtime_duration(Duration::from_secs(8));
+        video.set_continue_mode(ContinueMode::DoNotContinue);
+        video.start_time = Some(Duration::from_secs(1));
+        video.end_time = Some(Duration::from_secs(5));
+        video.fade_out = Some(crate::cue::types::FadeSpec {
+            duration_ms: 2_000, curve: crate::cue::types::FadeCurve::Linear,
+        });
+        let id = video.id();
+        list.push(Box::new(video));
+        list.set_playhead(Some(parked)).unwrap();
+        assert!(transport.join_from_timecode(&mut list, id, Duration::from_secs(3)).unwrap().triggered.is_empty());
+        list.get_mut(&id).unwrap().accept_preloaded_audio(Arc::new(vec![0.0; 384_000]), 1, 48_000, Duration::from_secs(8));
+        assert!(transport.join_from_timecode(&mut list, id, Duration::from_secs(4)).unwrap().triggered.is_empty());
+        assert!(calls.lock().unwrap().is_empty());
+        assert_eq!(transport.join_from_timecode(&mut list, id, Duration::from_secs(3)).unwrap().triggered, [id]);
+        assert_eq!(list.playhead_cue_id, Some(parked));
+        assert_eq!(*frames.lock().unwrap(), [192_000]);
+        // Before the output reveals its first frame, even an entry inside an
+        // authored end fade must leave the paired native voice paused.
+        list.get_mut(&id).unwrap().tick(&transport.context).unwrap();
+        assert!(matches!(calls.lock().unwrap().as_slice(), [
+            EngineCall::AudioPlayPausedRouted { .. },
+            EngineCall::OutputShowContent { start_ms: Some(4000), positioned: true, .. },
+        ]));
+    }
+
+    #[test]
     fn timecode_lookback_joins_at_real_offsets_and_keeps_standby_parked() {
         use crate::cue::audio_cue::AudioCue;
         use crate::engine::timecode_types::{TcOnStart, TcTrigger};

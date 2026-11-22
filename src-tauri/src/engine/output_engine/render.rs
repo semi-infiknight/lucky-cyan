@@ -446,11 +446,12 @@ fn render_thread_main(
                 .lock()
                 .ok()
                 .and_then(|st| {
+                    let voice = st.voice_id?;
                     Some(LayerDraw {
                         slot_index: s.index,
-                        voice: st.voice_id?,
+                        voice,
                         layer_key: st.layer_key,
-                        opacity: if st.preloaded { 0.0 } else { opacity },
+                        opacity: if st.preloaded || st.positioned_reveal_pending(voice) { 0.0 } else { opacity },
                         blend_mode: st.blend_mode.shader_id(),
                         saturation: st.effective_saturation(Instant::now()),
                         source_placement: st.still_raster.map(|raster| {

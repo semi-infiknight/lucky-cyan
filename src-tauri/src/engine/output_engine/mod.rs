@@ -609,6 +609,9 @@ impl OutputEngine {
         let Some(lib) = self.lib.as_ref() else {
             return Err(anyhow!("{NO_VIDEO_OUTPUT}"));
         };
+        anyhow::ensure!(!req.require_positioned_frame
+            || (req.start_ms.is_some() && !req.is_image && !req.live_source && !req.preload),
+            "A positioned video start requires a file and a source position.");
         let still_raster = if req.is_image && req.geometry.source_rotation_degrees.is_some() {
             Some(source_placement::StillRaster::open(req.file_path)?)
         } else {
@@ -655,6 +658,7 @@ impl OutputEngine {
             fade_in_ms: req.fade_in_ms,
             loop_count: req.loop_count,
             start_ms: req.start_ms,
+            require_positioned_frame: req.require_positioned_frame,
             end_ms: req.end_ms,
             display_duration_ms: req.display_duration_ms,
             hold_last_frame: req.hold_last_frame,
@@ -983,6 +987,13 @@ impl OutputEngine {
         slot::position_ms(&slot)
     }
 
+    pub(crate) fn positioned_video_location_ms(&self, voice_id: VoiceId) -> Option<u64> {
+        let slot = output::slot_for_voice(voice_id)?;
+        let admitted = slot.state.lock().is_ok_and(|state| state.voice_id == Some(voice_id)
+            && state.first_frame_ready && !state.positioned_reveal_pending(voice_id) && !state.pending_unload);
+        admitted.then(|| slot::position_ms(&slot)).flatten()
+    }
+
     /// Claim a prepared silent movie's speed without affecting its visual fades.
     pub fn claim_silent_speed(&self, voice: VoiceId, owner: Uuid) -> Option<SilentSpeedOrigin> {
         let slot = output::slot_for_voice(voice)?;
@@ -1038,6 +1049,11 @@ impl OutputEngine {
     /// up when the picture keeps advancing while the audio voice is frozen
     /// during an output-device outage.
     pub fn resync_audio_to_video(&self, voice_id: VoiceId) {
+        if output::slot_for_voice(voice_id).is_some_and(|slot| {
+            slot.state.lock().is_ok_and(|state| state.positioned_reveal_pending(voice_id))
+        }) {
+            return;
+        }
         let Some(audio) = self.video_audio_voice(voice_id) else { return };
         if let Some(ms) = self.current_video_position_ms(voice_id) {
             let _ = self.audio_engine.seek_voice_ms(audio, ms);
@@ -1066,6 +1082,7 @@ impl OutputEngine {
             fade_in_ms: 0,
             loop_count,
             start_ms,
+            require_positioned_frame: false,
             end_ms,
             output,
             audio_voice_id: None,
@@ -1093,6 +1110,9 @@ impl OutputEngine {
     }
 
     pub fn pause_voice(&self, voice_id: VoiceId) -> Result<()> {
+        if output::slot_for_voice(voice_id).is_some_and(|slot| slot::hold_positioned_reveal(&slot, voice_id, true)) {
+            return Ok(());
+        }
         if self.queue_silent_pause(voice_id, true) { return Ok(()); }
         if let (Some(lib), Some(ctx)) = (self.try_mpv_lib(), self.voice_mpv_ctx(voice_id)) {
             unsafe {
@@ -1106,6 +1126,9 @@ impl OutputEngine {
     }
 
     pub fn resume_voice(&self, voice_id: VoiceId) -> Result<()> {
+        if output::slot_for_voice(voice_id).is_some_and(|slot| slot::hold_positioned_reveal(&slot, voice_id, false)) {
+            return Ok(());
+        }
         if self.queue_silent_pause(voice_id, false) { return Ok(()); }
         if let (Some(lib), Some(ctx)) = (self.try_mpv_lib(), self.voice_mpv_ctx(voice_id)) {
             unsafe {

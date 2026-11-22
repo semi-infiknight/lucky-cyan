@@ -1921,7 +1921,7 @@ pub fn set_video_file(
                             );
                             cue.accept_preloaded_audio(Arc::new(samples), channels, sample_rate, duration);
                         }
-                        Ok(None) => {} // Silent video — no audio track.
+                        Ok(None) => VideoCue::mark_silent_track(cue),
                         Err(error) => log::warn!("Video audio decode failed for {path:?}: {error}"),
                     }
                 },

@@ -514,6 +514,8 @@ pub struct ContentRequest<'a> {
     /// Extra loop repetitions (0 = play once, `u32::MAX` = infinite).
     pub loop_count: u32,
     pub start_ms: Option<u64>,
+    /// Hold picture and sound until the requested source position has its first frame.
+    pub require_positioned_frame: bool,
     pub end_ms: Option<u64>,
     /// The output to show this content on.  `None` = the main output.
     pub output: Option<OutputId>,

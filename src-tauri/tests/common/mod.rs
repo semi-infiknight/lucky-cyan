@@ -300,7 +300,7 @@ pub enum EngineCall {
     AudioEnsureInputFeed,
     AudioPlayMicVoice,
     AudioPanicStopAll,
-    OutputShowContent { path: String, is_image: bool, preload: bool },
+    OutputShowContent { path: String, is_image: bool, preload: bool, start_ms: Option<u64>, positioned: bool },
     OutputStopContent,
     OutputTextOverlay { ass: String },
     OutputClearText,
@@ -365,8 +365,9 @@ impl AudioEngineApi for RecAudio {
         }
         Ok(voice.id)
     }
-    fn play_voice_paused_routed(&self, _v: Voice, device_id: Option<&str>) -> Result<VoiceId> {
+    fn play_voice_paused_routed(&self, voice: Voice, device_id: Option<&str>) -> Result<VoiceId> {
         record(&self.0, EngineCall::AudioPlayPausedRouted { device: device_id.map(str::to_string) });
+        self.3.lock().unwrap().push(voice.frame_pos.load(std::sync::atomic::Ordering::Relaxed));
         Ok(Uuid::new_v4())
     }
     fn start_preloaded_file_voice(&self, _voice: VoiceId) -> Result<bool> {
@@ -500,6 +501,8 @@ impl OutputEngineApi for RecOutput {
             path: req.file_path.to_string_lossy().into_owned(),
             is_image: req.is_image,
             preload: req.preload,
+            start_ms: req.start_ms,
+            positioned: req.require_positioned_frame,
         });
         if self.headless {
             anyhow::bail!("{}", inkue_lib::engine::output_engine::NO_VIDEO_OUTPUT);

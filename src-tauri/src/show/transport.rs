@@ -542,8 +542,15 @@ impl Transport {
             return Ok(skipped);
         }
         let generation = cue.play_generation().wrapping_add(1);
-        let result = if let Some(wait) = WaitCue::from_cue_mut(cue) {
-            if !wait.join_from_timecode(elapsed, &self.context) {
+        let joined = match cue.cue_type() {
+            CueType::Wait => WaitCue::from_cue_mut(cue)
+                .map(|wait| wait.join_from_timecode(elapsed, &self.context)),
+            CueType::Video => (cue as &mut dyn Any).downcast_mut::<VideoCue>()
+                .map(|video| video.join_from_timecode(elapsed, &self.context)).transpose()?,
+            _ => None,
+        };
+        let result = if let Some(joined) = joined {
+            if !joined {
                 return Ok(skipped);
             }
             list.cancel_enter_follow_for(id);

@@ -139,11 +139,11 @@ Inkue starts cues at received marks during forward playback. A forward jump can 
 
 ### Join a cue already in progress
 
-1. Set a 20-second top-level Wait and a trimmed File Audio cue to **Do Not Continue**. Add marks and select **TC Sync → On Start → Join active Wait and Audio cues**. Give the Audio cue zero Pre-Wait and play once at normal speed with no slices. Let its file finish loading.
-2. Begin sending timecode several seconds after both marks, or send a locate followed by moving frames. The Wait starts partway through its countdown and Audio starts inside its saved trim at the corresponding offset. Keep another cue on standby to verify that joining the earlier marks leaves standby parked.
+1. Set a 20-second top-level Wait and a trimmed File Audio or Video cue to **Do Not Continue**. Add marks and select **TC Sync → On Start → Join active cues**. Give each media cue zero Pre-Wait and play once at normal speed with no slices. For Video, clear **Hold last frame** and leave **Silent movie speed** off. Let the cue finish loading its media.
+2. Begin sending timecode several seconds after both marks, or send a locate followed by moving frames. The Wait starts partway through its countdown. Audio starts inside its saved trim. Video presents the decoded frame at the joined position and starts its soundtrack there. Keep another cue on standby to verify that joining the earlier marks leaves standby parked.
 3. Repeat from beyond the cue ends. Also try entering a running cue's range while it is already playing by hand. Those starts are skipped. Select **Start at incoming marks** to return to regular clock triggering.
 
-Once the source is rolling, ordinary jumps use the incoming marks. Restoring triggers from the session-wide override takes a fresh baseline. Video lookback and automatic continuation are separate workflows.
+Once the source is rolling, ordinary jumps use the incoming marks. Restoring triggers from the session-wide override takes a fresh baseline. For show use, rehearse the join with picture and sound on the venue outputs.
 
 ### Lose the clock during a Wait
 

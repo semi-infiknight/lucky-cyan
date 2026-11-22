@@ -208,6 +208,7 @@ pub(super) struct SlotState {
     pub pending_reveal: Option<u32>,
     /// Failsafe deadline for the reveal (mpv event missing/late).
     pub reveal_deadline: Option<Instant>,
+    positioned_start: Option<PositionedStart>,
     /// Preloaded (Load Cue): the file is open and frame 0 is decoded, but the
     /// reveal is **held back** until the cue is actually started. Both the
     /// `PLAYBACK_RESTART` path and the reveal watchdog respect it, so nothing
@@ -230,6 +231,18 @@ pub(super) struct SlotState {
     /// `crossfade.rs`.  Dropped once the dissolve has landed and its outgoing
     /// layers are gone, or when this content leaves the slot.
     pub crossfade: Option<CrossfadeLink>,
+}
+
+struct PositionedStart {
+    source_ms: u64,
+    file_loaded: bool,
+    held: bool,
+}
+
+enum RevealExpiry {
+    None,
+    Fallback,
+    Failed { voice: VoiceId, audio: Option<VoiceId> },
 }
 
 /// Slice program for one slot: `(start_s, end_s, play_count)` per segment;
@@ -339,6 +352,7 @@ impl SlotState {
             anim: OpacityAnim::resting(0.0),
             pending_reveal: None,
             reveal_deadline: None,
+            positioned_start: None,
             preloaded: false,
             first_frame_ready: false,
             pending_unload: false,
@@ -530,6 +544,9 @@ impl SlotState {
         if self.preloaded || self.pending_unload || self.voice_id.is_none() || self.jpeg_waiting() {
             return None;
         }
+        if self.positioned_start.as_ref().is_some_and(|start| start.held || !self.first_frame_ready) {
+            return None;
+        }
         let fade = self.pending_reveal.take()?;
         self.reveal_deadline = None;
         let silent_generation = self.silent_speed.as_mut().map(|speed| {
@@ -539,6 +556,43 @@ impl SlotState {
             self.generation
         });
         Some((fade, silent_generation))
+    }
+
+    pub(super) fn positioned_reveal_pending(&self, voice: VoiceId) -> bool {
+        self.voice_id == Some(voice) && self.positioned_start.is_some() && self.pending_reveal.is_some()
+    }
+
+    fn record_first_frame(&mut self, source_secs: Option<f64>) -> bool {
+        if let Some(start) = &self.positioned_start {
+            let matches = source_secs.is_some_and(|secs| secs.is_finite() && secs >= 0.0
+                && secs * 1000.0 >= start.source_ms.saturating_sub(2) as f64);
+            if !start.file_loaded || !matches {
+                return false;
+            }
+        }
+        self.first_frame_ready = true;
+        self.pending_reveal.is_some() && !self.preloaded && !self.jpeg_waiting()
+            && self.positioned_start.as_ref().is_none_or(|start| !start.held)
+    }
+
+    fn expire_reveal(&mut self, now: Instant) -> RevealExpiry {
+        if self.preloaded || self.jpeg_waiting() || self.pending_reveal.is_none()
+            || !self.reveal_deadline.is_some_and(|deadline| now >= deadline)
+        {
+            return RevealExpiry::None;
+        }
+        self.reveal_deadline = None;
+        if self.positioned_start.is_none() {
+            return RevealExpiry::Fallback;
+        }
+        let Some(voice) = self.voice_id else { return RevealExpiry::None };
+        if self.first_frame_ready {
+            return RevealExpiry::None; // A Pause can hold an admitted frame off-screen.
+        }
+        self.pending_reveal = None;
+        self.pending_unload = true;
+        self.anim.set(0.0);
+        RevealExpiry::Failed { voice, audio: self.audio_voice_id.take() }
     }
 }
 
@@ -929,6 +983,7 @@ pub(super) struct SlotLoad {
     pub fade_in_ms: u32,
     pub loop_count: u32,
     pub start_ms: Option<u64>,
+    pub require_positioned_frame: bool,
     pub end_ms: Option<u64>,
     pub display_duration_ms: Option<u64>,
     pub hold_last_frame: bool,
@@ -987,6 +1042,8 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) -> Result<()
         };
         st.preloaded = load.preload;
         st.first_frame_ready = false;
+        st.positioned_start = load.start_ms.filter(|_| load.require_positioned_frame)
+            .map(|source_ms| PositionedStart { source_ms, file_loaded: false, held: false });
         if load.preload {
             // Preload: decode into the slot but keep it dark and paused. The
             // reveal is armed here and released by `start_preloaded`, so an
@@ -1010,7 +1067,8 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) -> Result<()
             // Wait for PLAYBACK_RESTART before revealing fresh source pixels.
             st.anim.set(0.0);
             st.pending_reveal = Some(load.fade_in_ms);
-            st.reveal_deadline = None; // armed at FILE_LOADED
+            st.reveal_deadline = st.positioned_start.as_ref()
+                .map(|_| Instant::now() + Duration::from_secs(5));
         }
         previous_crossfade
     };
@@ -1054,6 +1112,9 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) -> Result<()
         } else {
             if let Some(start) = load.start_ms {
                 opts.push(format!("start={:.3}", start as f64 / 1000.0));
+            }
+            if load.require_positioned_frame {
+                opts.push("hr-seek=yes".to_string());
             }
             if let Some(end) = load.end_ms {
                 opts.push(format!("end={:.3}", end as f64 / 1000.0));
@@ -1167,22 +1228,24 @@ pub(super) fn begin_stop(slot: &Arc<VideoSlot>, visual_fade_ms: u32) {
 /// opacity and whether the slot still needs animation frames.
 pub(super) fn tick_slot(slot: &Arc<VideoSlot>) -> (f32, bool) {
     // Reveal watchdog (mpv never signalled the first frame).
-    let force_reveal = {
+    let expired = {
         let Ok(mut st) = slot.state.lock() else { return (0.0, false) };
-        match (st.pending_reveal, st.reveal_deadline) {
-            // A preloaded slot is *meant* to sit there dark and paused, so the
-            // watchdog must never drag it on screen.
-            _ if st.preloaded || st.jpeg_waiting() => false,
-            (Some(_), Some(deadline)) if Instant::now() >= deadline => {
-                st.reveal_deadline = None;
-                true
-            }
-            _ => false,
-        }
+        st.expire_reveal(Instant::now())
     };
-    if force_reveal {
-        log::warn!("[slot {}] reveal watchdog fired — forcing unpause", slot.index);
-        reveal(slot, None);
+    match expired {
+        RevealExpiry::None => {}
+        RevealExpiry::Fallback => {
+            log::warn!("[slot {}] reveal watchdog fired — forcing unpause", slot.index);
+            reveal(slot, None);
+        }
+        RevealExpiry::Failed { voice, audio } => {
+            if let Some(audio) = audio {
+                let _ = slot.audio_engine.stop_voice(audio, 0, crate::engine::ring_command::FadeCurve::Linear);
+            }
+            slot.send_status(OutputStatus::Error {
+                voice_id: voice, message: "Video did not decode a frame at the timecode entry position.".into(),
+            });
+        }
     }
 
     let Ok(mut st) = slot.state.lock() else { return (0.0, false) };
@@ -1329,18 +1392,34 @@ pub(super) fn start_preloaded(slot: &Arc<VideoSlot>) -> bool {
     true
 }
 
+pub(super) fn hold_positioned_reveal(slot: &Arc<VideoSlot>, voice: VoiceId, paused: bool) -> bool {
+    let (ready, generation) = {
+        let Ok(mut state) = slot.state.lock() else { return false };
+        if !state.positioned_reveal_pending(voice) { return false; }
+        if let Some(start) = &mut state.positioned_start {
+            start.held = paused;
+        }
+        (!paused && state.first_frame_ready, state.generation)
+    };
+    if ready {
+        reveal(slot, Some(generation));
+    }
+    true
+}
+
 /// Reveal a paused video load: resume its audio voice, unpause mpv, start the
 /// opacity fade-in.  Called on `PLAYBACK_RESTART` (or the watchdog).
 fn reveal(slot: &Arc<VideoSlot>, expected_generation: Option<u64>) {
-    let (fade_in_ms, base, audio, silent_generation, jpeg_generation, owns_jpeg_worker) = {
+    let (fade_in_ms, base, audio, silent_generation, jpeg_generation, positioned_generation, owns_jpeg_worker) = {
         let Ok(mut st) = slot.state.lock() else { return };
         if expected_generation.is_some_and(|expected| expected != st.generation) { return; }
         let Some((fade, generation)) = st.take_reveal() else { return };
         let jpeg_generation = st.jpeg_lifts_blackout_on_reveal().then_some(st.generation);
+        let positioned_generation = st.positioned_start.is_some().then_some(st.generation);
         // Pin the approved JPEG's decoder until its native unpause returns.
         let owns_jpeg_worker = jpeg_generation.is_some() && !st.silent_worker_busy;
         st.silent_worker_busy |= owns_jpeg_worker;
-        (fade, st.base_opacity, st.audio_voice_id, generation, jpeg_generation, owns_jpeg_worker)
+        (fade, st.base_opacity, st.audio_voice_id, generation, jpeg_generation, positioned_generation, owns_jpeg_worker)
     };
 
     if silent_generation.is_some() {
@@ -1363,8 +1442,9 @@ fn reveal(slot: &Arc<VideoSlot>, expected_generation: Option<u64>) {
                 slot.wake_event_worker();
             }
         }
-        if silent_generation.or(jpeg_generation).is_some_and(|generation| generation != st.generation)
-            || (jpeg_generation.is_some() && st.pending_unload)
+        if silent_generation.or(jpeg_generation).or(positioned_generation)
+            .is_some_and(|generation| generation != st.generation)
+            || ((jpeg_generation.is_some() || positioned_generation.is_some()) && st.pending_unload)
         {
             return;
         }
@@ -1588,16 +1668,22 @@ fn slot_event_loop(slot: Arc<VideoSlot>) {
             MPV_EVENT_NONE => confirm_silent_stop(&slot),
 
             MPV_EVENT_PLAYBACK_RESTART => {
-                let has_pending = slot
-                    .state
-                    .lock()
-                    .map(|mut st| {
-                        st.first_frame_ready = true;
-                        st.pending_reveal.is_some() && !st.preloaded && !st.jpeg_waiting()
-                    })
-                    .unwrap_or(false);
-                if has_pending {
-                    reveal(&slot, None);
+                let (generation, positioned) = slot.state.lock().map_or((0, false), |state| {
+                    (state.generation, state.positioned_start.is_some())
+                });
+                let source_secs = if positioned {
+                    let mut seconds: f64 = 0.0;
+                    let ret = unsafe {
+                        (lib.mpv_get_property)(ctx as *mut c_void, cs("time-pos").as_ptr(), MPV_FORMAT_DOUBLE,
+                            &mut seconds as *mut f64 as *mut c_void)
+                    };
+                    (ret >= 0).then_some(seconds)
+                } else {
+                    None
+                };
+                let ready = slot.state.lock().is_ok_and(|mut st| st.generation == generation && st.record_first_frame(source_secs));
+                if ready {
+                    reveal(&slot, Some(generation));
                     log::info!("[slot {}] first frame — revealed", slot.index);
                 }
             }
@@ -1614,6 +1700,9 @@ fn slot_event_loop(slot: Arc<VideoSlot>) {
                 };
                 if let Ok(mut st) = slot.state.lock() {
                     if let Some(vid) = st.voice_id {
+                        if let Some(start) = &mut st.positioned_start {
+                            start.file_loaded = true;
+                        }
                         if let Some(speed) = st.silent_speed.as_mut() {
                             speed.file_loaded = true;
                         }
@@ -2089,6 +2178,38 @@ pub(super) fn position_ms(slot: &Arc<VideoSlot>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timecode_positioned_entry_waits_for_the_requested_frame_and_respects_pause() {
+        let now = Instant::now();
+        let voice = Uuid::new_v4();
+        let audio = Uuid::new_v4();
+        let prepare = || {
+            let mut state = SlotState::idle();
+            state.voice_id = Some(voice);
+            state.audio_voice_id = Some(audio);
+            state.pending_reveal = Some(0);
+            state.reveal_deadline = Some(now);
+            state.positioned_start = Some(PositionedStart { source_ms: 4_000, file_loaded: false, held: true });
+            state
+        };
+        let mut state = prepare();
+        assert!(!state.record_first_frame(Some(4.0))); // Ignore a restart before this load arrived.
+        state.positioned_start.as_mut().unwrap().file_loaded = true;
+        assert!(!state.record_first_frame(Some(0.0)));
+        assert!(state.take_reveal().is_none());
+        assert!(!state.record_first_frame(Some(4.0))); // Verify it while still held.
+        assert!(state.first_frame_ready);
+        assert!(matches!(state.expire_reveal(now), RevealExpiry::None));
+        assert!(state.take_reveal().is_none());
+        state.positioned_start.as_mut().unwrap().held = false;
+        assert!(state.take_reveal().is_some());
+
+        let mut failed = prepare();
+        assert!(matches!(failed.expire_reveal(now), RevealExpiry::Failed { voice: id, audio: Some(sound) } if id == voice && sound == audio));
+        assert!(failed.pending_unload);
+        assert!(failed.take_reveal().is_none());
+    }
 
     fn visible_picture(voice: VoiceId) -> SlotState {
         let mut state = SlotState::idle();

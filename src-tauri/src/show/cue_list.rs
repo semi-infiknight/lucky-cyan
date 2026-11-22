@@ -410,7 +410,7 @@ impl CueList {
         let frame = position.to_frame_number();
         let mut candidates: Vec<_> = self.cues.iter().filter_map(|cue| {
             if cue.is_disabled() || cue.continue_mode() != ContinueMode::DoNotContinue
-                || !matches!(cue.cue_type(), CueType::Wait | CueType::Audio) {
+                || !matches!(cue.cue_type(), CueType::Wait | CueType::Audio | CueType::Video) {
                 return None;
             }
             let mark = self.tc_triggers.get(&cue.id())?.position;

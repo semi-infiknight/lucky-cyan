@@ -98,6 +98,8 @@ pub struct VideoCue {
     decoded_samples: Option<Arc<Vec<f32>>>,
     decoded_channels: u16,
     decoded_sample_rate: u32,
+    /// A completed decode confirmed there is no soundtrack for this file.
+    silent_verified_for: Option<PathBuf>,
     /// Total media duration — set by [`Cue::set_runtime_duration`] when the
     /// surface reports its `loadedmetadata` event.
     cached_duration: Option<Duration>,
@@ -106,6 +108,7 @@ pub struct VideoCue {
     /// Incremented on every `go()` call.
     play_generation: u64,
     clock_run: Option<(Uuid, ClockRun)>,
+    positioned_run: bool,
     /// Prevents double-firing of Auto-Continue.
     auto_continue_fired: bool,
     /// Elapsed time accumulated before the most recent pause.
@@ -133,6 +136,11 @@ pub struct VideoCue {
     /// is decoded and paused off-screen, so starting it is a reveal, not a
     /// fresh load.
     preloaded: bool,
+}
+
+struct PositionedEntry {
+    source_ms: u64,
+    elapsed: Duration,
 }
 
 impl VideoCue {
@@ -168,12 +176,14 @@ impl VideoCue {
             is_disabled: false,
             active_voice_id: None,
             decoded_samples: None,
+            silent_verified_for: None,
             decoded_channels: 2,
             decoded_sample_rate: 44100,
             cached_duration: None,
             in_pre_wait: false,
             play_generation: 0,
             clock_run: None,
+            positioned_run: false,
             auto_continue_fired: false,
             elapsed_before_pause: Duration::ZERO,
             action_elapsed_before_pause: Duration::ZERO,
@@ -233,7 +243,12 @@ impl VideoCue {
         let (Some(voice_id), Some(total)) = (self.active_voice_id, self.duration()) else {
             return;
         };
-        let action_elapsed = self.action_elapsed();
+        let action_elapsed = if self.positioned_run {
+            let Some(position) = context.output_engine.positioned_video_location_ms(voice_id) else { return };
+            Duration::from_millis(position).saturating_sub(self.start_time.unwrap_or_default())
+        } else {
+            self.action_elapsed()
+        };
 
         // Picture — skipped for hold-last-frame (nothing to fade to).
         if !self.eof_fade_started && !self.hold_last_frame {
@@ -269,7 +284,7 @@ impl VideoCue {
     /// Output Patch routing — exactly like an Audio Cue — so video audio gets
     /// the full professional signal path (routing, master volume, VU, fades).
     /// Returns `Ok(None)` when the video has no audio track.
-    fn submit_paused_audio(&self, context: &CueContext) -> Result<Option<VoiceId>> {
+    fn submit_paused_audio(&self, context: &CueContext, entry: Option<&PositionedEntry>) -> Result<Option<VoiceId>> {
         let samples = match &self.decoded_samples {
             Some(s) => Arc::clone(s),
             None => return Ok(None), // Silent video — no audio voice.
@@ -277,6 +292,7 @@ impl VideoCue {
 
         let gain = db_to_linear(self.volume_db) as f32;
         let mut voice = Voice::new(samples, self.decoded_channels, self.decoded_sample_rate, gain, 0.0);
+        let start = entry.map(|entry| Duration::from_millis(entry.source_ms)).or(self.start_time);
 
         voice
             .inner
@@ -291,8 +307,11 @@ impl VideoCue {
             // this voice until play_voice_paused pushes it.
             unsafe { *voice.inner.end_frame.get() = Some(end_frame); }
         }
-        if let Some(start) = self.start_time {
+        if let Some(start) = start {
             let start_frame = (start.as_secs_f64() * self.decoded_sample_rate as f64) as u64;
+            if entry.is_some() && start_frame >= voice.total_frames() {
+                return Ok(None);
+            }
             voice.frame_pos.store(start_frame, std::sync::atomic::Ordering::Relaxed);
         }
 
@@ -376,11 +395,11 @@ impl VideoCue {
     /// voice: the UI only leaves Running on a state change it is told about, so
     /// it would freeze on the cue forever (the classic symptom when the output
     /// engine is headless and refuses every `show_content`).
-    fn start_action_or_reset(&mut self, context: &CueContext) -> Result<()> {
+    fn start_action_or_reset(&mut self, context: &CueContext, entry: Option<PositionedEntry>) -> Result<()> {
         let result = if self.preloaded {
             self.start_prepared_action(context)
         } else {
-            self.start_video_action(context)
+            self.start_video_action(context, entry)
         };
         if result.is_err() {
             self.state = CueState::Standby;
@@ -413,7 +432,7 @@ impl VideoCue {
         // The output was removed or a later live GO reclaimed its slot.
         self.active_voice_id = None;
         self.preloaded = false;
-        self.start_video_action(context)
+        self.start_video_action(context, None)
     }
 
     pub(crate) fn supports_whole_loop_release(&self) -> bool {
@@ -426,16 +445,53 @@ impl VideoCue {
             && self.continue_mode == ContinueMode::DoNotContinue
     }
 
-    fn start_video_action(&mut self, context: &CueContext) -> Result<()> {
+    /// Record silence only after the current file's decoder finishes successfully.
+    pub(crate) fn mark_silent_track(cue: &mut dyn Cue) {
+        if let Some(video) = (cue as &mut dyn std::any::Any).downcast_mut::<Self>() {
+            video.silent_verified_for = video.file_path.clone();
+        }
+    }
+
+    pub(crate) fn join_from_timecode(&mut self, elapsed: Duration, context: &CueContext) -> Result<bool> {
+        let Some(path) = self.file_path.as_ref() else { return Ok(false) };
+        if self.state != CueState::Standby || self.is_disabled || self.preloaded
+            || self.continue_mode != ContinueMode::DoNotContinue || !self.pre_wait.is_zero()
+            || self.loop_count != 0 || !self.slices.is_empty() || self.allow_silent_speed || self.hold_last_frame
+            || (self.decoded_samples.is_none() && self.silent_verified_for.as_ref() != Some(path))
+        {
+            return Ok(false);
+        }
+        let Some(duration) = self.cached_duration else { return Ok(false) };
+        let clip_in = self.start_time.unwrap_or_default();
+        let clip_out = self.end_time.unwrap_or(duration).min(duration);
+        let Some(source) = clip_in.checked_add(elapsed) else { return Ok(false) };
+        let Ok(source_ms) = u64::try_from(source.as_nanos().div_ceil(1_000_000)) else { return Ok(false) };
+        if u128::from(source_ms) >= clip_out.as_millis() {
+            return Ok(false);
+        }
+        self.clock_run = None;
+        self.play_generation = self.play_generation.wrapping_add(1);
+        self.auto_continue_fired = false;
+        self.state = CueState::Running;
+        self.start_action_or_reset(context, Some(PositionedEntry {
+            source_ms, elapsed: Duration::from_millis(source_ms).saturating_sub(clip_in),
+        }))?;
+        Ok(true)
+    }
+
+    fn start_video_action(&mut self, context: &CueContext, entry: Option<PositionedEntry>) -> Result<()> {
         anyhow::ensure!(!self.allow_silent_speed || self.supports_silent_speed(),
             "Silent Movie Speed needs manual continuation, no trim, loops, slices, end fade or held frame.");
-        let start_ms = self.start_time.map(|d| d.as_millis() as u64);
+        let start_ms = entry.as_ref().map(|entry| entry.source_ms).or(self.start_time.map(|d| d.as_millis() as u64));
+        let positioned_origin = entry.as_ref().map(|entry| {
+            Instant::now().checked_sub(entry.elapsed).ok_or_else(|| anyhow!("Video offset exceeds this playback clock."))
+        }).transpose()?;
         let end_ms = self.end_time.map(|d| d.as_millis() as u64);
         let fade_in_ms = self.video_fade_in.as_ref().map(|f| f.duration_ms as u32).unwrap_or(0);
 
         // Submit the audio voice (paused) first so it is ready to resume the
         // instant the video's first frame is presented.
-        let audio_voice_id = self.submit_paused_audio(context)?;
+        let audio_voice_id = self.submit_paused_audio(context, entry.as_ref())?;
 
         let path = self.file_path.as_ref().ok_or_else(|| {
             anyhow!("VideoCue '{}': no file assigned — set a file in the inspector", self.name)
@@ -455,6 +511,7 @@ impl VideoCue {
             fade_in_ms,
             loop_count: self.loop_count,
             start_ms,
+            require_positioned_frame: entry.is_some(),
             end_ms,
             output: self.output_id,
             audio_voice_id,
@@ -473,10 +530,14 @@ impl VideoCue {
         })?;
         self.active_voice_id = Some(voice_id);
         self.silent_speed_run = self.allow_silent_speed;
+        self.positioned_run = entry.is_some();
         if self.preloading {
             return Ok(());
         }
-        self.action_started_at = Some(Instant::now());
+        self.action_started_at = Some(positioned_origin.unwrap_or_else(Instant::now));
+        if let Some(origin) = positioned_origin {
+            self.started_at = Some(origin);
+        }
         self.in_pre_wait = false;
         self.eof_fade_started = false;
         self.eof_audio_fade_started = false;
@@ -502,7 +563,7 @@ impl ClockMediaCue for VideoCue {
 impl Cue for VideoCue {
     inherit_playback_fields!(
         state, started_at, action_started_at, active_voice_id, in_pre_wait,
-        play_generation, clock_run, auto_continue_fired, elapsed_before_pause,
+        play_generation, clock_run, positioned_run, silent_verified_for, auto_continue_fired, elapsed_before_pause,
         action_elapsed_before_pause, eof_fade_started, eof_audio_fade_started, preloading,
         preloaded,
         silent_speed_run,
@@ -540,12 +601,14 @@ impl Cue for VideoCue {
             Some(p) => p.clone(),
             None => return Ok(()),
         };
-        if let Some((samples, channels, sample_rate)) =
-            crate::cue::media_decode::decode_audio_track(&path)?
-        {
-            self.decoded_channels = channels;
-            self.decoded_sample_rate = sample_rate;
-            self.decoded_samples = Some(Arc::new(samples));
+        match crate::cue::media_decode::decode_audio_track(&path)? {
+            Some((samples, channels, sample_rate)) => {
+                self.decoded_channels = channels;
+                self.decoded_sample_rate = sample_rate;
+                self.decoded_samples = Some(Arc::new(samples));
+                self.silent_verified_for = None;
+            }
+            None => self.silent_verified_for = self.file_path.clone(),
         }
         Ok(())
     }
@@ -562,6 +625,7 @@ impl Cue for VideoCue {
         self.decoded_channels = channels;
         self.decoded_sample_rate = sample_rate;
         self.decoded_samples = Some(samples);
+        self.silent_verified_for = None;
     }
 
     fn go(&mut self, context: &CueContext) -> Result<()> {
@@ -593,7 +657,7 @@ impl Cue for VideoCue {
             return Ok(());
         }
 
-        self.start_action_or_reset(context)
+        self.start_action_or_reset(context, None)
     }
 
     fn preload(&mut self, context: &CueContext) -> Result<()> {
@@ -606,7 +670,7 @@ impl Cue for VideoCue {
         }
 
         self.preloading = true;
-        let result = self.start_video_action(context);
+        let result = self.start_video_action(context, None);
         self.preloading = false;
         result?;
 
@@ -761,7 +825,7 @@ impl Cue for VideoCue {
         }
         // Once the pre-wait timer expires, start the video action.
         if self.in_pre_wait && self.elapsed() >= self.pre_wait {
-            if let Err(e) = self.start_action_or_reset(context) {
+            if let Err(e) = self.start_action_or_reset(context, None) {
                 log::warn!("VideoCue '{}' failed to start action: {e}", self.name);
             }
         }
@@ -782,7 +846,9 @@ impl Cue for VideoCue {
 
     fn uses_silent_speed_clock(&self) -> bool { self.silent_speed_run && self.active_voice_id.is_some() }
 
-    fn awaits_voice_completion(&self) -> bool { self.uses_silent_speed_clock() }
+    fn awaits_voice_completion(&self) -> bool {
+        self.uses_silent_speed_clock() || (self.positioned_run && self.active_voice_id.is_some())
+    }
 
     // -----------------------------------------------------------------------
     // Timing

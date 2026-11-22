@@ -16,20 +16,21 @@ use crate::{
     state::AppState,
 };
 
-/// Recursively collect (id, path, type) tuples for every Audio and Video cue,
+/// Recursively collect media paths and readiness needs for Audio and Video,
 /// including those nested inside groups at any depth.  The type lets the preload
 /// worker surface a decode *failure* for Audio cues only (a video without an
 /// audio track, or whose track fails, still plays — no operator warning).
 fn collect_media_cues(
     cues: &[Box<dyn crate::cue::traits::Cue>],
-    out: &mut Vec<(uuid::Uuid, PathBuf, CueType)>,
+    out: &mut Vec<(uuid::Uuid, PathBuf, CueType, bool)>,
 ) {
     for cue in cues {
         if matches!(cue.cue_type(), CueType::Audio | CueType::Video) {
             let json = cue.serialize();
             if let Some(p) = json.get("file_path").and_then(|v| v.as_str()) {
                 if !p.is_empty() {
-                    out.push((cue.id(), PathBuf::from(p), cue.cue_type()));
+                    let probe_duration = cue.cue_type() == CueType::Video && cue.file_duration().is_none();
+                    out.push((cue.id(), PathBuf::from(p), cue.cue_type(), probe_duration));
                 }
             }
         }
@@ -327,7 +328,7 @@ fn install_workspace_for_owner(
 ) -> Result<(), String> {
     // Collect audio + video cue IDs + file paths before storing the workspace.
     // Scan ALL cue lists so non-active lists are also preloaded on open.
-    let cues_to_preload: Vec<(uuid::Uuid, PathBuf, CueType)> = {
+    let cues_to_preload = {
         let mut result = Vec::new();
         for cl in &loaded.cue_lists {
             collect_media_cues(&cl.cues, &mut result);
@@ -350,7 +351,7 @@ fn install_workspace_for_owner(
         {
             let mut loading = state.loading_cues.lock().map_err(|e| e.to_string())?;
             loading.clear();
-            for (id, _, _) in &cues_to_preload {
+            for (id, _, _, _) in &cues_to_preload {
                 loading.begin(*id, instance);
             }
         }
@@ -394,17 +395,17 @@ fn install_workspace_for_owner(
     // share the decoded buffer (`Arc`) across every cue that uses it; (2) drain
     // the work with a small bounded pool; (3) let one coordinator coalesce the UI
     // refresh to a few times a second instead of once per cue.
-    let mut cues_by_path: HashMap<PathBuf, Vec<(uuid::Uuid, bool)>> = HashMap::new();
-    for (id, path, cue_type) in cues_to_preload {
+    let mut cues_by_path: HashMap<PathBuf, Vec<(uuid::Uuid, CueType, bool)>> = HashMap::new();
+    for (id, path, cue_type, probe_duration) in cues_to_preload {
         cues_by_path
             .entry(path)
             .or_default()
-            .push((id, matches!(cue_type, CueType::Audio)));
+            .push((id, cue_type, probe_duration));
     }
 
     let job_count = cues_by_path.len();
     if job_count > 0 {
-        let (tx, rx) = crossbeam_channel::unbounded::<(PathBuf, Vec<(uuid::Uuid, bool)>)>();
+        let (tx, rx) = crossbeam_channel::unbounded::<(PathBuf, Vec<(uuid::Uuid, CueType, bool)>)>();
         for job in cues_by_path {
             let _ = tx.send(job);
         }
@@ -420,6 +421,7 @@ fn install_workspace_for_owner(
         for _ in 0..workers {
             let rx = rx.clone();
             let workspace = state.workspace.clone();
+            let output_engine = Arc::clone(&state.output_engine);
             let loading_cues = state.loading_cues.clone();
             let dirty = Arc::clone(&dirty);
             let remaining = Arc::clone(&remaining);
@@ -427,6 +429,12 @@ fn install_workspace_for_owner(
                 .name("inkue-preload".into())
                 .spawn(move || {
                     while let Ok((file_path, cues)) = rx.recv() {
+                        let video_duration = if cues.iter().any(|(_, _, probe)| *probe) {
+                            output_engine.try_mpv_lib()
+                                .and_then(|lib| crate::engine::OutputEngine::probe_duration(lib, &file_path))
+                        } else {
+                            None
+                        };
                         let decoded = crate::cue::media_decode::decode_audio_track(&file_path)
                             .map(|audio| audio.map(|(samples, channels, sample_rate)| {
                                 let duration = Duration::from_secs_f64(
@@ -446,7 +454,7 @@ fn install_workspace_for_owner(
                                 break 'publish;
                             }
                             let Ok(mut loading) = loading_cues.lock() else { break 'publish };
-                            for (cue_id, is_audio) in &cues {
+                            for (cue_id, cue_type, probe_duration) in &cues {
                                 // A file setter or relink can replace this request
                                 // even with the same path and cue ID.
                                 if !loading.finish(*cue_id, instance) {
@@ -457,14 +465,19 @@ fn install_workspace_for_owner(
                                 let Some(cue) = cue.filter(|cue| super::cue_file_path_still(&**cue, &file_path)) else {
                                     continue;
                                 };
+                                if let Some(duration) = video_duration.filter(|_| *probe_duration) {
+                                    cue.set_runtime_duration(duration);
+                                }
                                 match &decoded {
                                     Ok(Some((samples, channels, rate, duration))) => {
                                         cue.accept_preloaded_audio(Arc::clone(samples), *channels, *rate, *duration);
-                                        if *is_audio {
+                                        if *cue_type == CueType::Audio {
                                             super::clear_decode_failure(*cue_id);
                                         }
                                     }
-                                    Err(_) if *is_audio => super::surface_decode_failure(*cue_id, &file_path),
+                                    Ok(None) if *cue_type == CueType::Video =>
+                                        crate::cue::video_cue::VideoCue::mark_silent_track(cue),
+                                    Err(_) if *cue_type == CueType::Audio => super::surface_decode_failure(*cue_id, &file_path),
                                     _ => {}
                                 }
                             }

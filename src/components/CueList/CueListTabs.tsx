@@ -397,8 +397,11 @@ function CueListTcSync({ workspaceId, listId }: { workspaceId: string; listId: s
               value={cfg.on_start ?? "future_marks"}
               onChange={e => apply({ on_start: e.target.value as TcOnStart })}>
               <option value="future_marks">Start at incoming marks</option>
-              <option value="join_active">Join active Wait and Audio cues</option>
+              <option value="join_active">Join active cues</option>
             </Select>
+            <p style={{ fontSize: 10, color: "var(--wc-text-faint)", lineHeight: 1.4, marginBottom: 0 }}>
+              Lookback supports top-level Wait, File Audio and Video cues set to Do Not Continue.
+            </p>
           </div>
 
           <div>

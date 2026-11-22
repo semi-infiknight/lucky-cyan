@@ -631,6 +631,8 @@ pub(crate) fn spawn_media_preload(
                                 / sample_rate.max(1) as f64,
                         );
                         cue.accept_preloaded_audio(Arc::new(samples), channels, sample_rate, duration);
+                    } else if is_video && matches!(audio, Ok(None)) {
+                        crate::cue::video_cue::VideoCue::mark_silent_track(cue);
                     }
                 }
             }

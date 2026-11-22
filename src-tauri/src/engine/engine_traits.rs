@@ -236,6 +236,8 @@ pub trait OutputEngineApi: Send + Sync {
     fn video_audio_voice(&self, voice_id: VoiceId) -> Option<VoiceId>;
     /// Re-anchor a video's paired audio voice to its actual picture position.
     fn resync_audio_to_video(&self, voice_id: VoiceId);
+    /// Source position of a video that has cleared its positioned reveal.
+    fn positioned_video_location_ms(&self, _voice_id: VoiceId) -> Option<u64> { None }
     /// Current animated opacity (0.0–1.0) of a voice's layer.
     fn get_voice_opacity(&self, voice_id: VoiceId) -> f32;
     /// Directly drive a voice's layer opacity (Fade Cue tick, ~30 fps).
@@ -321,6 +323,9 @@ impl OutputEngineApi for OutputEngine {
     }
     fn resync_audio_to_video(&self, voice_id: VoiceId) {
         OutputEngine::resync_audio_to_video(self, voice_id)
+    }
+    fn positioned_video_location_ms(&self, voice_id: VoiceId) -> Option<u64> {
+        OutputEngine::positioned_video_location_ms(self, voice_id)
     }
     fn get_voice_opacity(&self, voice_id: VoiceId) -> f32 {
         OutputEngine::get_voice_opacity(self, voice_id)

@@ -195,6 +195,7 @@ impl CameraCue {
             fade_in_ms,
             loop_count: 0,
             start_ms: None,
+            require_positioned_frame: false,
             end_ms: None,
             output: self.output_id,
             audio_voice_id: None,
