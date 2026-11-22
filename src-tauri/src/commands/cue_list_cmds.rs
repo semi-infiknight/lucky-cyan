@@ -37,7 +37,7 @@ pub fn add_cue_list(
     new_list.auto_renumber = ws.preferences.general.auto_renumber_on_reorder;
     let new_id = new_list.id;
     ws.cue_lists.push(new_list);
-    ws.active_cue_list_id = new_id;
+    ws.switch_active_list(new_id);
     ws.mark_modified();
     emit_cue_lists_changed(&handle, &ws);
     let _ = handle.emit("playhead-moved", serde_json::json!({ "cue_id": null }));
@@ -70,7 +70,8 @@ pub fn remove_cue_list(
     }
     ws.cue_lists.retain(|cl| cl.id != target);
     if was_active {
-        ws.active_cue_list_id = ws.cue_lists[0].id;
+        let next = ws.cue_lists[0].id;
+        ws.switch_active_list(next);
     }
     ws.mark_modified();
     emit_cue_lists_changed(&handle, &ws);
@@ -148,7 +149,7 @@ pub fn set_active_cue_list(
     if !ws.cue_lists.iter().any(|cl| cl.id == target) {
         return Err("Cue list not found".into());
     }
-    ws.active_cue_list_id = target;
+    ws.switch_active_list(target);
     let new_playhead = ws.active_cue_list().and_then(|cl| cl.playhead_cue_id);
     emit_cue_lists_changed(&handle, &ws);
     let _ = handle.emit("playhead-moved", serde_json::json!({ "cue_id": new_playhead }));

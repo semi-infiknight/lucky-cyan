@@ -65,6 +65,20 @@ pub(super) fn apply(
             }
             return Ok(changed);
         }
+        MscAction::Pause(None) | MscAction::Load(None) => {
+            let Some(list) = show.cue_lists.iter_mut().find(|list| list.id == show.active_cue_list_id) else {
+                return Ok(false);
+            };
+            let mut changed = false;
+            for id in &show.desk_selection {
+                let Some(cue) = list.get_mut_recursive(id) else { continue };
+                match apply_cue_action(transport, &action, cue) {
+                    Ok(applied) => changed |= applied,
+                    Err(error) => log::warn!("MIDI Show Control could not act on selected cue {id}: {error}"),
+                }
+            }
+            return Ok(changed);
+        }
         addressed => addressed,
     };
     let list = if let Some(number) = list_number.as_deref() {
@@ -101,25 +115,31 @@ pub(super) fn apply(
             Ok(true)
         }
         MscAction::Step { forward, sequence } => step_standby(list, forward, sequence),
-        MscAction::Pause(ref number) | MscAction::Resume(Some(ref number)) | MscAction::Load(ref number) => {
+        MscAction::Pause(Some(ref number)) | MscAction::Resume(Some(ref number)) | MscAction::Load(Some(ref number)) => {
             let Some(id) = list.unique_numbered_cue(number).map(|cue| cue.id()) else {
                 return Ok(false);
             };
             let Some(cue) = list.get_mut(&id) else { return Ok(false) };
-            match action {
-                MscAction::Pause(_) if cue.is_running() => {
-                    cue.pause(&transport.context)?;
-                    Ok(true)
-                }
-                MscAction::Resume(_) => resume(transport, cue),
-                MscAction::Load(_) if cue.state() == CueState::Standby && !cue.is_disabled() => {
-                    cue.preload(&transport.context)?;
-                    Ok(true)
-                }
-                _ => Ok(false),
-            }
+            apply_cue_action(transport, &action, cue)
         }
-        MscAction::AllOff | MscAction::Resume(None) => unreachable!("handled across the desk"),
+        MscAction::AllOff | MscAction::Resume(None) | MscAction::Pause(None) | MscAction::Load(None) => {
+            unreachable!("handled before selecting a numbered target")
+        }
+    }
+}
+
+fn apply_cue_action(transport: &Transport, action: &MscAction, cue: &mut dyn Cue) -> Result<bool> {
+    match action {
+        MscAction::Pause(_) if cue.is_running() => {
+            cue.pause(&transport.context)?;
+            Ok(true)
+        }
+        MscAction::Resume(_) => resume(transport, cue),
+        MscAction::Load(_) if cue.state() == CueState::Standby && !cue.is_disabled() => {
+            cue.preload(&transport.context)?;
+            Ok(true)
+        }
+        _ => Ok(false),
     }
 }
 
@@ -311,8 +331,19 @@ mod tests {
         let list = show.active_cue_list().unwrap();
         assert!(list.get(&second).unwrap().is_running());
         assert!(!list.get(&first).unwrap().is_running());
-        assert!(apply(&mut transport, &mut show, unscoped(Pause("01.2".into())), || true).unwrap());
-        assert!(apply(&mut transport, &mut show, unscoped(Load("6".into())), || true).unwrap());
+        assert!(!apply(&mut transport, &mut show, unscoped(Pause(None)), || true).unwrap());
+        let standby = show.active_cue_list().unwrap().playhead_cue_id;
+        show.desk_selection = vec![second, other, prepared];
+        assert!(apply(&mut transport, &mut show, unscoped(Pause(None)), || true).unwrap());
+        assert!(show.active_cue_list().unwrap().get(&second).unwrap().is_paused());
+        assert!(show.cue_lists[1].get(&other).unwrap().is_running());
+        assert!(apply(&mut transport, &mut show, unscoped(Load(None)), || true).unwrap());
+        assert_eq!(show.active_cue_list().unwrap().playhead_cue_id, standby);
+        let active_id = show.active_cue_list_id;
+        let other_id = show.cue_lists[1].id;
+        show.switch_active_list(other_id);
+        show.switch_active_list(active_id);
+        assert!(show.desk_selection.is_empty());
         assert!(apply(&mut transport, &mut show, unscoped(Resume(None)), || true).unwrap());
         let list = show.active_cue_list().unwrap();
         assert!(list.get(&second).unwrap().is_running());

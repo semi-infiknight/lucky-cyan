@@ -1,4 +1,4 @@
-import { resetCueColors, setAgentPerformanceLock } from "./lib/commands";
+import { resetCueColors, setAgentPerformanceLock, syncMscDeskSelection } from "./lib/commands";
 import { manualHome, manualChapterFor } from "./components/Operator/manualTopic";
 // Root application layout — mirrors QLab's three-zone layout.
 
@@ -743,6 +743,20 @@ function pulseButton(el: HTMLElement) {
 export default function App() {
   const { historyNotice, refreshCues, refreshWorkspaceInfo, refreshValidation, refreshHealth, brokenCueIds, loadGeneralPrefs, loadDisplayPrefs, displayPrefs, workspaceInfo, selectedCueId, selectedCueIds, cues, cueLists, activeCueListId } =
     useWorkspaceStore();
+
+  const deskInstanceId = workspaceInfo?.instance_id;
+  const mscSelectionSync = useRef(Promise.resolve());
+  useEffect(() => {
+    if (!deskInstanceId || !activeCueListId) return;
+    let current = true;
+    // Keep stale requests from completing after newer selections.
+    mscSelectionSync.current = mscSelectionSync.current.then(async () => {
+      if (!current) return;
+      const ids = selectedCueIds.length ? selectedCueIds : selectedCueId ? [selectedCueId] : [];
+      await syncMscDeskSelection(deskInstanceId, activeCueListId, ids);
+    }).catch(error => console.warn("Could not sync MIDI Show Control selection", error));
+    return () => { current = false; };
+  }, [deskInstanceId, activeCueListId, selectedCueId, selectedCueIds]);
 
   const [inspectorOpen, setInspectorOpen]         = useState(() => loadUiLayout().inspectorOpen);
   const [showCueListTabs, setShowCueListTabs]     = useState(() => loadUiLayout().showCueListTabs);

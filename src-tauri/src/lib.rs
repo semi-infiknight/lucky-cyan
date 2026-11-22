@@ -80,6 +80,7 @@ use commands::{
     midi_cmds::{
         clear_midi_learn, get_cue_midi_trigger, get_midi_trigger_config, get_midi_trigger_override, learn_midi_trigger,
         get_workspace_midi_controls, learn_workspace_midi_binding, set_workspace_midi_controls,
+        sync_msc_desk_selection,
         list_midi_input_ports, list_midi_output_ports, send_midi_test, set_cue_midi_trigger,
         set_midi_trigger_config, set_midi_trigger_override,
     },
@@ -755,6 +756,7 @@ pub fn run() {
             clear_midi_learn,
             get_workspace_midi_controls,
             set_workspace_midi_controls,
+            sync_msc_desk_selection,
             learn_workspace_midi_binding,
             // Network
             list_network_interfaces,

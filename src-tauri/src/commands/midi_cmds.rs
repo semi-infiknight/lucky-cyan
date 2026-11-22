@@ -8,10 +8,29 @@ use crate::engine::midi_transport::{MidiTransportBinding, MidiWorkspaceControls}
 
 use crate::{
     cue::midi_cue::{send_midi_preview, send_midi_messages, MidiMessage, MidiMessageType},
+    cue::types::CueId,
     engine::midi_trigger::{self, MidiTrigger, MidiTriggerListener},
     machine_config::{self, MidiTriggerMachineConfig},
     state::AppState,
 };
+
+#[tauri::command]
+pub(crate) fn sync_msc_desk_selection(
+    workspace_id: Uuid,
+    list_id: Uuid,
+    cue_ids: Vec<CueId>,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("MIDI Show Control uses the main desk selection.".into());
+    }
+    let mut show = state.workspace.lock().map_err(|error| error.to_string())?;
+    if show.instance_id() == workspace_id && show.active_cue_list_id == list_id {
+        show.desk_selection = cue_ids;
+    }
+    Ok(())
+}
 
 /// Return the names of all available MIDI output ports.
 #[tauri::command]

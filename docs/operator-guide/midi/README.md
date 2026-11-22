@@ -71,7 +71,12 @@ Message framing and operand examples follow the MSC specification and QLab's com
 3. Stop the rehearsal. Send **STANDBY_+** or **STANDBY_-** and confirm that standby moves one armed row without starting a cue. Send an unnumbered **GO** to start the current standby. Send **ALL_OFF** to stop playback across lists.
 4. Suspend incoming MIDI in Preferences. Send a rehearsal command and confirm the desk stays idle. Choose **Restore MIDI input** in the transport bar and send a fresh command.
 
-Inkue accepts Lighting (General), Sound (General) and Video (General) at the configured device ID and the standard all-call ID 127. Numbered GO, STOP, RESUME and LOAD use an exact, unique top-level cue number in the addressed list. With no Q list, they use the active list. LOAD prepares supported media for a separate start. Unnumbered RESUME resumes paused playback across lists while held Load media awaits Start. Unnumbered STOP and LOAD, Q path and RESET remain open. [QLab MIDI and MSC](https://reference.qlab.app/docs/v5/networking/using-midi-and-msc/)
+Inkue accepts Lighting (General), Sound (General) and Video (General) at the configured device ID and the standard all-call ID 127. Numbered GO, STOP, RESUME and LOAD use an exact, unique top-level cue number in the addressed list. With no Q list, they use the active list. LOAD prepares supported media for a separate start. Unnumbered RESUME resumes paused playback across lists while held Load media awaits Start. Q path and RESET remain open. [QLab MIDI and MSC](https://reference.qlab.app/docs/v5/networking/using-midi-and-msc/)
+
+### Pause or load the highlighted cues
+
+1. Start two long Wait cues and highlight one of them in the main desk. Send **STOP** with an empty operand field. Only the highlighted Wait pauses. Highlight both cues and repeat to pause the other one. Standby stays parked.
+2. Select an idle, armed File Audio cue on the main output or a Video cue. Send **LOAD** with an empty operand field. Check that playback stays held until you start the cue. Clear the selection and send either command again. An empty selection leaves the desk as it was.
 
 ### Address another cue list
 

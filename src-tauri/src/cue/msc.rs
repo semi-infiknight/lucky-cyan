@@ -31,9 +31,9 @@ impl MscCommand {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MscAction {
     Go(Option<String>),
-    Pause(String),
+    Pause(Option<String>),
     Resume(Option<String>),
-    Load(String),
+    Load(Option<String>),
     AllOff,
     Step { forward: bool, sequence: bool },
 }
@@ -73,7 +73,9 @@ impl MscTransport {
         if payload.is_empty() {
             let action = match command {
                 MscCommand::Go => MscAction::Go(None),
+                MscCommand::Stop => MscAction::Pause(None),
                 MscCommand::Resume => MscAction::Resume(None),
+                MscCommand::Load => MscAction::Load(None),
                 MscCommand::AllOff => MscAction::AllOff,
                 _ => return None,
             };
@@ -93,9 +95,9 @@ impl MscTransport {
         }
         let action = match command {
             MscCommand::Go => MscAction::Go(Some(number)),
-            MscCommand::Stop => MscAction::Pause(number),
+            MscCommand::Stop => MscAction::Pause(Some(number)),
             MscCommand::Resume => MscAction::Resume(Some(number)),
-            MscCommand::Load => MscAction::Load(number),
+            MscCommand::Load => MscAction::Load(Some(number)),
             _ => return None,
         };
         Some(Self { action, list })
@@ -217,7 +219,9 @@ mod tests {
         assert_eq!(MscTransport::decode(&frame(7, 16, 1, b"01.2"), 7),
             unscoped(MscAction::Go(Some("01.2".into()))));
         assert_eq!(MscTransport::decode(&frame(127, 48, 2, b"01.2\0"), 7),
-            unscoped(MscAction::Pause("01.2".into())));
+            unscoped(MscAction::Pause(Some("01.2".into()))));
+        assert_eq!(MscTransport::decode(&frame(7, 16, 2, b""), 7), unscoped(MscAction::Pause(None)));
+        assert_eq!(MscTransport::decode(&frame(7, 16, 5, b""), 7), unscoped(MscAction::Load(None)));
         assert_eq!(MscTransport::decode(&frame(7, 1, 3, b""), 7), unscoped(MscAction::Resume(None)));
         assert_eq!(MscTransport::decode(&frame(7, 16, 8, b""), 7), unscoped(MscAction::AllOff));
         assert_eq!(MscTransport::decode(&frame(7, 16, 1, b"1\x0004\x00"), 7),
@@ -231,7 +235,7 @@ mod tests {
             frame(7, 16, 1, b"1\x004\x005"),
             frame(7, 16, 17, b"1\x004"),
             frame(7, 16, 1, b"1..2"),
-            frame(7, 16, 2, b""),
+            frame(7, 16, 2, b"\x0004"),
             frame(7, 16, 8, b"1"),
             frame(7, 16, 1, &[b'1'; 122]),
         ] {

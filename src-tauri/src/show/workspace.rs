@@ -353,6 +353,8 @@ pub struct Workspace {
     /// ID of the currently active cue list.
     pub active_cue_list_id: Uuid,
     pub(crate) midi_controls: crate::engine::midi_transport::MidiWorkspaceControls,
+    /// Highlighted cues on the main desk, scoped to the active list and never saved.
+    pub(crate) desk_selection: Vec<crate::cue::types::CueId>,
     /// Output patch table (shared across cue lists).
     pub output_patches: Vec<OutputPatch>,
     /// Stationary point-panner calibrations reusable across cue lists.
@@ -402,6 +404,7 @@ impl Workspace {
             cue_lists: vec![default_list],
             active_cue_list_id: active_id,
             midi_controls: Default::default(),
+            desk_selection: Vec::new(),
             output_patches: Vec::new(),
             audio_maps: Vec::new(),
             default_output_patch_id: None,
@@ -439,6 +442,13 @@ impl Workspace {
     /// Identify this open workspace instance, even when its file is reopened.
     pub fn instance_id(&self) -> Uuid {
         self.instance_id
+    }
+
+    pub(crate) fn switch_active_list(&mut self, list_id: Uuid) {
+        if self.active_cue_list_id != list_id {
+            self.active_cue_list_id = list_id;
+            self.desk_selection.clear();
+        }
     }
 
     /// Mark the workspace as modified (unsaved changes exist).
@@ -966,6 +976,7 @@ impl Workspace {
             cue_lists,
             active_cue_list_id,
             midi_controls,
+            desk_selection: Vec::new(),
             output_patches,
             audio_maps,
             default_output_patch_id: default_patch,
