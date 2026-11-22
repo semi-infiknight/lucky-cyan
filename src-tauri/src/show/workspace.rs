@@ -352,6 +352,7 @@ pub struct Workspace {
     pub(crate) cue_starts: Arc<Mutex<super::cue_colors::CueStarts>>,
     /// ID of the currently active cue list.
     pub active_cue_list_id: Uuid,
+    pub(crate) midi_controls: crate::engine::midi_transport::MidiWorkspaceControls,
     /// Output patch table (shared across cue lists).
     pub output_patches: Vec<OutputPatch>,
     /// Stationary point-panner calibrations reusable across cue lists.
@@ -400,6 +401,7 @@ impl Workspace {
             metadata: WorkspaceMetadata::new(name),
             cue_lists: vec![default_list],
             active_cue_list_id: active_id,
+            midi_controls: Default::default(),
             output_patches: Vec::new(),
             audio_maps: Vec::new(),
             default_output_patch_id: None,
@@ -528,6 +530,7 @@ impl Workspace {
             "schema_version": self.document_schema(),
             "workspace": self.metadata,
             "programming_history": self.programming_history,
+            "midi_controls": self.midi_controls,
             "output_patches": self.output_patches,
             "audio_maps": self.audio_maps,
             "default_output_patch": self.default_output_patch_id,
@@ -561,6 +564,7 @@ impl Workspace {
             "recovery_original_path": self.file_path.as_ref().map(|p| p.to_string_lossy().to_string()),
             "workspace": self.metadata,
             "programming_history": self.programming_history,
+            "midi_controls": self.midi_controls,
             "output_patches": self.output_patches,
             "audio_maps": self.audio_maps,
             "default_output_patch": self.default_output_patch_id,
@@ -718,6 +722,7 @@ impl Workspace {
             "schema_version": self.document_schema(),
             "workspace": self.metadata,
             "programming_history": self.programming_history,
+            "midi_controls": self.midi_controls,
             "output_patches": self.output_patches,
             "audio_maps": self.audio_maps,
             "default_output_patch": self.default_output_patch_id,
@@ -821,6 +826,11 @@ impl Workspace {
                 .context("Invalid workspace audio output patches")?,
         };
 
+        let midi_controls: crate::engine::midi_transport::MidiWorkspaceControls = match doc.get("midi_controls") {
+            Some(value) => serde_json::from_value(value.clone()).context("Invalid workspace MIDI controls")?,
+            None => Default::default(),
+        };
+        midi_controls.validate().map_err(|error| anyhow::anyhow!("Invalid workspace MIDI controls: {error}"))?;
         let audio_maps: Vec<crate::cue::point_mix::AudioMap> = match doc.get("audio_maps") {
             Some(value) => serde_json::from_value(value.clone()).context("Invalid workspace audio maps")?,
             None => Vec::new(),
@@ -955,6 +965,7 @@ impl Workspace {
             metadata,
             cue_lists,
             active_cue_list_id,
+            midi_controls,
             output_patches,
             audio_maps,
             default_output_patch_id: default_patch,

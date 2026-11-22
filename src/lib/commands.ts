@@ -49,6 +49,9 @@ import type {
   MidiTrigger,
   MscMessage,
   MidiTriggerConfig,
+  MidiTransportBinding,
+  MidiWorkspaceControls,
+  WorkspaceMidiSnapshot,
   OscPatch,
   TcMachineConfig,
   TcPosition,
@@ -653,6 +656,11 @@ export const sendMidiTest = (
 export const listMidiInputPorts = () => invoke<string[]>("list_midi_input_ports");
 export const getMidiTriggerConfig = () =>
   invoke<MidiTriggerConfig>("get_midi_trigger_config");
+export const getWorkspaceMidiControls = () => invoke<WorkspaceMidiSnapshot>("get_workspace_midi_controls");
+export const setWorkspaceMidiControls = (workspaceId: string, expected: MidiWorkspaceControls, controls: MidiWorkspaceControls) =>
+  invoke<void>("set_workspace_midi_controls", { workspaceId, expected, controls });
+export const learnWorkspaceMidiBinding = (workspaceId: string) =>
+  invoke<MidiTransportBinding | null>("learn_workspace_midi_binding", { workspaceId });
 export const setMidiTriggerConfig = (config: MidiTriggerConfig) =>
   invoke<void>("set_midi_trigger_config", { config });
 export const getMidiTriggerOverride = () => invoke<boolean>("get_midi_trigger_override");

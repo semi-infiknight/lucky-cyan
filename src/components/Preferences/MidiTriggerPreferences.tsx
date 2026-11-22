@@ -9,6 +9,7 @@ import type { MidiTriggerConfig } from "../../lib/types";
 import { getMidiTriggerConfig, setMidiTriggerConfig, listMidiInputPorts } from "../../lib/commands";
 import { useTriggerOverride } from "../../hooks/useTriggerOverride";
 import { Select } from "../common/Select";
+import { WorkspaceMidiBindings } from "./WorkspaceMidiBindings";
 
 const inputStyle: React.CSSProperties = {
   background: "var(--wc-bg-app)",
@@ -135,6 +136,7 @@ export function MidiTriggerPreferences() {
         </select>
       </label>}
       {error && <p role="alert" style={{ fontSize: 11 }}>{error}</p>}
+      <WorkspaceMidiBindings voiceEnabled={config.enabled} suspended={override.suspended === true} />
     </div>
   );
 }

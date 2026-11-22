@@ -30,6 +30,7 @@ pub mod engine_traits;
 pub mod fixture;
 pub mod midi_file;
 pub mod midi_trigger;
+pub(crate) mod midi_transport;
 pub mod mpv_sys;
 pub mod net_interface;
 pub mod osc_feedback;

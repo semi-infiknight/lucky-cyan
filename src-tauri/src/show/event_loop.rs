@@ -1094,34 +1094,36 @@ fn tick(
         }
     }
 
-    let mut msc_changed = false;
+    let mut remote_changed = false;
     for message in midi_messages {
-        match message {
+        let protection = ws.preferences.general.double_go_protection_ms;
+        let admit_go = || handle.try_state::<crate::state::AppState>().is_some_and(|state| {
+            crate::commands::transport_cmds::accept_chained_go(&state, protection)
+        });
+        let result = match message {
             MidiDeskInput::Voice(bytes) => {
-                for list in &mut ws.cue_lists {
-                    for id in list.midi_triggers_matching(&bytes) {
-                        if let Ok(result) = transport.go_by_id(list, &id) {
-                            cue_prepared |= result.prepared;
-                            all_go_triggered.extend(result.triggered);
-                            all_go_stopped.extend(result.stopped);
+                if let Some(action) = ws.midi_controls.action(&bytes) {
+                    super::msc_transport::apply_workspace_binding(&mut transport, &mut ws, action, admit_go)
+                } else {
+                    for list in &mut ws.cue_lists {
+                        for id in list.midi_triggers_matching(&bytes) {
+                            if let Ok(result) = transport.go_by_id(list, &id) {
+                                cue_prepared |= result.prepared;
+                                all_go_triggered.extend(result.triggered);
+                                all_go_stopped.extend(result.stopped);
+                            }
                         }
                     }
+                    continue;
                 }
             }
-            MidiDeskInput::ShowControl(command) => {
-                let protection = ws.preferences.general.double_go_protection_ms;
-                let result = super::msc_transport::apply(&mut transport, &mut ws, command, || {
-                    handle.try_state::<crate::state::AppState>().is_some_and(|state| {
-                        crate::commands::transport_cmds::accept_chained_go(&state, protection)
-                    })
-                });
-                match result {
-                    Ok(changed) => msc_changed |= changed,
-                    Err(error) => {
-                        msc_changed = true;
-                        log::warn!("MIDI Show Control action failed: {error}");
-                    }
-                }
+            MidiDeskInput::ShowControl(command) => super::msc_transport::apply(&mut transport, &mut ws, command, admit_go),
+        };
+        match result {
+            Ok(changed) => remote_changed |= changed,
+            Err(error) => {
+                remote_changed = true;
+                log::warn!("MIDI transport action failed: {error}");
             }
         }
     }
@@ -1332,7 +1334,7 @@ fn tick(
     }
 
     // Refresh summary attributes that are not part of the cue-state event.
-    if !msc_changed && (group_child_changed || nested_rows_changed || cue_projection_changed || cue_prepared) {
+    if !remote_changed && (group_child_changed || nested_rows_changed || cue_projection_changed || cue_prepared) {
         let _ = handle.emit("cue-list-refresh", serde_json::json!({}));
     }
 
@@ -1365,7 +1367,7 @@ fn tick(
 
     // Refresh from the final native state after the ordinary event deltas.
     // A batch can include a GO followed by a Pause or ALL_OFF.
-    if msc_changed {
+    if remote_changed {
         let _ = handle.emit("cue-list-refresh", serde_json::json!({}));
     }
 

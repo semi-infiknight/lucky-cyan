@@ -10,6 +10,14 @@ A MIDI cue sends its message list from top to bottom when its action starts. Eac
 
 The override follows the running desk across workspace changes until you restore it or quit. MIDI Learn and MIDI cues that send messages remain available. [QLab Override Controls](https://qlab.app/docs/v5/tools/override-controls/)
 
+## Bind a MIDI control to desk transport
+
+1. Add two silent Wait cues to a rehearsal list. Under **Preferences → Network → MIDI Input**, select the controller's named input, turn on **Fire cues from incoming MIDI**, and suspend incoming MIDI control for the session.
+2. Under **Workspace MIDI transport**, select **GO**, choose **Capture MIDI**, and press the pedal. Check the captured message and value. For a Control Change pedal that releases at zero, choose **Above** with a value of `0` if its press value varies. Choose **Save binding** and turn on **Enable workspace transport bindings**.
+3. Choose **Restore MIDI input** in the transport bar. Press and release the pedal. Check that the press starts the first Wait and the release leaves the second Wait on standby. Press again to start the second Wait.
+
+You can also enter a binding manually. Inkue accepts Note On, Note Off, Control Change and Program Change on a specific channel or any channel. Where the message has a second value, you can match any value, an exact value, or values above or below a threshold. Bindings must match distinct messages. A workspace binding takes priority when the same message also matches a cue trigger. GO and standby or sequence navigation use the active list. Pause, Resume, Stop and Hard Stop apply across lists. The bindings travel with the saved workspace. Select the input port on each machine. [QLab Workspace MIDI Control](https://reference.qlab.app/docs/v5/networking/using-midi-and-msc/#workspace-midi-control)
+
 ## Fade an external fader
 
 1. In a practice workspace, add a MIDI cue and choose **+ Add Message**. Under **Port**, select a virtual MIDI monitor. Choose **Control Change**, channel **3**, and controller **7**.

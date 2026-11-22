@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tauri::{Emitter, State};
 use uuid::Uuid;
+use crate::engine::midi_transport::{MidiTransportBinding, MidiWorkspaceControls};
 
 use crate::{
     cue::midi_cue::{send_midi_preview, send_midi_messages, MidiMessage, MidiMessageType},
@@ -65,6 +66,53 @@ pub fn list_midi_input_ports() -> Vec<String> {
 #[tauri::command]
 pub fn get_midi_trigger_config() -> MidiTriggerMachineConfig {
     machine_config::load_midi_trigger_config()
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct WorkspaceMidiSnapshot {
+    workspace_id: Uuid,
+    controls: MidiWorkspaceControls,
+}
+
+#[tauri::command]
+pub(crate) fn get_workspace_midi_controls(state: State<'_, AppState>) -> Result<WorkspaceMidiSnapshot, String> {
+    let show = state.workspace.lock().map_err(|error| error.to_string())?;
+    Ok(WorkspaceMidiSnapshot { workspace_id: show.instance_id(), controls: show.midi_controls.clone() })
+}
+
+#[tauri::command]
+pub(crate) fn set_workspace_midi_controls(
+    workspace_id: Uuid, expected: MidiWorkspaceControls, controls: MidiWorkspaceControls,
+    state: State<'_, AppState>, handle: tauri::AppHandle,
+) -> Result<(), String> {
+    controls.validate()?;
+    let mut show = state.workspace.lock().map_err(|error| error.to_string())?;
+    if show.instance_id() != workspace_id || show.midi_controls != expected {
+        return Err("The workspace MIDI settings changed. Reload them before editing.".into());
+    }
+    if show.midi_controls != controls {
+        show.midi_controls = controls;
+        state.midi_trigger_gate.retire_pending();
+        show.mark_modified();
+        let _ = handle.emit("workspace-modified", ());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn learn_workspace_midi_binding(
+    workspace_id: Uuid, state: State<'_, AppState>,
+) -> Result<Option<MidiTransportBinding>, String> {
+    let show = state.workspace.lock().map_err(|error| error.to_string())?;
+    if show.instance_id() != workspace_id { return Err("The workspace changed during capture.".into()); }
+    if !state.midi_trigger_gate.suspended() { return Err("Suspend incoming MIDI during capture.".into()); }
+    let slot = state.midi_listener.lock().map_err(|error| error.to_string())?;
+    Ok(slot.as_ref().and_then(|listener| {
+        let message = listener.last_message()?;
+        let mut trigger = MidiTrigger::from_message(&message)?;
+        trigger.data2 = message.get(2).copied();
+        Some(MidiTransportBinding { trigger, value_match: Default::default() })
+    }))
 }
 
 /// Persist the MIDI-trigger settings and hot-apply them: start, stop or

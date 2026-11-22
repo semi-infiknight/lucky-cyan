@@ -7,8 +7,37 @@ use crate::cue::{
     traits::Cue,
     types::{ContinueMode, CueState, CueType},
 };
+use crate::engine::midi_transport::MidiTransportAction;
 
-use super::{cue_list::CueList, transport::Transport, Workspace};
+use super::{cue_list::CueList, cue_list_window::set_list_paused, transport::Transport, Workspace};
+
+pub(super) fn apply_workspace_binding(
+    transport: &mut Transport, show: &mut Workspace, action: MidiTransportAction, accept_go: impl FnOnce() -> bool,
+) -> Result<bool> {
+    use MidiTransportAction::*;
+    let action = match action {
+        Go => MscAction::Go(None),
+        StopAll => MscAction::AllOff,
+        ResumeAll => MscAction::Resume(None),
+        NextStandby => MscAction::Step { forward: true, sequence: false },
+        PreviousStandby => MscAction::Step { forward: false, sequence: false },
+        NextSequence => MscAction::Step { forward: true, sequence: true },
+        PreviousSequence => MscAction::Step { forward: false, sequence: true },
+        PauseAll => {
+            let mut first_error = None;
+            for list in &mut show.cue_lists {
+                let result = set_list_paused(list, &transport.context, true);
+                if first_error.is_none() { first_error = result.err(); }
+            }
+            return first_error.map_or(Ok(true), Err);
+        }
+        HardStop => {
+            for list in &mut show.cue_lists { transport.hard_stop_all(list)?; }
+            return Ok(true);
+        }
+    };
+    apply(transport, show, MscTransport { action, list: None }, accept_go)
+}
 
 pub(super) fn apply(
     transport: &mut Transport,
@@ -145,6 +174,49 @@ mod tests {
     use super::*;
     use crate::cue::{audio_cue::AudioCue, wait_cue::WaitCue};
     use std::{sync::Arc, time::Duration};
+
+    #[test]
+    fn workspace_midi_controls_match_one_transport_action_and_survive_recovery() {
+        use crate::engine::{
+            midi_transport::{MidiTransportBinding, MidiValueMatch},
+            midi_trigger::{MidiTrigger, MidiTriggerType},
+        };
+        use MidiTransportAction::*;
+        let (context, _, _) = crate::test_support::recording_context();
+        let mut transport = Transport::new(context);
+        let mut show = Workspace::new("MIDI rehearsal");
+        let mut wait = WaitCue::new();
+        wait.set_continue_mode(ContinueMode::DoNotContinue);
+        let id = wait.id();
+        show.active_cue_list_mut().unwrap().push(Box::new(wait));
+        let go = MidiTransportBinding {
+            trigger: MidiTrigger { message_type: MidiTriggerType::ControlChange, channel: 0, data1: 64, data2: Some(64) },
+            value_match: MidiValueMatch::Above,
+        };
+        show.midi_controls.bindings.insert(Go, go);
+        assert_eq!(show.midi_controls.action(&[0xb0, 64, 127]), None);
+        show.midi_controls.enabled = true;
+        assert_eq!(show.midi_controls.action(&[0xb0, 64, 0]), None);
+        let mut pause = go;
+        pause.trigger.channel = 1;
+        show.midi_controls.bindings.insert(PauseAll, pause);
+        assert!(show.midi_controls.validate().is_err());
+        pause.trigger.data2 = Some(1);
+        pause.value_match = MidiValueMatch::Below;
+        show.midi_controls.bindings.insert(PauseAll, pause);
+        show.midi_controls.validate().unwrap();
+        assert_eq!(show.midi_controls.action(&[0xb0, 64]), None);
+        let action = show.midi_controls.action(&[0xb0, 64, 127]).unwrap();
+        assert_eq!(action, Go);
+        assert!(apply_workspace_binding(&mut transport, &mut show, action, || true).unwrap());
+        let action = show.midi_controls.action(&[0xb0, 64, 0]).unwrap();
+        assert_eq!(action, PauseAll);
+        assert!(apply_workspace_binding(&mut transport, &mut show, action, || false).unwrap());
+        assert!(show.active_cue_list().unwrap().get(&id).unwrap().is_paused());
+        let recovered = Workspace::from_json_str(&show.to_recovery_json().unwrap(), None,
+            &crate::test_support::full_registry()).unwrap();
+        assert_eq!(recovered.midi_controls, show.midi_controls);
+    }
 
     #[test]
     fn scoped_msc_moves_sequences_and_runs_another_list_without_selecting_it() {

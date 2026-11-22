@@ -220,6 +220,10 @@ impl MidiTriggerGate {
         self.0.load(Ordering::Acquire) & 1 != 0
     }
 
+    pub(crate) fn retire_pending(&self) {
+        self.0.fetch_add(2, Ordering::AcqRel);
+    }
+
     pub(crate) fn set_suspended(&self, suspended: bool) {
         let mut epoch = self.0.load(Ordering::Acquire);
         while (epoch & 1 != 0) != suspended {

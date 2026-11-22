@@ -157,6 +157,22 @@ export interface MidiTriggerConfig {
   msc_device_id: number | null;
 }
 
+export type MidiTransportAction = "go" | "pause_all" | "resume_all" | "stop_all" | "hard_stop"
+  | "next_standby" | "previous_standby" | "next_sequence" | "previous_sequence";
+export type MidiValueMatch = "exactly" | "above" | "below";
+export interface MidiTransportBinding {
+  trigger: MidiTrigger;
+  value_match: MidiValueMatch;
+}
+export interface MidiWorkspaceControls {
+  enabled: boolean;
+  bindings: Partial<Record<MidiTransportAction, MidiTransportBinding>>;
+}
+export interface WorkspaceMidiSnapshot {
+  workspace_id: string;
+  controls: MidiWorkspaceControls;
+}
+
 /** Memo Cue payload. A Memo performs no action; `memo_text` is its whole
  *  point — the note the operator reads in the cue list. */
 export interface MemoCueData extends CueSummary {
