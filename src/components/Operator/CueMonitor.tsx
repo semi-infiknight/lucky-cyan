@@ -6,7 +6,10 @@ import { useTimingStore, type CueTiming } from "../../stores/timingStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { watchCueMonitor } from "./cueMonitorRefresh";
 import { StageConfidence } from "./StageConfidence";
+import { AudioMapConfidence } from "./AudioMapConfidence";
 import "./cueMonitor.css";
+
+const viewLabels = { cues: "Workspace playback status", stage: "Stage confidence", audio: "Audio map confidence" };
 
 export function monitorTimes(timing: CueTiming | undefined, workspaceId: string): [string, string] {
   if (timing?.workspace_id !== workspaceId) return ["—", "—"];
@@ -84,7 +87,7 @@ export function CueMonitor({ workspaceId, onClose, onInspect }: {
   onClose: () => void;
   onInspect?: (workspaceId: string, listId: string, cueId: string) => boolean;
 }) {
-  const [showStage, setShowStage] = useState(false);
+  const [view, setView] = useState<"cues" | "stage" | "audio">("cues");
   const [snapshot, setSnapshot] = useState<CueMonitorSnapshot | null>(null);
   const [notice, setNotice] = useState("Reading the open show…");
   const alerts = useWorkspaceStore(s => s.healthAlerts);
@@ -113,15 +116,20 @@ export function CueMonitor({ workspaceId, onClose, onInspect }: {
           {snapshot && <p>{snapshot.name}</p>}
         </div>
         <div className="cue-monitor-actions">
-          <button type="button" aria-pressed={showStage} onClick={() => setShowStage(show => !show)}>
+          <button type="button" aria-pressed={view === "stage"} onClick={() => setView(view === "stage" ? "cues" : "stage")}>
             Stage snapshot
           </button>
-          {!showStage && <button type="button" onClick={() => refresh.current()}>Refresh</button>}
+          <button type="button" aria-pressed={view === "audio"} onClick={() => setView(view === "audio" ? "cues" : "audio")}>
+            Audio map
+          </button>
+          {view === "cues" && <button type="button" onClick={() => refresh.current()}>Refresh</button>}
           <button type="button" ref={closeButton} onClick={onClose}>Close</button>
         </div>
       </header>
-      <div className="cue-monitor-sheet" tabIndex={0} aria-label={showStage ? "Stage confidence" : "Workspace playback status"}>
-        {showStage ? <StageConfidence workspaceId={workspaceId} /> : <>
+      <div className="cue-monitor-sheet" tabIndex={0} aria-label={viewLabels[view]}>
+        {view === "stage" && <StageConfidence workspaceId={workspaceId} />}
+        {view === "audio" && <AudioMapConfidence key={workspaceId} workspaceId={workspaceId} />}
+        {view === "cues" && <>
           {notice && <p className="cue-monitor-notice" role="status">{notice}</p>}
           {snapshot && <CueMonitorContents status={snapshot} alerts={alerts}
             inspection={onInspect && activeListId ? { listId: activeListId, select: cueId => {

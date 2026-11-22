@@ -162,6 +162,14 @@ A mark specifies the whole mix at one location. Between marks, Inkue interpolate
 
 The calibration meters show peak dBFS for the combined signal sent to each assigned channel of the named main device, after master gain. They can reveal routing and digital overload. The venue interface or console provides downstream confirmation. Cue-specific meters and auxiliary device meters remain open. [QLab 5.6 metering changes](https://qlab.app/release-notes/5.6)
 
+### Check an audio map from Show Mode
+
+1. Save a calibration with a named output patch, then open **Cue monitor → Audio map** in Show Mode and choose the calibration.
+2. Switch between **Plan (X/Y)** and **Elevation (X/Z)** to locate the saved marks. Run the quiet test cue from the previous exercise. Compare the physical channel numbers and dBFS readings with the intended patch and the console.
+3. Stop the cue and let the readings settle. Select **Audio map** again to return to the standby and active-cue view.
+
+The marks show saved positions. The meters sample the combined digital output on the named main device.
+
 ## Compensate for a louder file with main trim
 
 1. Add a sustained Audio cue at a quiet rehearsal level. Set its main level to −24 dB in **Levels**. Add a six-second Fade targeting that Audio cue and set the Fade's audio destination to −12 dB.

@@ -224,6 +224,8 @@ The in-desk Cue monitor displays every list's current playhead and active cues. 
 
 In programming mode, click or tab to an underlined cue name in the selected list. Activate it to close Cue monitor, reveal the cue row and open its Inspector. Try this with a running child in a collapsed group. The selected cue changes while playback and standby stay in place. To inspect a cue in a different list, select that list on the desk first. Show Mode displays the status without Inspector links.
 
+Select **Audio map** to inspect a saved calibration and the assigned main-device output levels in either mode. [Audio map exercise](../audio/README.md#check-an-audio-map-from-show-mode)
+
 ## Put a cart on a second display
 
 1. In the bundled rehearsal workspace, leave **Rehearsal** active and park its main playhead on cue 1. Right-click the **Sound checks** tab and choose **Open cart in separate window**. Right-clicking the tab lets you open the cart while the main desk stays on Rehearsal. In Show Mode, **Open cart window** is also available when an independent cart is active.

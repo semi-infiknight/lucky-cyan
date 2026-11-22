@@ -29,7 +29,9 @@
 .cue-monitor-heading h2 { margin: 0; font-size: 17px; }
 .cue-monitor-heading p { margin: 3px 0 0; color: var(--desk-subtle); font-size: 12px; }
 .cue-monitor-heading button,
-.stage-confidence button {
+.stage-confidence button,
+.audio-map-confidence-controls button,
+.audio-map-confidence-controls select {
   padding: 5px 10px;
   border: 1px solid var(--wc-border-strong);
   border-radius: 5px;
@@ -111,8 +113,21 @@
 .cue-monitor-notice { padding: 0 4px 10px; font-size: 12px; }
 .cue-monitor-health ul { margin: 6px 0 0; padding-inline-start: 18px; }
 
+.audio-map-confidence { display: grid; gap: 10px; font-size: 12px; }
+.audio-map-confidence-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.audio-map-confidence-controls label { display: inline-flex; align-items: center; gap: 6px; }
+.audio-map-confidence-marks { display: grid; grid-template-columns: minmax(0, 11rem) minmax(0, 1fr); gap: 14px; }
+.audio-map-confidence-marks .point-plane { width: calc(100% - 20px); cursor: default; }
+.audio-map-confidence-marks .audio-map-mark { display: grid; place-items: center; min-width: 20px; min-height: 20px; }
+.audio-map-confidence-marks ol { margin: 10px 0; padding-inline-start: 24px; max-height: 12rem; overflow: auto; }
+.audio-map-confidence-marks li { padding: 2px 6px; overflow-wrap: anywhere; }
+.audio-map-confidence-marks li span { display: inline-block; margin-inline-start: 8px; color: var(--desk-subtle); }
+.audio-map-confidence-patch { margin: 0; color: var(--desk-subtle); }
+
 @media (max-width: 460px) {
   .stage-confidence-stills[data-comparing="true"] { grid-template-columns: minmax(0, 1fr); }
   .cue-monitor { right: 12px; }
   .cue-monitor th, .cue-monitor td { padding-inline: 6px; }
+  .audio-map-confidence-marks { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .audio-map-confidence-marks .point-plane { width: min(calc(100% - 20px), 9rem); }
 }
