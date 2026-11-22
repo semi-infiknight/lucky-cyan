@@ -193,24 +193,24 @@ pub(crate) enum NetworkPauseAction {
     Toggle,
 }
 
-/// Resolve and apply in the same workspace lock. A network cue number never
-/// crosses the WebView queue to be resolved against a different show or list.
+/// Resolve and apply under the same workspace lock so the addressed show or
+/// list cannot change between matching the request and acting on it.
 pub(crate) fn address_numbered_network_cue(
     state: &AppState,
     app_handle: &tauri::AppHandle,
-    number: &str,
     action: NetworkCueAction,
+    resolve: impl FnOnce(&Workspace) -> Option<(usize, CueId)>,
 ) -> Result<(), String> {
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
-    let Some(list) = ws.active_cue_list() else { return Ok(()); };
-    let Some(id) = numbered_network_target(list, number) else { return Ok(()); };
+    let Some((index, id)) = resolve(&ws) else { return Ok(()); };
+    let Some(list) = ws.cue_lists.get(index) else { return Ok(()); };
     if action == NetworkCueAction::Go && !list.independent_pads()
         && !accept_chained_go(state, ws.preferences.general.double_go_protection_ms)
     {
         return Ok(());
     }
     let mut transport = Transport::new(workspace_context(state, &ws));
-    let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
+    let cue_list = &mut ws.cue_lists[index];
 
     match action {
         NetworkCueAction::Go | NetworkCueAction::Start => {
@@ -220,10 +220,6 @@ pub(crate) fn address_numbered_network_cue(
         NetworkCueAction::Stop => stop_cue_in_list(&mut transport, cue_list, id, app_handle),
         NetworkCueAction::SetPause(action) => network_pause_in_list(&transport.context, cue_list, Some(id), action, app_handle),
     }
-}
-
-fn numbered_network_target(list: &CueList, number: &str) -> Option<CueId> {
-    list.unique_numbered_cue(number).map(|cue| cue.id())
 }
 
 pub(crate) fn control_network_list_pause(
@@ -766,14 +762,14 @@ mod tests {
         second.auto_renumber = false;
         second.push(Box::new(cue));
 
-        assert_eq!(numbered_network_target(&first, "1.5"), Some(first_id));
-        assert_eq!(numbered_network_target(&second, "1.5"), Some(second_id));
-        assert_eq!(numbered_network_target(&first, "1.50"), None);
+        assert_eq!(first.unique_numbered_cue("1.5").map(Cue::id), Some(first_id));
+        assert_eq!(second.unique_numbered_cue("1.5").map(Cue::id), Some(second_id));
+        assert!(first.unique_numbered_cue("1.50").is_none());
 
         let mut duplicate = MemoCue::new();
         duplicate.set_number(Some("1.5".into()));
         first.push(Box::new(duplicate));
-        assert_eq!(numbered_network_target(&first, "1.5"), None);
+        assert!(first.unique_numbered_cue("1.5").is_none());
     }
 
     #[test]
@@ -819,7 +815,7 @@ mod tests {
         use NetworkPauseAction::{Pause, Resume, Toggle};
         assert_eq!(apply(list, None, Pause), [(first, Running, Paused), (second, Running, Paused)]);
         assert_eq!(apply(list, None, Resume), [(first, Paused, Running), (second, Paused, Running)]);
-        let address = numbered_network_target(list, "102").unwrap();
+        let address = list.unique_numbered_cue("102").unwrap().id();
         assert_eq!(apply(list, Some(address), Pause), [(second, Running, Paused)]);
         assert!(apply(list, Some(address), Pause).is_empty());
         assert!(apply(list, Some(standby), Resume).is_empty());

@@ -16,7 +16,7 @@ use crossbeam_channel::{Receiver, Sender};
 use tauri::{Emitter, Manager};
 use uuid::Uuid;
 
-use crate::cue::traits::Cue;
+use crate::cue::{traits::Cue, types::CueId};
 use crate::commands::transport_cmds::{
     address_numbered_network_cue, control_network_list_pause, NetworkCueAction, NetworkPauseAction,
 };
@@ -157,7 +157,7 @@ impl OscServer {
                 protocol.settings(&config),
                 super::net_interface::bind_ip,
                 move |status| { let _ = status_handle.emit(protocol.status_event(), status); },
-                move |packet| handle_packet(packet, &packet_handle),
+                move |packet, explicitly_allowed| handle_packet(packet, explicitly_allowed, &packet_handle),
                 move |query| handle_query(query, &query_handle),
             )
         };
@@ -194,7 +194,7 @@ impl Listener {
         config: ListenerConfig,
         bind_ip: impl Fn() -> IpAddr + Send + 'static,
         mut on_status: impl FnMut(&OscListenerStatus) + Send + 'static,
-        on_packet: impl FnMut(&rosc::OscPacket) + Send + 'static,
+        on_packet: impl FnMut(&rosc::OscPacket, bool) + Send + 'static,
         on_query: impl FnMut(CueQuery<'_>) -> Option<Vec<u8>> + Send + 'static,
     ) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -249,7 +249,7 @@ fn server_loop(
     commands: Receiver<ListenerCommand>,
     bind_ip: impl Fn() -> IpAddr,
     mut on_status: impl FnMut(OscListenerStatus),
-    mut on_packet: impl FnMut(&rosc::OscPacket),
+    mut on_packet: impl FnMut(&rosc::OscPacket, bool),
     mut on_query: impl FnMut(CueQuery<'_>) -> Option<Vec<u8>>,
 ) {
     let label = protocol.label();
@@ -340,7 +340,7 @@ fn server_loop(
                         log::debug!("{label}: dropped duplicate packet from {src}");
                         continue;
                     }
-                    on_packet(&packet);
+                    on_packet(&packet, !config.allowed_ips.is_empty());
                 }
                 Err(e) if is_timeout(&e) => {}
                 Err(e) => log::warn!("{label}: recv error: {e}"),
@@ -409,12 +409,12 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
 // Packet dispatch
 // ---------------------------------------------------------------------------
 
-fn handle_packet(packet: &rosc::OscPacket, app_handle: &tauri::AppHandle) {
+fn handle_packet(packet: &rosc::OscPacket, explicitly_allowed: bool, app_handle: &tauri::AppHandle) {
     match packet {
-        rosc::OscPacket::Message(msg) => handle_message(msg, app_handle),
+        rosc::OscPacket::Message(msg) => handle_message(msg, explicitly_allowed, app_handle),
         rosc::OscPacket::Bundle(bundle) => {
             for p in &bundle.content {
-                handle_packet(p, app_handle);
+                handle_packet(p, explicitly_allowed, app_handle);
             }
         }
     }
@@ -425,8 +425,8 @@ fn handle_packet(packet: &rosc::OscPacket, app_handle: &tauri::AppHandle) {
 enum OscAction<'a> {
     /// Dispatch to the frontend as an `osc-command` payload.
     Command(serde_json::Value),
-    /// Resolve this number in the active list and run it under the workspace lock.
-    AddressedCue { number: &'a str, action: NetworkCueAction },
+    /// Resolve the target and run it under the workspace lock.
+    AddressedCue { workspace: Option<WorkspaceSelector<'a>>, number: &'a str, action: NetworkCueAction },
     /// Use the current native states in the active list under the workspace lock.
     ListPause(NetworkPauseAction),
     /// Trigger a full cue-list feedback dump.
@@ -455,11 +455,14 @@ fn resolve_action<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a> {
     OscAction::Command(payload)
 }
 
-fn handle_message(msg: &rosc::OscMessage, app_handle: &tauri::AppHandle) {
+fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, app_handle: &tauri::AppHandle) {
     let (matched, activity) = match resolve_action(&msg.addr, &msg.args) {
-        OscAction::AddressedCue { number, action } => {
+        OscAction::AddressedCue { workspace: Some(_), .. } if !explicitly_allowed => (false, false),
+        OscAction::AddressedCue { workspace, number, action } => {
             if let Some(state) = app_handle.try_state::<AppState>() {
-                if let Err(error) = address_numbered_network_cue(&state, app_handle, number, action) {
+                if let Err(error) = address_numbered_network_cue(&state, app_handle, action, |show| {
+                    resolve_network_target(show, workspace, number)
+                }) {
                     log::warn!("Network cue {}: {error}", msg.addr);
                 }
             }
@@ -581,7 +584,7 @@ fn parse_cue_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a>
         "resume" if args.is_empty() => NetworkCueAction::SetPause(NetworkPauseAction::Resume),
         _ => return OscAction::Unmatched,
     };
-    OscAction::AddressedCue { number, action }
+    OscAction::AddressedCue { workspace: None, number, action }
 }
 
 fn literal_cue_number(number: &str) -> bool {
@@ -599,8 +602,14 @@ fn parse_qlab_numbered_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> Osc
     if !args.is_empty() {
         return OscAction::Unmatched;
     }
+    let Some((workspace, addr)) = WorkspaceSelector::split_address(addr) else {
+        return OscAction::Unmatched;
+    };
     let playhead = addr.strip_prefix("/playhead/").or_else(|| addr.strip_prefix("/playbackPosition/"));
     let (number, action) = if let Some(number) = playhead {
+        if workspace.is_some() {
+            return OscAction::Unmatched;
+        }
         (number, NetworkCueAction::Select)
     } else if let Some((number, action)) = addr.strip_prefix("/cue/").and_then(|cue| cue.split_once('/')) {
         match action {
@@ -613,15 +622,15 @@ fn parse_qlab_numbered_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> Osc
     } else {
         return OscAction::Unmatched;
     };
-    if !qlab_literal_cue_number(number) {
+    if !qlab_literal_cue_number(number) || (workspace.is_some() && number.len() > MAX_CUE_ADDRESS_NUMBER_BYTES) {
         return OscAction::Unmatched;
     }
-    OscAction::AddressedCue { number, action }
+    OscAction::AddressedCue { workspace, number, action }
 }
 
-const MAX_QUERY_NUMBER_BYTES: usize = 96;
-const MAX_QUERY_WORKSPACE_NAME_BYTES: usize = 255;
-const MAX_QUERY_ROWS: usize = 4_096;
+const MAX_CUE_ADDRESS_NUMBER_BYTES: usize = 96;
+const MAX_WORKSPACE_SELECTOR_BYTES: usize = 255;
+const MAX_SCOPED_ROWS: usize = 4_096;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CueQueryProperty {
@@ -639,17 +648,26 @@ enum CueQueryTarget<'a> {
 }
 
 #[derive(Clone, Copy)]
-enum CueQueryWorkspace<'a> {
+enum WorkspaceSelector<'a> {
     Instance(Uuid),
     Name(&'a str),
 }
 
-impl<'a> CueQueryWorkspace<'a> {
+impl<'a> WorkspaceSelector<'a> {
+    fn split_address(address: &'a str) -> Option<(Option<Self>, &'a str)> {
+        let Some(scoped) = address.strip_prefix("/workspace/") else {
+            return Some((None, address));
+        };
+        let separator = scoped.find('/')?;
+        let selector = Self::parse(&scoped[..separator])?;
+        Some((Some(selector), &scoped[separator..]))
+    }
+
     fn parse(segment: &'a str) -> Option<Self> {
         if let Some(id) = hyphenated_query_id(segment) {
             return Some(Self::Instance(id));
         }
-        if !segment.is_empty() && segment.len() <= MAX_QUERY_WORKSPACE_NAME_BYTES
+        if !segment.is_empty() && segment.len() <= MAX_WORKSPACE_SELECTOR_BYTES
             && segment.bytes().all(|byte| byte.is_ascii_graphic() && !b"#*,/?[]{}".contains(&byte))
         {
             return Some(Self::Name(segment));
@@ -667,9 +685,30 @@ impl<'a> CueQueryWorkspace<'a> {
     }
 }
 
+fn resolve_network_target(
+    show: &Workspace,
+    workspace: Option<WorkspaceSelector<'_>>,
+    number: &str,
+) -> Option<(usize, CueId)> {
+    if let Some(selector) = workspace {
+        if !selector.matches(show) {
+            return None;
+        }
+        let (index, cue) = unique_workspace_cue(show, |cue| cue.number() == Some(number))?;
+        // Count group children when checking uniqueness, but only control
+        // top-level cues so a remote can't bypass a parent group's transport.
+        show.cue_lists[index].cues.iter().any(|row| std::ptr::eq(row.as_ref(), cue))
+            .then(|| (index, cue.id()))
+    } else {
+        let index = show.cue_lists.iter().position(|list| list.id == show.active_cue_list_id)?;
+        let cue = show.cue_lists[index].unique_numbered_cue(number)?;
+        Some((index, cue.id()))
+    }
+}
+
 struct CueQuery<'a> {
     address: &'a str,
-    workspace: Option<CueQueryWorkspace<'a>>,
+    workspace: Option<WorkspaceSelector<'a>>,
     target: CueQueryTarget<'a>,
     property: CueQueryProperty,
 }
@@ -679,13 +718,8 @@ impl<'a> CueQuery<'a> {
         if !message.args.is_empty() {
             return None;
         }
-        let mut path = message.addr.strip_prefix('/')?;
-        let mut workspace = None;
-        if let Some(scoped) = path.strip_prefix("workspace/") {
-            let (selector, remaining) = scoped.split_once('/')?;
-            workspace = Some(CueQueryWorkspace::parse(selector)?);
-            path = remaining;
-        }
+        let (workspace, path) = WorkspaceSelector::split_address(&message.addr)?;
+        let path = path.strip_prefix('/')?;
         let (kind, address) = path.split_once('/')?;
         let (key, property) = address.split_once('/')?;
         let property = match property {
@@ -699,7 +733,7 @@ impl<'a> CueQuery<'a> {
             "cue" if key == "playhead"
                 && matches!(property, CueQueryProperty::Number | CueQueryProperty::UniqueId) =>
                 CueQueryTarget::Playhead,
-            "cue" if key.len() <= MAX_QUERY_NUMBER_BYTES && qlab_literal_cue_number(key) =>
+            "cue" if key.len() <= MAX_CUE_ADDRESS_NUMBER_BYTES && qlab_literal_cue_number(key) =>
                 CueQueryTarget::Number(key),
             "cue_id" => CueQueryTarget::Id(hyphenated_query_id(key)?),
             _ => return None,
@@ -717,15 +751,15 @@ impl<'a> CueQuery<'a> {
     }
 
     fn read(&self, workspace: &Workspace) -> Option<serde_json::Value> {
-        if workspace.cue_lists.len() > MAX_QUERY_ROWS {
+        if workspace.cue_lists.len() > MAX_SCOPED_ROWS {
             return None;
         }
         let cue = match self.target {
             CueQueryTarget::Playhead => {
-                let list = workspace.active_cue_list().filter(|list| list.cues.len() <= MAX_QUERY_ROWS)?;
+                let list = workspace.active_cue_list().filter(|list| list.cues.len() <= MAX_SCOPED_ROWS)?;
                 let playhead = list.playhead_cue()?;
                 if playhead.group_mode() == Some(crate::cue::types::GroupMode::StartFirstAndEnter) && !playhead.is_disabled() {
-                    let children = playhead.child_cues().filter(|children| children.len() <= MAX_QUERY_ROWS)?;
+                    let children = playhead.child_cues().filter(|children| children.len() <= MAX_SCOPED_ROWS)?;
                     let next = playhead.active_child_id();
                     children.iter().map(|child| child.as_ref()).find(|child| Some(child.id()) == next)
                         .or(Some(playhead))
@@ -735,15 +769,15 @@ impl<'a> CueQuery<'a> {
             }
             CueQueryTarget::Number(number) if self.workspace.is_none() => {
                 // Keep the existing short address scoped to the active list.
-                let list = workspace.active_cue_list().filter(|list| list.cues.len() <= MAX_QUERY_ROWS)?;
+                let list = workspace.active_cue_list().filter(|list| list.cues.len() <= MAX_SCOPED_ROWS)?;
                 list.unique_numbered_cue(number)
             }
-            CueQueryTarget::Number(number) => workspace_query_cue(workspace, |cue| cue.number() == Some(number)),
-            CueQueryTarget::Id(id) => workspace_query_cue(workspace, |cue| cue.id() == id),
+            CueQueryTarget::Number(number) => unique_workspace_cue(workspace, |cue| cue.number() == Some(number)).map(|(_, cue)| cue),
+            CueQueryTarget::Id(id) => unique_workspace_cue(workspace, |cue| cue.id() == id).map(|(_, cue)| cue),
         }?;
         match self.property {
             CueQueryProperty::Number => cue.number()
-                .filter(|number| number.len() <= MAX_QUERY_NUMBER_BYTES)
+                .filter(|number| number.len() <= MAX_CUE_ADDRESS_NUMBER_BYTES)
                 .map(|number| serde_json::Value::String(number.to_owned())),
             CueQueryProperty::UniqueId => Some(serde_json::Value::String(cue.id().to_string())),
             CueQueryProperty::Running => Some(serde_json::Value::Bool(cue.is_running())),
@@ -778,18 +812,21 @@ fn hyphenated_query_id(id: &str) -> Option<Uuid> {
 
 /// Bound the full search before a result can be trusted as unique. Iterate
 /// groups without adding call-stack depth while the workspace is locked.
-fn workspace_query_cue(
+fn unique_workspace_cue(
     workspace: &Workspace,
     matches: impl Fn(&dyn Cue) -> bool,
-) -> Option<&dyn Cue> {
-    let mut remaining = MAX_QUERY_ROWS;
+) -> Option<(usize, &dyn Cue)> {
+    if workspace.cue_lists.len() > MAX_SCOPED_ROWS {
+        return None;
+    }
+    let mut remaining = MAX_SCOPED_ROWS;
     let mut pending = Vec::new();
     let mut found = None;
-    for list in &workspace.cue_lists {
+    for (index, list) in workspace.cue_lists.iter().enumerate() {
         remaining = remaining.checked_sub(list.cues.len())?;
         pending.extend(list.cues.iter().map(Box::as_ref));
         while let Some(cue) = pending.pop() {
-            if matches(cue) && found.replace(cue).is_some() {
+            if matches(cue) && found.replace((index, cue)).is_some() {
                 return None;
             }
             if let Some(children) = cue.child_cues() {
@@ -843,9 +880,9 @@ mod tests {
         {
             assert!(CueQuery::parse(&query_message(address)).is_none(), "{address}");
         }
-        let oversized = format!("/cue/{}/number", "1".repeat(MAX_QUERY_NUMBER_BYTES + 1));
+        let oversized = format!("/cue/{}/number", "1".repeat(MAX_CUE_ADDRESS_NUMBER_BYTES + 1));
         assert!(CueQuery::parse(&query_message(&oversized)).is_none());
-        let oversized = format!("/workspace/{}/cue/101/number", "a".repeat(MAX_QUERY_WORKSPACE_NAME_BYTES + 1));
+        let oversized = format!("/workspace/{}/cue/101/number", "a".repeat(MAX_WORKSPACE_SELECTOR_BYTES + 1));
         assert!(CueQuery::parse(&query_message(&oversized)).is_none());
     }
 
@@ -954,9 +991,7 @@ mod tests {
         let write = format!("/workspace/{instance}/cue_id/{nested}/start");
         assert!(CueQuery::parse(&query_message(&write)).is_none());
         assert!(matches!(resolve_action(&write, &[]), OscAction::Unmatched));
-        let write = "/workspace/QueryPractice/cue/101/start";
-        assert!(CueQuery::parse(&query_message(write)).is_none());
-        assert!(matches!(resolve_action(write, &[]), OscAction::Unmatched));
+        assert!(CueQuery::parse(&query_message("/workspace/QueryPractice/cue/101/start")).is_none());
 
         workspace.metadata.name = "VenueB".into();
         workspace.file_path = Some("/show/VenueB.inkue".into());
@@ -969,13 +1004,86 @@ mod tests {
     }
 
     #[test]
+    fn workspace_scoped_commands_resolve_only_unique_top_level_cues_in_the_requested_show() {
+        use crate::cue::{group_cue::GroupCue, types::ContinueMode, wait_cue::WaitCue};
+        use crate::show::{cue_list::CueList, transport::Transport};
+
+        let mut workspace = Workspace::new("Blue");
+        workspace.file_path = Some("/show/Practice.inkue".into());
+        let active_list = workspace.active_cue_list_id;
+        let mut standby = WaitCue::new();
+        standby.set_number(Some("101".into()));
+        let standby_id = standby.id();
+        let active = workspace.active_cue_list_mut().unwrap();
+        active.auto_renumber = false;
+        active.push(Box::new(standby));
+        active.set_playhead(Some(standby_id)).unwrap();
+
+        let mut offstage = CueList::new("Offstage");
+        offstage.auto_renumber = false;
+        let mut cue = WaitCue::new();
+        cue.set_number(Some("202.1".into()));
+        cue.set_continue_mode(ContinueMode::DoNotContinue);
+        let cue_id = cue.id();
+        offstage.push(Box::new(cue));
+        let mut child = WaitCue::new();
+        child.set_number(Some("202.2".into()));
+        let mut group = GroupCue::new();
+        group.children.push(Box::new(child));
+        offstage.push(Box::new(group));
+        workspace.cue_lists.push(offstage);
+        let resolve = |address: &str, workspace: &Workspace| {
+            let OscAction::AddressedCue { workspace: scope, number, action } = resolve_action(address, &[]) else {
+                return None;
+            };
+            resolve_network_target(workspace, scope, number).map(|(index, id)| (index, id, action))
+        };
+
+        let uuid = workspace.instance_id();
+        for (verb, expected) in [
+            ("start", NetworkCueAction::Start),
+            ("stop", NetworkCueAction::Stop),
+            ("pause", NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
+            ("resume", NetworkCueAction::SetPause(NetworkPauseAction::Resume)),
+        ] {
+            for selector in ["Blue", "Practice.inkue", &uuid.to_string()] {
+                let address = format!("/workspace/{selector}/cue/202.1/{verb}");
+                let text = parse_text_message(address.as_bytes()).unwrap();
+                assert_eq!(resolve(&text.addr, &workspace), Some((1, cue_id, expected)));
+                assert!(matches!(resolve_action(&address, &[rosc::OscType::Int(1)]), OscAction::Unmatched));
+            }
+        }
+        for address in ["/cue/202.1/start", "/workspace/blue/cue/202.1/start",
+            "/workspace/Other/cue/202.1/start", "/workspace/Blue/cue/202.2/start",
+            "/workspace/Blue/cue/*/start", "/workspace/Blue/cue/202.1/go"]
+        {
+            assert_eq!(resolve(address, &workspace), None, "{address}");
+        }
+        assert_eq!(resolve(&format!("/workspace/{}/cue/202.1/start", Uuid::new_v4()), &workspace), None);
+
+        let (index, id, _) = resolve("/workspace/Blue/cue/202.1/start", &workspace).unwrap();
+        let (context, _, _) = crate::test_support::recording_context();
+        let mut transport = Transport::new(context);
+        assert_eq!(transport.start_independent(&mut workspace.cue_lists[index], id).unwrap().triggered, [id]);
+        assert_eq!(workspace.active_cue_list_id, active_list);
+        assert_eq!(workspace.active_cue_list().unwrap().playhead_cue_id, Some(standby_id));
+        transport.stop_cue(&mut workspace.cue_lists[index], &id).unwrap();
+        assert!(!workspace.cue_lists[index].get(&id).unwrap().is_running());
+
+        let mut duplicate = WaitCue::new();
+        duplicate.set_number(Some("202.1".into()));
+        workspace.active_cue_list_mut().unwrap().push(Box::new(duplicate));
+        assert_eq!(resolve("/workspace/Blue/cue/202.1/start", &workspace), None);
+    }
+
+    #[test]
     fn scoped_query_counts_nested_rows_before_returning_an_exact_match() {
         use crate::cue::{group_cue::GroupCue, memo_cue::MemoCue};
         let mut workspace = Workspace::new("Large rehearsal");
         let mut child = MemoCue::new();
         child.set_number(Some("1".into()));
         let mut group = GroupCue::new();
-        group.children.extend((0..MAX_QUERY_ROWS - 2)
+        group.children.extend((0..MAX_SCOPED_ROWS - 2)
             .map(|_| Box::new(MemoCue::new()) as Box<dyn Cue>));
         group.children.push(Box::new(child));
         let group_id = group.id();
@@ -999,7 +1107,7 @@ mod tests {
         let listener = Listener::spawn(
             protocol, protocol.settings(&config), || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
-            |_| {},
+            |_, _| {},
             move |query| query.encode_reply(instance, Some(false.into())),
         );
         let OscListenerStatus::Listening { address } = statuses.recv_timeout(Duration::from_secs(2)).unwrap() else {
@@ -1072,7 +1180,7 @@ mod tests {
             Protocol::Osc.settings(&config),
             || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
-            move |packet| { let _ = packet_tx.send(packet.clone()); },
+            move |packet, explicitly_allowed| { let _ = packet_tx.send((packet.clone(), explicitly_allowed)); },
             |_| None,
         );
         let timeout = Duration::from_secs(2);
@@ -1095,7 +1203,7 @@ mod tests {
         });
         let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         sender.send_to(&rosc::encoder::encode(&packet).unwrap(), address).unwrap();
-        assert_eq!(packets.recv_timeout(timeout).unwrap(), packet);
+        assert_eq!(packets.recv_timeout(timeout).unwrap(), (packet, true));
         assert!(statuses.try_recv().is_err());
     }
 
@@ -1108,7 +1216,7 @@ mod tests {
             Protocol::Osc.settings(&config),
             || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
-            |_| {},
+            |_, _| {},
             |_| None,
         );
         let timeout = Duration::from_secs(2);
@@ -1191,7 +1299,7 @@ mod tests {
             protocol.settings(&config),
             || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
-            move |packet| { let _ = packet_tx.send(packet.clone()); },
+            move |packet, _| { let _ = packet_tx.send(packet.clone()); },
             |_| None,
         );
         let timeout = Duration::from_secs(2);
@@ -1246,7 +1354,7 @@ mod tests {
         ] {
             let parsed = parse_text_message(address.as_bytes()).unwrap();
             for action in [resolve_action(address, &[]), resolve_action(&parsed.addr, &parsed.args)] {
-                assert!(matches!(action, OscAction::AddressedCue { number, action }
+                assert!(matches!(action, OscAction::AddressedCue { workspace: None, number, action }
                     if number == cue_number && action == expected), "{address}");
             }
         }
