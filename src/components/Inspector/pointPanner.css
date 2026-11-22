@@ -1,0 +1,46 @@
+.point-panner { margin-block: 8px; }
+.point-editor { display: grid; gap: 8px; padding: 8px 2px; max-width: 520px; }
+.point-editor button { justify-self: start; }
+.point-plane {
+  position: relative; margin: 10px; width: min(calc(100% - 20px), 18rem); aspect-ratio: 1; cursor: crosshair;
+  border: 1px solid var(--wc-border, #555); background-color: var(--wc-bg, #18191c);
+  background-image: linear-gradient(90deg, transparent 49.7%, #7775 50%, transparent 50.4%),
+    linear-gradient(transparent 49.7%, #7775 50%, transparent 50.4%);
+}
+.point-speaker, .point-source {
+  position: absolute; transform: translate(-50%, -50%); pointer-events: none;
+}
+.point-speaker { background: #394452; color: white; padding: 1px 4px; border: 1px solid #aebbc8; }
+.point-source { width: 11px; height: 11px; border: 2px solid white; border-radius: 50%; background: #06739b; }
+.point-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }
+.point-row label { display: inline-flex; align-items: center; gap: 3px; }
+.point-row input { width: 4em; }
+.point-editor p { margin: 0; }
+.point-mix-fields, .audio-map-editor, .audio-map-calibration {
+  display: grid; gap: 8px; min-width: 0; margin: 0;
+  border: 1px solid var(--wc-border); border-radius: 4px;
+}
+.audio-map-mark {
+  position: absolute; transform: translate(-50%, -50%);
+  min-width: 24px; min-height: 24px; padding: 0 3px; border-radius: 5px;
+  border: 1px solid var(--wc-border-strong); background: var(--wc-bg-surface); color: var(--wc-text);
+}
+.audio-map-mark[aria-pressed="true"] { border-color: currentColor; outline: 1px solid currentColor; }
+.point-source { z-index: 1; }
+.audio-map-editor .audio-map-name input { width: min(100%, 18em); }
+.audio-map-calibration, .audio-map-readout {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
+}
+.audio-map-calibration label, .audio-map-readout div { display: flex; justify-content: space-between; gap: 6px; }
+.audio-map-calibration input { width: 4.5em; flex-shrink: 0; }
+.audio-map-readout { display: grid; gap: 4px 12px; margin: 0; font-variant-numeric: tabular-nums; }
+.audio-map-readout dd { margin: 0; white-space: nowrap; }
+.audio-map-meters { grid-template-columns: 1fr; }
+.audio-map-meters p { color: var(--wc-text-secondary); }
+.audio-map-meter {
+  display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(3rem, 1fr) minmax(7.5rem, auto);
+  gap: 8px; align-items: center; overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
+}
+.audio-map-meter meter { width: 100%; }
+.audio-map-meter small { text-align: right; }
+.audio-map-clip { font-weight: 700; }

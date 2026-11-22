@@ -1,0 +1,82 @@
+.output-region {
+  color: var(--wc-text);
+  font-size: 12px;
+  margin: 0 0 24px;
+}
+.output-region h4 { margin: 0; font-size: 13px; }
+.output-region p { color: var(--wc-text-muted); line-height: 1.45; margin: 5px 0 8px; }
+.output-region p[role="alert"] { color: var(--wc-text); }
+.output-region-actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+.output-region :is(button, input) {
+  background: var(--wc-bg-surface);
+  color: var(--wc-text);
+  border: 1px solid var(--wc-border-strong);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: inherit;
+}
+.output-region button[aria-pressed="true"] {
+  background: var(--wc-accent);
+  color: var(--wc-accent-fg);
+  border-color: var(--wc-accent);
+}
+.output-region button:disabled { opacity: .55; }
+.output-region-layouts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+  gap: 8px;
+}
+.output-region-layouts fieldset {
+  border: 1px solid var(--wc-border);
+  margin: 0;
+  min-width: 0;
+}
+.output-region-map {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid var(--wc-border-strong);
+  background: var(--wc-bg-app);
+}
+.output-region-map span {
+  position: absolute;
+  display: grid;
+  place-content: center;
+  overflow: hidden;
+  box-sizing: border-box;
+  border: 1px dashed var(--wc-text-muted);
+}
+.output-region-map .selected {
+  z-index: 1;
+  border: 2px solid var(--wc-accent);
+  background: color-mix(in srgb, var(--wc-accent) 19%, transparent);
+}
+.output-region-fields {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 7px;
+}
+.output-region-fields input { box-sizing: border-box; width: 100%; }
+.output-split-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 165px), 1fr));
+  gap: 8px;
+  border: 1px solid var(--wc-border);
+  margin: 8px 0;
+}
+.output-split-fields label { display: grid; align-content: start; gap: 4px; min-width: 0; }
+.output-split-fields :is(input, select) { width: 100%; box-sizing: border-box; }
+.output-split-fields .output-split-check { grid-template-columns: auto 1fr; align-items: center; align-content: center; }
+.output-split-check input { margin: 0; }
+.output-split-preview {
+  max-width: 440px;
+  position: relative;
+  aspect-ratio: 32 / 9;
+  border: 1px solid var(--wc-border-strong);
+  background: var(--wc-bg-app);
+}
+.output-split-preview.vertical { aspect-ratio: 8 / 9; max-width: 240px; }
+.output-split-preview span { position: absolute; inset: 0; box-sizing: border-box; }
+.output-split-first { background: #405e91b0; border: 1px solid #83a9e4; }
+.output-split-second { background: #986d34a0; border: 1px dashed #ffd083; }

@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "workspace": {
+    "name": "Projected red rehearsal",
+    "created_at": "2026-11-21T00:00:00Z",
+    "modified_at": "2026-11-21T00:00:00Z"
+  },
+  "active_cue_list_id": "a63fa046-e401-57da-9e3a-261608b4fa88",
+  "osc_patches": [
+    {
+      "id": "44a16f21-76a8-559d-8e52-083ee075d00d",
+      "name": "Local rehearsal listener",
+      "ip": "127.0.0.1",
+      "port": 15391
+    }
+  ],
+  "cue_lists": [
+    {
+      "id": "a63fa046-e401-57da-9e3a-261608b4fa88",
+      "name": "Stage",
+      "mode": "sequential",
+      "playhead_cue_id": "bf939e43-117e-4fc7-a682-c0e7f16790c4",
+      "cues": [
+        {
+          "id": "bf939e43-117e-4fc7-a682-c0e7f16790c4",
+          "type": "video",
+          "number": "1",
+          "name": "Red at zero",
+          "file_path": "stage-red.mp4",
+          "loop_count": 50,
+          "layer_style": {
+            "opacity": 0.0
+          },
+          "hold_last_frame": true,
+          "continue_mode": "do_not_continue"
+        },
+        {
+          "id": "7ef680d2-5bed-4a26-81c9-661bce208938",
+          "type": "fade",
+          "number": "2",
+          "name": "Brightness 75",
+          "target_cue_ids": [
+            "bf939e43-117e-4fc7-a682-c0e7f16790c4"
+          ],
+          "target_cue_numbers": [
+            "1"
+          ],
+          "fade_brightness": true,
+          "target_brightness_pct": 75,
+          "fade_volume": false,
+          "fade_duration_ms": 1200,
+          "stop_at_end": false,
+          "continue_mode": "do_not_continue"
+        },
+        {
+          "id": "10e3270a-5480-457f-b75a-e19377c837bc",
+          "type": "fade",
+          "number": "3",
+          "name": "Brightness 100",
+          "target_cue_ids": [
+            "bf939e43-117e-4fc7-a682-c0e7f16790c4"
+          ],
+          "target_cue_numbers": [
+            "1"
+          ],
+          "fade_brightness": true,
+          "target_brightness_pct": 100,
+          "fade_volume": false,
+          "fade_duration_ms": 1200,
+          "stop_at_end": false,
+          "continue_mode": "do_not_continue"
+        },
+        {
+          "id": "ef796439-ffe9-4222-9984-55fe1791a51d",
+          "type": "video",
+          "number": "4",
+          "name": "Visible control",
+          "file_path": "stage-red-control.mp4",
+          "loop_count": 50,
+          "layer_style": {
+            "opacity": 1.0
+          },
+          "hold_last_frame": true,
+          "continue_mode": "do_not_continue"
+        },
+        {
+          "id": "9d0fd07e-710c-557e-b1d7-dd55ca767aa1",
+          "type": "load",
+          "number": "5",
+          "name": "Preset video 6",
+          "target_cue_ids": [
+            "dca10506-0fcc-504d-a60f-cb21bbd925bc"
+          ],
+          "continue_mode": "do_not_continue"
+        },
+        {
+          "id": "dca10506-0fcc-504d-a60f-cb21bbd925bc",
+          "type": "video",
+          "number": "6",
+          "name": "Prepared red with pre-wait",
+          "file_path": "stage-red-control.mp4",
+          "loop_count": 50,
+          "layer_style": {
+            "opacity": 1.0
+          },
+          "hold_last_frame": true,
+          "continue_mode": "do_not_continue",
+          "pre_wait_ms": 1500
+        }
+      ]
+    }
+  ]
+}

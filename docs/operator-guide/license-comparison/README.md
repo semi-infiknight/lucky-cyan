@@ -1,0 +1,121 @@
+# Check a fully licensed QLab show against Inkue
+
+Start with the rows your show actually uses. The reference is QLab 5.6.5 with all three licenses. A native editing control is evidence that you can program a cue. Import fidelity, device behavior and show timing each need their own check. “Open” means the documented desk has no qualified equivalent for that workflow. [QLab 5 features by license](https://qlab.app/docs/v5/general/features/) · [Version 5.6.5 release notes](https://qlab.app/release-notes/5.6.5)
+
+## Audio
+
+| QLab workflow | What to try or account for on Linux |
+| --- | --- |
+| 128 destination channels | The native cue matrix indexes 128 outputs. Select the device, patch specific channels, and identify the last used output on the actual interface. |
+| 24 channels in a source file | Program discrete source rows in the matrix. Check the decoder with the production file format and verify each speaker independently. |
+| Waveform display | Inspect the clip in the editor and compare the first transient at the saved in point. |
+| Multiple slices in a sound or movie | Inkue has a slice editor. Rehearse each loop, count and Devamp boundary, especially after import. |
+| Sample-aligned synchronization | Immediate Audio children in a Simultaneous Group share a mix block on one output device. Capture both stems against a common hardware clock on the venue rig. Other timing modes and cross-device synchronization remain open. |
+| Audio fades | Set a Fade target, duration and destination level. The rehearsal show exercises a two-second fade to silence. |
+| Fade the playback speed | Program an absolute Audio rate destination and a rising or falling curve. Voice pitch follows speed. Pitch preservation and automated rate-fade import remain open. [Audio rate exercise](../audio/README.md#slow-a-recorded-announcement-during-playback) |
+| Route an output patch | Assign the logical outputs to physical channels. Check imported macOS device assignments and any patch the import report disarms. |
+| Label output channels | Check the logical destination and the physical number in the routing inspector. Verify the names on a collected copy. |
+| Label input channels per cue | Name the source inputs in the Audio or Video cue’s routing inspector. Check the indexed row after saving and reopening, including inputs outside the first bank. |
+| Mute or solo outputs | Inspect the mixer and verify isolation on the real rig. Imported mute/solo selections require review before arming. |
+| Effects on a cue | File Audio cues have ordered high-pass, low-pass and peaking EQ inserts with per-effect bypass. Active cutoff and peaking EQ gain edits apply during playback. Audio Unit compatibility remains open. [Cue effects exercise](../audio/README.md#clean-up-a-recorded-announcement-with-cue-effects) |
+| Effects on a cue output | Per-bus plug-in chains remain open. Check each affected cue output separately. |
+| Effects on a device output | One named main Output Patch can filter its summed File Audio with ordered native high-pass, low-pass and peaking EQ. Third-party effects, additional processed patches and wet Mic, LTC and Video routes remain open. Qualify the signal on the actual device. [Output FX exercise](../audio/README.md#filter-the-summed-output-of-a-patch) |
+| Animate an audio effect | A Fade can sweep one enabled high-pass or low-pass cutoff or peaking EQ gain on a running File Audio cue. Rehearse Pause, Resume, Stop, manual takeover and the saved restart setting. Full plug-in state automation remains open. [Filter sweep exercise](../audio/README.md#sweep-a-filter-on-a-running-cue) · [Peaking EQ exercise](../audio/README.md#bring-up-part-of-a-recording-with-peaking-eq) |
+| Audition cue effects | Compare a trimmed File Audio source with its saved native cue inserts on a dedicated PipeWire headphone output. Rehearse whole-show actions, active automation and patch effects from the cue list. [Headphone comparison exercise](../audio/README.md#compare-source-and-cue-effects-in-headphones) |
+| Fade an entire audio patch | Program a Fade on a patch master. Rehearse the envelope with two active cues, a cue joining midway, and a reference on an unaffected patch. |
+| Microphone cues | Set the input patch, choose mono or stereo and route the output. Confirm the input, feedback margin and device recovery with the actual mic. |
+| Position objects in space | Apply a saved audio map to one Audio cue input. Use a dedicated Fade to move between two named marks on its calibrated main output. Shared sound objects, filters, spread, arbitrary trajectories and three-dimensional placement remain open. |
+| Inspect meters while calibrating | Read combined, post-master digital peaks per assigned physical channel in the map editor when the named patch matches the main output device. Other device routes and cue-specific metering remain open. [Calibration meter exercise](../audio/README.md#verify-a-calibration-on-the-live-outputs) |
+| Compensate after programmed fades | Adjust independent main trim and per-output file Audio trim during playback. Per-output trim uses a one-to-one Output Patch that requires its named device. Conversion review records archived main trim for manual reconstruction. Object trims, dedicated trim meters, Mic and Video trim, and automatic independent trim migration remain open. [Import trim exercise](../audio/README.md#rebuild-main-trim-after-importing-a-qlab-cue) · [Per-output trim exercise](../audio/README.md#correct-one-cue-output-through-a-named-patch) |
+
+[Audio exercise](../audio/README.md) · [Linux qualification](../../operator-rehearsal/verification/README.md)
+
+## Video
+
+| QLab workflow | What to try or account for on Linux |
+| --- | --- |
+| One physical output per stage | Assign a stage, show the alignment grid and match the Linux screen. |
+| Subdivide one projector raster | Map up to eight rectangular regions on one output, then confirm positions, gaps and overlap order with a test picture. [Stage regions exercise](../video/README.md#rearrange-two-pictures-on-one-projector) |
+| Multiple physical outputs in a stage | Save two paired crops with optional gamma-adjusted feathering and verify their seam on matching projectors. Rehearse single-projector recovery after loss of a beam. A shared frame clock, device-aware failover, blends spanning larger arrays and per-region meshes remain open. [Paired projection exercise](../video/README.md#align-a-still-across-two-projectors) |
+| Order up to 1,000 layers | Original layer ordering is retained in tested archives. Large layer counts and throughput need a representative load test. |
+| Fill the stage | Import QLab 5 Fit, Fill and Stretch or the QLab 4 aspect-ratio choice. Use a mismatched test frame to verify cropping and shape on the projector. [Imported framing exercise](../video/README.md#compare-an-imported-picture-at-the-stage-edges) |
+| Give a cue custom geometry | Opt-in PNG and JPEG stills turn around a movable 2D pivot while keeping crop and fitted size. JPEGs need their orientation baked into the pixels. A Fade can turn that still to an absolute fractional angle or make a signed turn of up to ten revolutions. Inventory imported position, scale and rotation separately. Continuous rotation on moving sources and 3D remain open. [Still rotation exercise](../video/README.md#fade-the-angle-of-a-still) |
+| Fade an image | Program opacity and an absolute fade. The archived zero-to-75% example provides a reference. |
+| Move a live picture with a Fade | Set an absolute X or Y destination or add an offset to one Video, Image or Camera target. Rehearse pause, resume, repeated offsets and a fresh GO. Automatic migration remains open. [Position exercise](../video/README.md#move-a-picture-across-the-stage) · [Relative exercise](../video/README.md#repeat-a-move-from-the-current-picture) |
+| Scale a live picture with a Fade | Set an absolute scale or multiply the target’s live uniform scale. Rehearse a live resize and a fresh GO. Independent axis scale and automatic migration remain open. [Scale exercise](../video/README.md#grow-or-shrink-a-live-picture) |
+| Fade a movie’s speed | Use a dedicated Fade on an opted-in silent MP4, MOV or linear MKV. Rehearse the file clock and a fresh GO. Synchronized soundtracks, trimmed movies, loops, slices, and import remain open. [Silent speed exercise](../video/README.md#change-the-speed-of-a-silent-movie) |
+| Edit a two-dimensional fade path | Add ordered absolute X/Y waypoints to a single picture and choose straight or smooth legs. A position-only Fade can repeat the path continuously on the same live picture. Other parameter pairs, archive import and path transfer between cue types remain open. [Waypoint exercise](../video/README.md#route-the-picture-through-a-waypoint) · [Loop exercise](../video/README.md#repeat-the-same-picture-path) |
+| Revert a completed Fade action | Restore the live geometry or saturation that the Fade still owns. Rehearse each domain’s manual takeover and a fresh GO. [Revert picture Fade exercise](../video/README.md#revert-a-completed-picture-fade) |
+| Mask and blend projection edges | Compare overlap, black regions and feathering from the audience position. Full migration remains open. |
+| Warp and correct keystone | Pin the corners with the mouse or fine-tune them from the keyboard. Complex projector meshes need review. |
+| Apply or animate effects | Set or fade saturation from monochrome to 200% on one Video, Image, or Camera cue. Ordered effect chains, other parameters, and external effect compatibility remain open. [Saturation exercise](../video/README.md#fade-the-foreground-to-monochrome) |
+| Set blend mode per cue | Inspect the layer controls and compare two overlapping images against the original blend mode. |
+| Syphon input and output | Open. Account for the original Mac sender and receiver when redesigning the signal path. |
+| NDI input and output | Native bidirectional NDI remains open. |
+| Blackmagic input and output | A qualified end-to-end Blackmagic route remains open. |
+| Camera cues | Assign the local camera and compare framing, latency and reconnection. Source device names may need reassignment. |
+| Text cues | Re-create a representative title. Compare the font, line breaks, alignment and output resolution. |
+
+[Projection exercise](../video/README.md)
+
+## Lighting
+
+| QLab workflow | What to try or account for on Linux |
+| --- | --- |
+| Patch DMX addresses | Add real fixtures and check for overlaps. Test the highest needed address on each universe. |
+| Address multiple universes | Configure Art-Net or sACN, check the monitor, then identify each receiving node. Unbounded scale remains unqualified. |
+| Pick colors in multiple color spaces | Author CMY, HSI and HSV looks and apply them live for fixtures and compatible groups with explicit color roles. Verify channel values and the physical color. QLab’s RGB+ auto-mix and virtual color-map import remain open. |
+| Define instruments | Audit the fixture profiles, channel order, defaults, units and fine channels. Equivalence to the complete QLab instrument-definition workflow remains open. |
+
+[Lighting exercise](../lighting/README.md)
+
+## Networking and show control
+
+| QLab workflow | What to try or account for on Linux |
+| --- | --- |
+| Remote GO from OSC, MIDI, MSC or iOS | OSC and MIDI triggers are available. The full MSC vocabulary, QLab Remote layouts and its iOS client remain open. |
+| Override incoming MIDI cue triggers | Suspend incoming cue triggers for the desk session and restore them from the transport bar. MIDI Learn and authored MIDI output remain available. [Override exercise](../midi/README.md#suspend-midi-cue-triggers-during-programming) |
+| Diagnose a listening-port conflict | Inspect the actual OSC receive endpoint in Preferences. Release the conflicting UDP listener and retry. Validate sender permissions and selection with the isolated workshop before using remote GO. |
+| Host collaborative editing | The primary can separately grant and revoke cue review for one workspace. Full remote programming and peer permissions remain open. [Cue-note exercise](../automation/README.md#review-cue-notes-from-a-second-terminal) |
+| Edit as a collaboration remote | A terminal client can replace notes and set or clear review flags after comparing their current values. The primary desk can Undo accepted edits and see both kinds of edit in Cue review history. [Flag review exercise](../automation/README.md#flag-a-cue-from-the-review-terminal) |
+| Send network commands | Author an OSC or UDP Network cue and capture one message on a test receiver. Review imported payloads before arming. |
+| Receive plain text network commands | Enable the separate UDP listener, add a sender IP, and rehearse numbered actions on the active list. The full QLab command dictionary remains open. [Plain text exercise](../workshops/README.md#trigger-a-rehearsal-cue-with-plain-text-udp) |
+| Start a numbered cue and keep standby parked | Use an independent Start on a top-level manual cue or independent cart pad. Verify the started cue and unchanged standby on the active list. Workspace selectors and scheduled follow chains remain open. [Plain text exercise](../workshops/README.md#trigger-a-rehearsal-cue-with-plain-text-udp) |
+| Query cue state over OSC | An explicitly allowlisted binary UDP controller can read standby, cue numbers, cue IDs, and running and paused state. A workspace UUID, address-compatible title, or exact saved filename scopes the lookup across lists and nested groups. The wider QLab dictionary remains open. [Read-only OSC exercise](../workshops/README.md#read-standby-and-cue-state-from-an-osc-controller) |
+| Send MIDI voice messages | Rehearse seven channel-voice commands and linear, preset or custom fades for Control Change, Key Pressure, Channel Pressure and Pitch Bend. Individual-device MSC GO, STOP and RESUME are available. Send one validated SysEx message per row. Review imported voice fades, other MSC commands and SysEx archive fields. [MIDI cues](../midi/README.md) |
+| Play a MIDI file | Select its port and compare the event timing and track routing with a known receiver. |
+| Generate timecode | Program MTC or LTC. Check the first and last address, frame rate and port on a second device. |
+| Trigger from incoming timecode | Rehearse forward starts and locates. On clock loss, a list can pause or stop its directly clock-started top-level Wait cues. Media holds, lookback, and offset playback remain open. [Clock-loss exercise](../workshops/README.md#lose-the-clock-during-a-wait) |
+| Broadcast show calls over MSC and OSC | Check OSC feedback with the receiver. Matching the entire QLab OSC/MSC broadcast contract remains open. |
+
+[MIDI exercise](../midi/README.md) · [Timecode and handoff workshops](../workshops/README.md)
+
+## Programming and operation
+
+| QLab workflow | What to try or account for on Linux |
+| --- | --- |
+| Back up a workspace automatically | Enable timed snapshots for idle edits to a saved show. Explicit saves and timed snapshots share the bounded machine-local history. Restore a revision under a fresh name and check media and cue identities. Off-machine backup remains open. [Saved revisions](../saved-revisions/README.md#archive-edits-on-a-timer) |
+| Log media use | Enable machine-local recording, export the event CSV and reconcile each playback ID and cue against the performance. [Media report exercise](../media-reports/README.md) |
+| Work with multiple cue lists | Program lists, save their playheads and switch lists while rehearsing. Large shows need a representative load test. |
+| Work a Start First And Enter group | Start a direct child, read the exact next standby in Show Mode or OSC, and reopen on the saved child. Go to cue number reveals a child while leaving the Inspector selection in place. A final direct Wait can start the captured next armed cue at its authored Post-Wait from action start with Auto-Continue and zero Pre-Wait, or after its positive duration and authored Post-Wait with Auto-Follow. Group Pause freezes the remaining delay. Media at the boundary and nested groups remain open. [Enter group exercise](../live/README.md#rehearse-start-first-and-enter) |
+| Edit Timeline Group entrances | Zoom and pan across the group, pin a reference lane and follow the group’s live position. Drag a direct child’s entrance marker and align it with an armed sibling’s start or end, or enter its Pre-Wait. Undo preserves the current standby. Slice guides, nested timeline editing and direct cue-targeting Fade playback remain open. [Group Timeline exercise](../programming/README.md#place-entrances-on-a-group-timeline) |
+| Run a Playlist during main-list GO calls | An advancing Playlist can loop, shuffle once per run and step between eligible direct Wait and plain mono/stereo File Audio children on a second trigger. Audio cuts use the main output. The authored order and main-list standby are preserved. Imported shuffle, crossfades and second-trigger actions require review. [Playlist exercise](../live/README.md#run-a-playlist-while-the-main-list-continues) |
+| Flag cues for review | Import QLab 4 and 5 cue flags, mark cues in the Inspector or the review terminal, and find them in Check Workspace. Carts display flags on pads, and groups show an outline flag for marked descendants. [Cue flag exercise](../programming/README.md#flag-cues-for-review) |
+| Named and second cue colors | Choose from the QLab 5.2 and later named palette and display an alternate highlight once the cue starts. The QLab importer carries the enabled second color. The desk can clear played colors independently of transport. [Played cue colors exercise](../programming/README.md#mark-cues-that-have-played) |
+| Monitor standby and active cues | Open Cue monitor in programming or Show Mode. Check standby, running and paused cues across lists. Use Stage snapshot to compare a reference with a newer still or a low-rate preview of the selected output after masks and blackout. Full-motion video, audition, and audio-map confidence views remain open. [Cue monitor exercise](../programming/README.md#monitor-the-show-from-the-desk) · [Stage snapshot exercise](../video/README.md#check-the-stage-picture-from-the-desk) |
+| Work with multiple carts | New and imported carts have independent pads. A saved fixed cart retains empty cells and pad positions through import and resizing. Open independent carts in separate native windows pinned to their original show and cart. Rehearse focus and routing on the venue displays. |
+| Paste selected cue properties | Copy one Audio, Video, or Fade cue and apply compatible settings while transport is idle. Audio crosspoint and clip-window paste validate the destination routing or media. Fade duration and curve shapes are separate choices. One Undo restores the destination settings. [Paste properties exercise](../programming/README.md#paste-selected-settings-onto-existing-cues) |
+| Preview a live fade | Check live matrix changes at rehearsal level. The independent headphone player previews one trimmed stereo Audio file. An independent preview of a complete Fade cue remains open. |
+| Load to Time | Prepare a one-time entrance on one top-level, unlooped, unsliced File Audio cue at 1× with zero Pre-Wait and Do Not Continue. Enter the time manually or save it in a Load cue. Check for silence during preparation and the saved clip start on a fresh GO. Video, sequences and automatic migration of programmed offsets remain open. [Load to Time exercise](../programming/README.md#rehearse-from-partway-through-an-audio-cue) · [Programmed Load exercise](../programming/README.md#program-a-load-cue-for-a-repeatable-rehearsal-entrance) |
+| Pause cues | Check the specific target and resume it from its held position using a rehearsal copy. |
+| Trigger a cue from the keyboard | Capture or choose a foreground hotkey in the cue’s Triggers inspector. Letters, Shift+letter, and digits 0–9 are available. Rehearse it in programming and Show Mode with the intended active list. Background capture, imported bindings and unsupported nested targets require separate review. |
+| Trigger a cue by wall clock | Save a local time and weekday pattern, then arm the schedule for the open show. Rehearse a top-level manual cue with standby parked elsewhere. Automatic follow chains, nested triggers and QLab schedule import remain open. |
+| Devamp cues | Release a current Audio or Video slice, or finish the current pass of one unsliced looping File Audio cue or eligible silent Video. Soundtrack-synchronized whole Video, automatic whole-cue mode import and starting another cue at the exact boundary remain open. [Whole Audio loop exercise](../audio/README.md#release-a-whole-audio-loop) · [Silent Video loop exercise](../video/README.md#finish-a-silent-movie-loop-at-its-natural-end) |
+| Retarget a cue | Program a Target cue and confirm the next GO uses the new target. Check how reset and panic affect temporary targets. |
+| Arm or disarm a cue | Compare its status before and after an Arm/Disarm cue and rehearse the next sequence. |
+| Run a script | Audit interpreter, paths, applications and permissions. Existing macOS AppleScript needs a portable replacement on Linux. |
+| Start a show from a workspace template | Save cues, lists, carts and settings to a local template file. Start a separate unsaved show with fresh standby. The Launcher can choose or clear one machine-local default. A multi-template library remains open. [Template exercise](../settings/README.md#start-a-show-from-a-workspace-template) |
+| Transfer workspace settings | Export or selectively import desk preferences with a before-and-after review. Stage, patch and device settings still require separate migration. [Settings exercise](../settings/README.md) |
+| Fade patch parameters | Inventory level, routing and effect parameters individually. General patch-parameter automation remains open. |
+
+[Cue programming](../programming/README.md) · [Live desk](../live/README.md) · [Local assistant](../automation/README.md)

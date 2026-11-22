@@ -1,0 +1,140 @@
+[role="treeitem"][data-cue-id]:focus-visible {
+  outline: 2px solid var(--wc-accent);
+  outline-offset: -2px;
+}
+.cue-cart {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.cue-cart-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--wc-border);
+  color: var(--wc-text-muted);
+  font-size: 12px;
+}
+.cue-cart-switch {
+  display: inline-flex;
+  border: 1px solid var(--wc-border-strong);
+  border-radius: 5px;
+}
+.cue-cart-switch button {
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font: inherit;
+  color: var(--wc-text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+.cue-cart-switch button[aria-pressed="true"] {
+  color: var(--wc-text);
+  background: var(--wc-bg-surface);
+  box-shadow: inset 0 0 0 1px var(--wc-border-strong);
+  font-weight: 600;
+}
+.cue-cart-pad.is-selected { outline: 2px solid var(--wc-accent); }
+.cue-cart-trigger {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  border-radius: inherit;
+}
+.cue-cart-trigger:focus-visible { outline: 2px solid var(--wc-accent); outline-offset: -3px; }
+.cue-cart-trigger:disabled { cursor: default; }
+.cue-cart-type { font-size: 10px; color: var(--wc-text-secondary); text-transform: uppercase; letter-spacing: .05em; }
+.cue-cart-error { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; color: var(--wc-text); }
+.cue-cart-fire {
+  position: relative;
+  z-index: 2;
+  border: 1px solid var(--wc-border-strong);
+  border-radius: 4px;
+  background: var(--wc-bg-app);
+  color: var(--wc-text);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.cue-click-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 4px;
+  border-top: 1px solid var(--wc-border);
+  color: var(--wc-text);
+  cursor: pointer;
+  font-size: 12px;
+}
+.cue-list-options {
+  width: 100%; height: 100%; padding: 0;
+  border: 0; background: transparent; color: var(--wc-text-secondary);
+  cursor: pointer; font: inherit; font-size: 17px;
+}
+.cue-list-tabstrip { display: flex; gap: 4px; align-items: center; }
+.cue-list-tabstrip [role="tab"]:focus-visible { outline: 2px solid var(--wc-accent); outline-offset: -2px; }
+
+.cart-layout-tools, .cart-layout-controls, .cart-overflow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.cart-layout-tools, .cart-overflow, .cart-placement-status { padding: 5px 12px; }
+.cart-layout-tools input { width: 4em; }
+.cart-layout-tools button, .cart-overflow button, .cart-layout-tools input, .cart-placement-target {
+  border: 1px solid var(--wc-border-strong);
+  border-radius: 4px;
+  color: var(--wc-text);
+  background: var(--wc-bg-surface);
+  padding: 4px 7px;
+}
+.cart-layout-tools button:disabled { opacity: 0.5; }
+.cart-overflow button[aria-pressed="true"] { border-color: var(--wc-accent); }
+.cart-fixed-cell { min-width: 0; display: grid; }
+.cart-empty-cell, .cart-placement-target {
+  min-height: 90px;
+  border: 1px dashed var(--wc-border-strong);
+  border-radius: 6px;
+}
+.cart-placement-target { display: grid; align-content: center; text-align: center; gap: 4px; }
+.cart-placement-target small, .cart-overflow > span { color: var(--wc-text-muted); }
+.cart-placement-target:focus-visible, .cart-layout-tools :focus-visible, .cart-overflow button:focus-visible {
+  outline: 2px solid var(--wc-accent);
+  outline-offset: -2px;
+}
+
+.cart-fixed-cell[data-drop-target] { outline: 2px solid var(--wc-accent); outline-offset: -2px; }
+
+.desk-history-notice {
+  position: fixed;
+  z-index: 99999;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 14px;
+  max-width: min(32rem, 90vw);
+  color: var(--wc-text);
+  background: var(--wc-bg-surface);
+  border: 1px solid var(--wc-border-strong);
+  border-radius: 6px;
+}
+.cart-window-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding: 12px;
+  overflow: auto;
+}
+.cart-window { height: 100vh; display: flex; flex-direction: column; background: var(--wc-bg-app); color: var(--wc-text); }
+.cart-window header { padding: 10px 12px; border-bottom: 1px solid var(--wc-border-strong); }
+.cart-window h1 { margin: 0; font-size: 17px; }
+.cart-window-error { color: var(--wc-text); background: var(--wc-bg-surface); padding: 6px 10px; }

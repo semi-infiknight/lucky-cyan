@@ -1,0 +1,21 @@
+.operator-dialog:has(.operator-library) {
+  width: min(1020px, 94vw); max-width: 94vw; max-height: 90vh;
+}
+.operator-library { display: grid; grid-template-columns: minmax(140px, 24%) minmax(0, 1fr); gap: 20px; }
+.operator-library nav, .operator-library article { height: min(64vh, 620px); overflow: auto; }
+.operator-library nav { border-right: 1px solid var(--wc-border); padding-right: 10px; }
+.operator-library nav label, .operator-library nav input { display: block; width: 100%; }
+.operator-library nav button { width: 100%; text-align: left; padding: 7px; margin: 2px 0; }
+.operator-library nav button[aria-current] { border-color: var(--wc-accent); font-weight: 700; }
+.operator-library article { user-select: text; line-height: 1.55; padding-right: 6px; }
+.operator-library article :is(h1,h2,h3) { margin: 12px 0 6px; line-height: 1.25; }
+.operator-library article h1 { font-size: 1.45rem; margin-top: 0; }
+.operator-library article ol, .operator-library article ul { padding-inline-start: 1.6rem; }
+.operator-library article pre { overflow: auto; padding: 8px; background: var(--wc-bg-app); }
+.operator-library article td, .operator-library article th { font-size: inherit; vertical-align: top; padding: 6px; }
+.operator-library article a { text-decoration: underline; color: var(--wc-text); }
+@media (max-width: 720px) {
+  .operator-library { grid-template-columns: minmax(110px, 30%) minmax(0, 1fr); gap: 9px; }
+}
+.operator-library nav button small { display: block; margin-top: 3px; color: var(--wc-text-secondary); font-weight: 400; overflow-wrap: anywhere; }
+.operator-library article > button { margin-bottom: 10px; }

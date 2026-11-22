@@ -1,0 +1,17 @@
+[package]
+name = "inkue-inspect"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Read a saved Inkue show from a CLI or MCP client"
+
+[dependencies]
+ureq = { version = "3", default-features = false, features = ["json"] }
+inkue-control = { path = "../../crates/control", features = ["schema"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+rmcp = { version = "3.11", features = ["transport-io"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tokio = { version = "1", features = ["macros", "rt"] }

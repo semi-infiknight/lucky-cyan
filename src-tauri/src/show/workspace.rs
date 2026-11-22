@@ -1,0 +1,898 @@
+//! [`Workspace`] — the top-level save unit for a Inkue show.
+//!
+//! Corresponds to a `.inkue` file on disk.
+
+/// Bumped whenever the `.inkue` JSON format gains a breaking change.
+/// Files written by newer Inkue versions (schema > this) are rejected
+/// at load time to prevent silent data corruption.
+pub const SCHEMA_VERSION: u32 = 1;
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::{
+    cue::{registry::CueRegistry, traits::Cue, types::CueType},
+    engine::{output_engine::{MaskImage, OutputConfig, OutputRegions, OutputsConfig}, audio_input::InputPatch, device_manager::OutputPatch, dmx_sink::UniverseOutput, fixture::{FixtureGroup, PatchedFixture}, osc_patch::OscPatch},
+    preferences::AppPreferences,
+};
+
+use super::cue_list::CueList;
+
+const TEMPLATE_KIND: &str = "inkue_workspace_template";
+
+/// Resolve a template path while retaining the selected output name.
+pub(crate) fn template_path(path: &Path) -> Result<PathBuf> {
+    anyhow::ensure!(
+        path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("inkue-template")),
+        "Choose an Inkue template file ending in .inkue-template"
+    );
+    crate::revisions::absolute_target(path).context("Could not resolve the template folder")
+}
+
+fn clear_template_transport(doc: &mut serde_json::Value) {
+    if let Some(lists) = doc.get_mut("cue_lists").and_then(serde_json::Value::as_array_mut) {
+        for list in lists.iter_mut().filter_map(serde_json::Value::as_object_mut) {
+            list.remove("playhead_cue_id");
+            list.remove("playhead_child_id");
+        }
+    }
+    doc["programming_history"] = serde_json::json!([]);
+}
+
+// ---------------------------------------------------------------------------
+// Path helpers — keep file paths relative in the .inkue JSON so workspaces
+// are portable across machines and drive letters.
+// ---------------------------------------------------------------------------
+
+/// Recursively walk a cues JSON array and convert absolute `file_path` values
+/// to paths relative to `base` (the directory containing the .inkue file).
+pub(crate) fn relativize_paths(value: &mut serde_json::Value, base: &std::path::Path) {
+    match value {
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                relativize_paths(item, base);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            if let Some(serde_json::Value::String(p)) = obj.get("file_path") {
+                let path = std::path::Path::new(p.as_str());
+                if path.is_absolute() {
+                    if let Ok(rel) = path.strip_prefix(base) {
+                        // Use forward slashes so the file is readable on any OS.
+                        let rel_str = rel.to_string_lossy().replace('\\', "/");
+                        obj.insert("file_path".into(), serde_json::Value::String(rel_str));
+                    }
+                    // If strip_prefix fails (file is on a different drive), keep absolute.
+                }
+            }
+            // Recurse into group children.
+            if let Some(children) = obj.get_mut("children") {
+                relativize_paths(children, base);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Recursively walk a cues JSON array and resolve relative `file_path` values
+/// to absolute paths using `base` (the directory containing the .inkue file).
+pub(crate) fn absolutize_paths(value: &mut serde_json::Value, base: &std::path::Path) {
+    match value {
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                absolutize_paths(item, base);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            if let Some(serde_json::Value::String(p)) = obj.get("file_path") {
+                let path = std::path::Path::new(p.as_str());
+                if path.is_relative() && !p.is_empty() {
+                    let abs = base.join(path);
+                    obj.insert("file_path".into(),
+                        serde_json::Value::String(abs.to_string_lossy().into_owned()));
+                }
+            }
+            if let Some(children) = obj.get_mut("children") {
+                absolutize_paths(children, base);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Give every cue whose id already appeared earlier in the document a fresh id.
+///
+/// Older versions pasted/duplicated a Group with its children's ids unchanged,
+/// so two lists could hold cues sharing an id — and every by-id command
+/// (relink, decode, seek) then hit the first match, i.e. the wrong list.
+/// Returns how many ids were replaced.
+fn dedupe_cue_ids(value: &mut serde_json::Value, seen: &mut HashSet<String>) -> usize {
+    match value {
+        serde_json::Value::Array(items) => items.iter_mut().map(|item| dedupe_cue_ids(item, seen)).sum(),
+        serde_json::Value::Object(obj) => {
+            let mut replaced = 0;
+            if let Some(id) = obj.get("id").and_then(|v| v.as_str()).map(str::to_owned) {
+                if !seen.insert(id) {
+                    let fresh = Uuid::new_v4().to_string();
+                    seen.insert(fresh.clone());
+                    obj.insert("id".into(), serde_json::Value::String(fresh));
+                    replaced += 1;
+                }
+            }
+            if let Some(children) = obj.get_mut("children") {
+                replaced += dedupe_cue_ids(children, seen);
+            }
+            replaced
+        }
+        _ => 0,
+    }
+}
+
+/// Recursively walk cue JSON and replace `file_path` values using `path_map`
+/// (absolute path → new relative path).  Paths not present in the map are
+/// left unchanged so the subsequent `relativize_paths` pass can handle them.
+fn remap_paths(value: &mut serde_json::Value, path_map: &HashMap<PathBuf, String>) {
+    match value {
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                remap_paths(item, path_map);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            if let Some(serde_json::Value::String(p)) = obj.get("file_path") {
+                let path = PathBuf::from(p.as_str());
+                if let Some(new_rel) = path_map.get(&path) {
+                    obj.insert("file_path".into(), serde_json::Value::String(new_rel.clone()));
+                }
+            }
+            if let Some(children) = obj.get_mut("children") {
+                remap_paths(children, path_map);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Count how many cues a `cues` JSON array *intends* to contain, descending
+/// recursively into group `children`.  Each array element is one intended cue.
+fn count_intended_cues(cues: Option<&serde_json::Value>) -> usize {
+    let Some(arr) = cues.and_then(|v| v.as_array()) else { return 0 };
+    arr.iter()
+        .map(|item| 1 + count_intended_cues(item.get("children")))
+        .sum()
+}
+
+/// Count how many cues actually loaded, descending into group children — the
+/// symmetric counterpart to [`count_intended_cues`].
+fn count_loaded_cues(cues: &[Box<dyn Cue>]) -> usize {
+    cues.iter()
+        .map(|c| 1 + c.child_cues().map(count_loaded_cues).unwrap_or(0))
+        .sum()
+}
+
+fn sanitize_for_filename(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if (c as u32) < 32 => '_',
+            c => c,
+        })
+        .collect();
+    s.trim().to_string()
+}
+
+/// Pick a filename for `orig` inside `dest_dir` that collides with neither a
+/// name already claimed this run (`used`, tracked case-insensitively — two
+/// source files named `Track.wav` and `track.wav` are the same file on a
+/// case-insensitive filesystem) nor a file already on disk — unless that file
+/// *is* `source_abs_path` itself (a re-run of Collect and Save into the same
+/// project folder must keep reusing the same destination name, not rename a
+/// file out from under its own previous copy).
+fn unique_filename(orig: &str, dest_dir: &Path, source_abs_path: &Path, used: &mut HashSet<String>) -> String {
+    let available = |name: &str, used: &HashSet<String>| {
+        if used.contains(&name.to_lowercase()) {
+            return false;
+        }
+        let candidate_path = dest_dir.join(name);
+        !candidate_path.exists() || candidate_path == source_abs_path
+    };
+
+    if available(orig, used) {
+        used.insert(orig.to_lowercase());
+        return orig.to_string();
+    }
+    let (stem, ext) = orig
+        .rfind('.')
+        .map_or((orig, ""), |i| (&orig[..i], &orig[i..]));
+    let mut n = 1u32;
+    loop {
+        let candidate = format!("{stem}_{n}{ext}");
+        if available(&candidate, used) {
+            used.insert(candidate.to_lowercase());
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Recursively collect `(cue_type, abs_path)` for every cue that carries a
+/// media file, including those nested inside groups.
+fn collect_all_media_paths(
+    cues: &[Box<dyn Cue>],
+    out: &mut Vec<(CueType, PathBuf)>,
+) {
+    for cue in cues {
+        if let ct @ (CueType::Audio | CueType::Video | CueType::Image | CueType::MidiFile) =
+            cue.cue_type()
+        {
+            if let Some(path) = cue.media_file_path() {
+                if !path.as_os_str().is_empty() {
+                    out.push((ct, path.to_path_buf()));
+                }
+            }
+        }
+        if let Some(children) = cue.child_cues() {
+            collect_all_media_paths(children, out);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Collect & Save report
+// ---------------------------------------------------------------------------
+
+/// Result returned by [`Workspace::collect_and_save`].
+#[derive(Debug, Serialize)]
+pub struct CollectReport {
+    /// Absolute path to the newly created `.inkue` file.
+    pub workspace_path: String,
+    /// Number of media files successfully copied to the new location.
+    pub files_copied: u32,
+    /// Number of files already at their destination (source == destination).
+    pub files_skipped: u32,
+    /// Paths of files referenced by cues but missing from disk.
+    pub files_missing: Vec<String>,
+}
+
+/// Serialisable workspace metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceMetadata {
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub modified_at: DateTime<Utc>,
+}
+
+impl WorkspaceMetadata {
+    fn new(name: impl Into<String>) -> Self {
+        let now = Utc::now();
+        Self {
+            name: name.into(),
+            created_at: now,
+            modified_at: now,
+        }
+    }
+}
+
+/// The workspace — a complete show document.
+pub struct Workspace {
+    /// Identifies this open document, including independently reopened copies. Never persisted.
+    pub(crate) instance_id: Uuid,
+    pub metadata: WorkspaceMetadata,
+    /// All cue lists in this workspace.
+    pub cue_lists: Vec<CueList>,
+    pub(crate) cue_starts: Arc<Mutex<super::cue_colors::CueStarts>>,
+    /// ID of the currently active cue list.
+    pub active_cue_list_id: Uuid,
+    /// Output patch table (shared across cue lists).
+    pub output_patches: Vec<OutputPatch>,
+    /// Stationary point-panner calibrations reusable across cue lists.
+    pub audio_maps: Vec<crate::cue::point_mix::AudioMap>,
+    /// ID of the default output patch.
+    pub default_output_patch_id: Option<Uuid>,
+    /// OSC send patch table.
+    pub osc_patches: Vec<OscPatch>,
+    /// Extra video outputs (windows) beyond the main one, which Preferences →
+    /// Display configures.  A visual cue picks its output by id.
+    pub video_outputs: Vec<OutputConfig>,
+    pub output_mask_images: HashMap<Uuid, MaskImage>,
+    /// Live audio input patch table (Mic Cues).
+    pub input_patches: Vec<InputPatch>,
+    /// DMX universe → destination mapping (sACN / Art-Net outputs).
+    pub universe_outputs: Vec<UniverseOutput>,
+    /// Lighting fixture patch (named instruments at DMX addresses).
+    pub fixtures: Vec<PatchedFixture>,
+    /// Fixture groups (drive several fixtures from one Light Cue control).
+    pub fixture_groups: Vec<FixtureGroup>,
+    /// Application-wide preferences (audio engine, defaults, …).
+    pub preferences: AppPreferences,
+    /// Path to the .inkue file on disk, if it has been saved.
+    pub file_path: Option<PathBuf>,
+    /// Whether the workspace has unsaved changes.
+    pub is_modified: bool,
+    /// Monotonic counter bumped on every mutation ([`mark_modified`]).  The
+    /// autosave thread snapshots the workspace only when this changes, so an
+    /// idle show is never re-serialised.  Not persisted.
+    pub revision: u64,
+    /// Operator decisions attached to reviewed programming proposals.
+    pub programming_history: Vec<serde_json::Value>,
+    /// Number of cues that were present in the file but could **not** be loaded
+    /// (unknown type or corrupt data) and were therefore skipped.  Transient
+    /// (never serialised); read once after load so the operator can be warned
+    /// that part of the show is missing instead of it vanishing silently.
+    pub cues_skipped_on_load: usize,
+}
+
+impl Workspace {
+    /// Create a new, empty workspace with one default cue list.
+    pub fn new(name: impl Into<String>) -> Self {
+        let default_list = CueList::new("Cue List 1");
+        let active_id = default_list.id;
+        Self {
+            metadata: WorkspaceMetadata::new(name),
+            cue_lists: vec![default_list],
+            active_cue_list_id: active_id,
+            output_patches: Vec::new(),
+            audio_maps: Vec::new(),
+            default_output_patch_id: None,
+            osc_patches: Vec::new(),
+            video_outputs: Vec::new(),
+            output_mask_images: HashMap::new(),
+            input_patches: Vec::new(),
+            universe_outputs: Vec::new(),
+            fixtures: Vec::new(),
+            fixture_groups: Vec::new(),
+            preferences: AppPreferences::default(),
+            file_path: None,
+            is_modified: false,
+            instance_id: Uuid::new_v4(),
+            revision: 0,
+            programming_history: Vec::new(),
+            cue_starts: Default::default(),
+            cues_skipped_on_load: 0,
+        }
+    }
+
+    /// What the output engine needs to know about video outputs: the main
+    /// output's screen and alignment (Preferences → Display) plus the extra
+    /// outputs of this show.
+    pub fn outputs_config(&self) -> OutputsConfig {
+        OutputsConfig {
+            main_screen: self.preferences.display.output_screen,
+            main_transform: self.preferences.display.output_transform,
+            extras: self.video_outputs.clone(),
+            mask_images: self.output_mask_images.clone(),
+            timer_output: self.preferences.display.timer_output,
+        }
+    }
+
+    /// Identify this open workspace instance, even when its file is reopened.
+    pub fn instance_id(&self) -> Uuid {
+        self.instance_id
+    }
+
+    /// Mark the workspace as modified (unsaved changes exist).
+    pub fn mark_modified(&mut self) {
+        self.is_modified = true;
+        self.revision = self.revision.wrapping_add(1);
+        self.metadata.modified_at = Utc::now();
+    }
+
+    /// Push the `auto_renumber_on_reorder` preference onto every cue list's
+    /// runtime `auto_renumber` flag. Call after loading a workspace or changing
+    /// the preference; structural mutations then read the already-synced flag.
+    pub fn sync_auto_renumber(&mut self) {
+        let auto = self.preferences.general.auto_renumber_on_reorder;
+        for cl in &mut self.cue_lists {
+            cl.auto_renumber = auto;
+        }
+    }
+
+    /// The active cue list, identified by `active_cue_list_id`.
+    pub fn active_cue_list(&self) -> Option<&CueList> {
+        self.cue_lists.iter().find(|cl| cl.id == self.active_cue_list_id)
+    }
+
+    /// Mutable access to the active cue list.
+    pub fn active_cue_list_mut(&mut self) -> Option<&mut CueList> {
+        let id = self.active_cue_list_id;
+        self.cue_lists.iter_mut().find(|cl| cl.id == id)
+    }
+
+    /// Look up any cue list by its ID.
+    pub fn cue_list_by_id(&self, id: Uuid) -> Option<&CueList> {
+        self.cue_lists.iter().find(|cl| cl.id == id)
+    }
+
+    /// Mutable access to any cue list by its ID.
+    pub fn cue_list_by_id_mut(&mut self, id: Uuid) -> Option<&mut CueList> {
+        self.cue_lists.iter_mut().find(|cl| cl.id == id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Persistence
+    // -----------------------------------------------------------------------
+
+    /// Serialise the workspace to a JSON string, with file paths made relative
+    /// to `save_path` so the `.inkue` file is portable.
+    pub(crate) fn to_json(&self, save_path: &Path) -> Result<String> {
+        serde_json::to_string_pretty(&self.document_for(save_path, None)).context("Failed to serialize workspace")
+    }
+
+    /// Copy saved cue programming and settings without a live desk position or audit history.
+    pub(crate) fn to_template_json(&self, target: &Path) -> Result<String> {
+        // Live cues normally hold absolute paths already. Resolve any relative
+        // path from the process directory where the current desk opens it.
+        let cwd = std::env::current_dir().context("Could not resolve the current media directory")?;
+        let mut doc = self.document_for(target, Some(&cwd));
+        doc["document_kind"] = serde_json::json!(TEMPLATE_KIND);
+        clear_template_transport(&mut doc);
+        serde_json::to_string_pretty(&doc).context("Failed to serialize workspace template")
+    }
+
+    fn document_for(&self, save_path: &Path, live_base: Option<&Path>) -> serde_json::Value {
+        let mut cue_lists_json: Vec<serde_json::Value> = self
+            .cue_lists
+            .iter()
+            .map(|cl| cl.to_json())
+            .collect();
+
+        for cues in cue_lists_json.iter_mut().filter_map(|list| list.get_mut("cues")) {
+            if let Some(base) = live_base {
+                absolutize_paths(cues, base);
+            }
+            if let Some(base) = save_path.parent() {
+                relativize_paths(cues, base);
+            }
+        }
+
+        serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "workspace": self.metadata,
+            "programming_history": self.programming_history,
+            "output_patches": self.output_patches,
+            "audio_maps": self.audio_maps,
+            "default_output_patch": self.default_output_patch_id,
+            "osc_patches": self.osc_patches,
+            "video_outputs": self.video_outputs,
+            "output_mask_images": self.output_mask_images,
+            "input_patches": self.input_patches,
+            "universe_outputs": self.universe_outputs,
+            "fixtures": self.fixtures,
+            "fixture_groups": self.fixture_groups,
+            "preferences": self.preferences,
+            "cue_lists": cue_lists_json,
+            "active_cue_list_id": self.active_cue_list_id,
+        })
+    }
+
+    /// Serialise the workspace for the crash-recovery snapshot.
+    ///
+    /// Differs from [`to_json`](Self::to_json) in two ways: media `file_path`s are
+    /// kept **absolute** (the recovery file lives in the per-user config dir, not
+    /// beside the show's media, so relative paths would not resolve), and the
+    /// original `.inkue` path is embedded under `recovery_original_path` so a
+    /// restore can target the same file.  Compact (not pretty) since it is
+    /// rewritten every few seconds.
+    pub fn to_recovery_json(&self) -> Result<String> {
+        let cue_lists_json: Vec<serde_json::Value> =
+            self.cue_lists.iter().map(|cl| cl.to_json()).collect();
+
+        let doc = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "recovery_original_path": self.file_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+            "workspace": self.metadata,
+            "programming_history": self.programming_history,
+            "output_patches": self.output_patches,
+            "audio_maps": self.audio_maps,
+            "default_output_patch": self.default_output_patch_id,
+            "osc_patches": self.osc_patches,
+            "video_outputs": self.video_outputs,
+            "output_mask_images": self.output_mask_images,
+            "input_patches": self.input_patches,
+            "universe_outputs": self.universe_outputs,
+            "fixtures": self.fixtures,
+            "fixture_groups": self.fixture_groups,
+            "preferences": self.preferences,
+            "cue_lists": cue_lists_json,
+            "active_cue_list_id": self.active_cue_list_id,
+        });
+
+        serde_json::to_string(&doc).context("Failed to serialize recovery workspace")
+    }
+
+    /// Save the workspace to the given path (or the previously saved path).
+    pub fn save(&mut self, path: Option<PathBuf>) -> Result<()> {
+        let target = path.or_else(|| self.file_path.clone())
+            .ok_or_else(|| anyhow::anyhow!("No file path set for workspace"))?;
+        let json = self.to_json(&target)?;
+        self.commit_saved_document(target, &json)
+    }
+
+    /// Commit the document captured from this instance, then update its title and clean flag.
+    pub(crate) fn commit_saved_document(&mut self, target: PathBuf, json: &str) -> Result<()> {
+        crate::recovery::write_document(&target, json.as_bytes())
+            .with_context(|| format!("Failed to save workspace to {}", target.display()))?;
+
+        // Derive the workspace name from the filename stem (e.g. "My Show" from
+        // "My Show.inkue") so the title bar reflects the saved file immediately.
+        if let Some(stem) = target.file_stem().and_then(|s| s.to_str()) {
+            self.metadata.name = stem.to_string();
+        }
+        self.file_path = Some(target);
+        self.is_modified = false;
+        Ok(())
+    }
+
+    /// Copy all media files referenced by this workspace into
+    /// `{target_dir}/{workspace_name}/audio|video|images|midi/` and write a
+    /// self-contained `.inkue` file with updated relative paths.
+    ///
+    /// The workspace in memory is **not modified** — this is a pure export.
+    pub fn collect_and_save(&self, target_dir: &Path) -> Result<CollectReport> {
+        let raw_name = if self.metadata.name.is_empty() { "Untitled" } else { &self.metadata.name };
+        let safe_name = {
+            let s = sanitize_for_filename(raw_name);
+            if s.is_empty() { "Untitled".into() } else { s }
+        };
+
+        let project_dir = target_dir.join(&safe_name);
+        for sub in &["audio", "video", "images", "midi"] {
+            std::fs::create_dir_all(project_dir.join(sub))
+                .with_context(|| format!("Cannot create {}/{sub}", project_dir.display()))?;
+        }
+
+        // Collect (cue_type, abs_path) pairs, deduplicating by path.
+        let mut raw: Vec<(CueType, PathBuf)> = Vec::new();
+        for cl in &self.cue_lists {
+            collect_all_media_paths(&cl.cues, &mut raw);
+        }
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        let deduped: Vec<(CueType, PathBuf)> =
+            raw.into_iter().filter(|(_, p)| seen.insert(p.clone())).collect();
+
+        // Per-subfolder used-filename sets for conflict resolution.
+        let mut used: HashMap<&str, HashSet<String>> = [
+            ("audio", HashSet::new()),
+            ("video", HashSet::new()),
+            ("images", HashSet::new()),
+            ("midi", HashSet::new()),
+        ]
+            .into_iter()
+            .collect();
+
+        let mut path_map: HashMap<PathBuf, String> = HashMap::new();
+        let mut files_copied = 0u32;
+        let mut files_skipped = 0u32;
+        let mut files_missing: Vec<String> = Vec::new();
+
+        for (cue_type, abs_path) in &deduped {
+            if !abs_path.exists() {
+                files_missing.push(abs_path.to_string_lossy().into_owned());
+                continue;
+            }
+
+            let subfolder = match cue_type {
+                CueType::Audio => "audio",
+                CueType::Video => "video",
+                CueType::Image => "images",
+                CueType::MidiFile => "midi",
+                _ => continue,
+            };
+
+            let orig_name = abs_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "file".into());
+
+            let dest_dir = project_dir.join(subfolder);
+            let dest_name = unique_filename(&orig_name, &dest_dir, abs_path, used.get_mut(subfolder).unwrap());
+            let dest_path = dest_dir.join(&dest_name);
+            let new_rel = format!("{subfolder}/{dest_name}");
+
+            if abs_path == &dest_path {
+                // Source == destination: file is already at the right place.
+                files_skipped += 1;
+            } else {
+                std::fs::copy(abs_path, &dest_path).with_context(|| {
+                    format!("Failed to copy {} → {}", abs_path.display(), dest_path.display())
+                })?;
+                files_copied += 1;
+            }
+            path_map.insert(abs_path.clone(), new_rel);
+        }
+
+        let new_inkue_path = project_dir.join(format!("{safe_name}.inkue"));
+        let json = self.to_json_collected(&new_inkue_path, &path_map)?;
+        crate::recovery::write_document(&new_inkue_path, json.as_bytes())
+            .with_context(|| format!("Failed to write {}", new_inkue_path.display()))?;
+
+        Ok(CollectReport {
+            workspace_path: new_inkue_path.to_string_lossy().into_owned(),
+            files_copied,
+            files_skipped,
+            files_missing,
+        })
+    }
+
+    /// Like [`Self::to_json`] but applies `path_map` before the standard
+    /// `relativize_paths` step, so collected files get their new relative paths.
+    fn to_json_collected(
+        &self,
+        save_path: &Path,
+        path_map: &HashMap<PathBuf, String>,
+    ) -> Result<String> {
+        let base = save_path.parent();
+
+        let mut cue_lists_json: Vec<serde_json::Value> =
+            self.cue_lists.iter().map(|cl| cl.to_json()).collect();
+
+        for cl in &mut cue_lists_json {
+            if let Some(cues) = cl.get_mut("cues") {
+                remap_paths(cues, path_map);
+                if let Some(base_dir) = base {
+                    relativize_paths(cues, base_dir);
+                }
+            }
+        }
+
+        let doc = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "workspace": self.metadata,
+            "programming_history": self.programming_history,
+            "output_patches": self.output_patches,
+            "audio_maps": self.audio_maps,
+            "default_output_patch": self.default_output_patch_id,
+            "osc_patches": self.osc_patches,
+            "video_outputs": self.video_outputs,
+            "output_mask_images": self.output_mask_images,
+            "input_patches": self.input_patches,
+            "universe_outputs": self.universe_outputs,
+            "fixtures": self.fixtures,
+            "fixture_groups": self.fixture_groups,
+            "preferences": self.preferences,
+            "cue_lists": cue_lists_json,
+            "active_cue_list_id": self.active_cue_list_id,
+        });
+
+        serde_json::to_string_pretty(&doc).context("Failed to serialize collected workspace")
+    }
+
+    /// Load a workspace from a `.inkue` file.
+    pub fn load(path: PathBuf, registry: &CueRegistry) -> Result<Self> {
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read workspace file: {}", path.display()))?;
+
+        let base_dir = path.parent().map(|p| p.to_path_buf());
+        let mut ws = Self::from_json_str(&content, base_dir.as_deref(), registry)?;
+
+        // Derive the name from the filename stem so it always matches the file,
+        // even if the JSON still contains an older name (e.g. "Untitled").
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            ws.metadata.name = stem.to_string();
+        }
+        ws.file_path = Some(path);
+        Ok(ws)
+    }
+
+    /// Instantiate a portable starting point as a new, unsaved show.
+    pub(crate) fn load_template(path: &Path, registry: &CueRegistry) -> Result<Self> {
+        let path = template_path(path)?;
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read template {}", path.display()))?;
+        let mut doc: serde_json::Value = serde_json::from_str(&content).context("Invalid JSON in workspace template")?;
+        anyhow::ensure!(doc["document_kind"].as_str() == Some(TEMPLATE_KIND)
+            && doc["cue_lists"].is_array(), "This file is not an Inkue workspace template");
+        clear_template_transport(&mut doc);
+        let mut workspace = Self::from_workspace_document(doc, path.parent(), registry)?;
+        workspace.metadata = WorkspaceMetadata::new("Untitled");
+        for list in &mut workspace.cue_lists {
+            if !list.independent_pads() {
+                list.playhead_cue_id = list.cues.iter().find(|cue| !cue.is_disabled()).map(|cue| cue.id());
+            }
+        }
+        workspace.mark_modified();
+        Ok(workspace)
+    }
+
+    /// Parse a workspace document from a JSON string.
+    ///
+    /// `base_dir`, when `Some`, is the directory the document's media paths are
+    /// relative to (used to absolutize them) — pass the `.inkue` file's parent
+    /// for a normal load.  Pass `None` when the document already stores absolute
+    /// paths (the crash-recovery snapshot).  The returned workspace has
+    /// `file_path: None` and `is_modified: false`; callers set those.
+    pub fn from_json_str(
+        content: &str,
+        base_dir: Option<&Path>,
+        registry: &CueRegistry,
+    ) -> Result<Self> {
+        let doc: serde_json::Value =
+            serde_json::from_str(content).context("Invalid JSON in workspace file")?;
+        anyhow::ensure!(
+            doc["document_kind"].as_str() != Some(TEMPLATE_KIND),
+            "Choose File → New from Template to start a show from this file"
+        );
+        Self::from_workspace_document(doc, base_dir, registry)
+    }
+
+    fn from_workspace_document(
+        doc: serde_json::Value, base_dir: Option<&Path>, registry: &CueRegistry,
+    ) -> Result<Self> {
+        let file_schema: u32 = doc
+            .get("schema_version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        if file_schema > SCHEMA_VERSION {
+            anyhow::bail!(
+                "This workspace was created with a newer version of Inkue \
+                 (schema v{file_schema}, this app supports up to v{SCHEMA_VERSION}). \
+                 Please update Inkue to open it."
+            );
+        }
+
+        let metadata: WorkspaceMetadata = serde_json::from_value(
+            doc.get("workspace")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Missing 'workspace' key"))?,
+        )?;
+
+        let output_patches: Vec<OutputPatch> = match doc.get("output_patches") {
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(patches) => serde_json::from_value(patches.clone())
+                .context("Invalid workspace audio output patches")?,
+        };
+
+        let audio_maps: Vec<crate::cue::point_mix::AudioMap> = match doc.get("audio_maps") {
+            Some(value) => serde_json::from_value(value.clone()).context("Invalid workspace audio maps")?,
+            None => Vec::new(),
+        };
+        let mut map_ids = HashSet::new();
+        for map in &audio_maps {
+            map.validate().map_err(|error| anyhow::anyhow!("Invalid audio map '{}': {error}", map.name))?;
+            if !map_ids.insert(map.id) {
+                anyhow::bail!("Duplicate audio map ID in workspace.");
+            }
+        }
+
+        let output_mask_images = match doc.get("output_mask_images") {
+            Some(value) => serde_json::from_value(value.clone()).context("Invalid projector image mask")?,
+            None => HashMap::new(),
+        };
+        // Validate declared layouts before the legacy fallbacks below. Replacing
+        // the preferences or outputs also removes the projector's calibration.
+        if let Some(regions) = doc.pointer("/preferences/display/output_transform/regions") {
+            OutputRegions::deserialize(regions)
+                .map_err(|err| anyhow::anyhow!("Invalid stage regions for the main output: {err}"))?;
+        }
+        if let Some(outputs) = doc.get("video_outputs").and_then(serde_json::Value::as_array) {
+            for (index, output) in outputs.iter().enumerate() {
+                if let Some(regions) = output.pointer("/transform/regions") {
+                    let name = output.get("name").and_then(serde_json::Value::as_str);
+                    OutputRegions::deserialize(regions).map_err(|err| {
+                        let number = index + 1;
+                        let label = match name {
+                            Some(name) => format!("#{number} ({name})"),
+                            None => format!("#{number}"),
+                        };
+                        anyhow::anyhow!("Invalid stage regions for extra output {label}: {err}")
+                    })?;
+                }
+            }
+        }
+        let video_outputs: Vec<OutputConfig> = doc
+            .get("video_outputs")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let osc_patches: Vec<OscPatch> = doc
+            .get("osc_patches")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let input_patches: Vec<InputPatch> = doc
+            .get("input_patches")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let universe_outputs: Vec<UniverseOutput> = doc
+            .get("universe_outputs")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let fixtures: Vec<PatchedFixture> = doc
+            .get("fixtures")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let fixture_groups: Vec<FixtureGroup> = doc
+            .get("fixture_groups")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let default_patch: Option<Uuid> = doc
+            .get("default_output_patch")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok());
+
+        let preferences: AppPreferences = doc
+            .get("preferences")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let cue_lists_val = doc
+            .get("cue_lists")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut cue_lists = Vec::new();
+        let mut seen_cue_ids = HashSet::new();
+        for mut cl_val in cue_lists_val {
+            if let Some(cues) = cl_val.get_mut("cues") {
+                let replaced = dedupe_cue_ids(cues, &mut seen_cue_ids);
+                if replaced > 0 {
+                    log::warn!("[workspace] {replaced} duplicate cue id(s) repaired on load");
+                }
+                if let Some(base) = base_dir {
+                    absolutize_paths(cues, base);
+                }
+            }
+            cue_lists.push(CueList::from_json(cl_val, registry)?);
+        }
+
+        if cue_lists.is_empty() {
+            cue_lists.push(CueList::new("Cue List 1"));
+        }
+
+        // Resolve the active cue list: try the saved ID, fall back to first list.
+        let saved_active_id: Option<Uuid> = doc
+            .get("active_cue_list_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok());
+        let active_cue_list_id = saved_active_id
+            .filter(|id| cue_lists.iter().any(|cl| cl.id == *id))
+            .unwrap_or_else(|| cue_lists[0].id);
+
+        // How many cues did the file intend to contain vs. how many actually
+        // loaded?  The difference was dropped by the registry (unknown type or
+        // corrupt data) — record it so the caller can warn the operator.
+        let intended: usize = doc
+            .get("cue_lists")
+            .and_then(|v| v.as_array())
+            .map(|lists| lists.iter().map(|cl| count_intended_cues(cl.get("cues"))).sum())
+            .unwrap_or(0);
+        let loaded: usize = cue_lists.iter().map(|cl| count_loaded_cues(&cl.cues)).sum();
+        let cues_skipped_on_load = intended.saturating_sub(loaded);
+
+        Ok(Self {
+            metadata,
+            cue_lists,
+            active_cue_list_id,
+            output_patches,
+            audio_maps,
+            default_output_patch_id: default_patch,
+            osc_patches,
+            video_outputs,
+            output_mask_images,
+            input_patches,
+            universe_outputs,
+            fixtures,
+            fixture_groups,
+            preferences,
+            file_path: None,
+            is_modified: false,
+            instance_id: Uuid::new_v4(),
+            revision: 0,
+            programming_history: doc["programming_history"].as_array().cloned().unwrap_or_default(),
+            cue_starts: Default::default(),
+            cues_skipped_on_load,
+        })
+    }
+}

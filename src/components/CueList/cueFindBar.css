@@ -1,0 +1,82 @@
+.cue-find {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--wc-border);
+  background: var(--wc-bg-surface);
+  color: var(--wc-text);
+  font-size: 12px;
+}
+
+.cue-find-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 8px;
+}
+
+.cue-find-controls input {
+  flex: 1 1 11rem;
+  min-width: 6rem;
+  border: 1px solid var(--wc-border-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  padding: 5px 7px;
+  font: inherit;
+}
+
+.cue-find-count {
+  color: var(--wc-text-muted);
+}
+
+.cue-find-controls button {
+  padding: 4px 7px;
+  border: 1px solid var(--wc-border);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.cue-find button:not(:disabled):hover,
+.cue-find-results button[aria-current="true"] {
+  background: var(--wc-bg-hover);
+}
+
+.cue-find button:disabled {
+  color: var(--wc-text-faint);
+}
+
+.cue-find input:focus-visible,
+.cue-find button:focus-visible {
+  outline: 1px solid var(--wc-accent);
+  outline-offset: -1px;
+}
+
+.cue-find-results {
+  list-style: none;
+  max-height: 7rem;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  border-bottom: 1px solid var(--wc-border);
+}
+
+.cue-find-results button {
+  display: grid;
+  grid-template-columns: 3px 5ch minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 3px 8px;
+  text-align: left;
+  font: inherit;
+}
+
+.cue-find-accent { height: 1em; border-radius: 2px; }
+.cue-find-number { font-variant-numeric: tabular-nums; }
+.cue-find-kind { color: var(--wc-text-muted); }
+.cue-find-name, .cue-find-number { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

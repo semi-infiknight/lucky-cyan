@@ -1,0 +1,219 @@
+name: Release
+
+# Triggered by pushing a version tag: git tag v1.0.0 && git push --tags
+# Produces a draft GitHub release with signed installers for all 3 platforms.
+#
+# ── One-time setup required ──────────────────────────────────────────────────
+#
+# 1. Windows libmpv binary (gitignored, ~113 MB):
+#    Fetched automatically by the Windows job from the upstream shinchiro build on
+#    SourceForge (pinned filename + SHA-256 below — SourceForge keeps old builds for
+#    years, so the pin is stable). To update libmpv, change LIBMPV_URL / LIBMPV_SHA256
+#    in the "Download libmpv (Windows)" step. No manual upload needed.
+#
+# 2. macOS signing + notarization (Apple Developer Program required):
+#    Set these repository secrets (Settings → Secrets → Actions):
+#      APPLE_CERTIFICATE          base64-encoded .p12 Developer ID Application cert
+#      APPLE_CERTIFICATE_PASSWORD .p12 export password
+#      APPLE_SIGNING_IDENTITY     "Developer ID Application: Your Name (TEAMID)"
+#      APPLE_ID                   your Apple ID email
+#      APPLE_PASSWORD             app-specific password (appleid.apple.com)
+#      APPLE_TEAM_ID              10-character Apple Team ID
+#    Without these secrets the build still succeeds but the .app won't be notarized
+#    and Gatekeeper will block it.
+#
+# 3. Tauri updater signing (REQUIRED since 1.1.0 — the in-app auto-updater is
+#    enabled and `bundle.createUpdaterArtifacts` is on, so builds FAIL without
+#    the private key):
+#    The key pair already exists: the public key is in tauri.conf.json
+#    (plugins.updater.pubkey); the private key lives in ~/.tauri/inkue.key on
+#    the maintainer's machine (NEVER commit it).
+#    Set these repository secrets (Settings → Secrets → Actions):
+#      TAURI_SIGNING_PRIVATE_KEY          contents of ~/.tauri/inkue.key
+#      TAURI_SIGNING_PRIVATE_KEY_PASSWORD key password (this key has none — set "")
+#    tauri-action then signs the update bundles and generates latest.json in the
+#    release automatically. The app polls
+#    https://github.com/FonograF/Inkue/releases/latest/download/latest.json —
+#    updates go live the moment the draft release is published.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+  workflow_dispatch:   # allow manual trigger for testing (always creates a draft)
+
+permissions:
+  contents: write   # required to create GitHub releases
+
+jobs:
+  # libmpv from Homebrew is single-architecture. The universal app needs both
+  # halves, so the Intel one is collected on an Intel runner and fused with the
+  # Apple Silicon one in the macOS build below (scripts/merge_universal_macos_libs.sh).
+  libmpv-macos-x86_64:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bundle libmpv + Homebrew deps (x86_64)
+        run: |
+          brew install mpv
+          INKUE_MPV_DEST="$PWD/libmpv-x86_64" bash scripts/bundle_macos_libs.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libmpv-macos-x86_64
+          path: libmpv-x86_64
+          if-no-files-found: error
+
+  build:
+    needs: libmpv-macos-x86_64
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            rust-targets: ''
+            # ASIO is Windows-only (cpal/asio). The Steinberg SDK is vendored in
+            # the repo (vendor/asiosdk) and CPAL_ASIO_DIR is set in
+            # src-tauri/.cargo/config.toml, so enabling the feature here is all
+            # that's needed for public builds to expose the ASIO backend.
+            tauri-args: '--features asio-support'
+
+          - platform: macos-latest
+            target: universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            tauri-args: ''
+
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            rust-targets: ''
+            tauri-args: ''
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Node + pnpm ──────────────────────────────────────────────────────────
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      # ── Rust ─────────────────────────────────────────────────────────────────
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # ── Frontend deps ────────────────────────────────────────────────────────
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      # ── Platform-specific: provide libmpv ────────────────────────────────────
+
+      - name: Download libmpv (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          # Pinned shinchiro libmpv build (x86_64 baseline — runs on all x86-64 CPUs,
+          # unlike the AVX2-only "-v3" variant). This is byte-identical to the libmpv
+          # the app is developed/tested against. SourceForge retains old builds, so the
+          # pin stays resolvable. To bump: pick a new file from
+          # https://sourceforge.net/projects/mpv-player-windows/files/libmpv/ and update
+          # both values below (its SHA-256 is the hash of the .7z archive).
+          $LIBMPV_URL    = 'https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-20260412-git-062f4bf.7z'
+          $LIBMPV_SHA256 = 'f66f04075da0cbccd106513eab67b78b72ac00780423a9fe3c6e34ae93317806'
+
+          New-Item -ItemType Directory -Force src-tauri/vendor/mpv | Out-Null
+          Write-Host "Downloading libmpv from $LIBMPV_URL"
+          curl.exe -fSL -o mpv-dev.7z $LIBMPV_URL
+
+          $actual = (Get-FileHash mpv-dev.7z -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $LIBMPV_SHA256) {
+            Write-Error "libmpv checksum mismatch: expected $LIBMPV_SHA256, got $actual"
+            exit 1
+          }
+
+          7z e -y mpv-dev.7z libmpv-2.dll "-osrc-tauri/vendor/mpv"
+          if (-not (Test-Path src-tauri/vendor/mpv/libmpv-2.dll)) {
+            Write-Error "libmpv-2.dll was not extracted"
+            exit 1
+          }
+          Write-Host "libmpv-2.dll ready"
+
+      - name: Bundle libmpv + Homebrew deps (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          brew install mpv
+          bash scripts/bundle_macos_libs.sh
+
+      - name: Make libmpv universal (macOS)
+        if: matrix.platform == 'macos-latest'
+        uses: actions/download-artifact@v4
+        with:
+          name: libmpv-macos-x86_64
+          path: libmpv-x86_64
+
+      - name: Merge arm64 + x86_64 libmpv (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: bash scripts/merge_universal_macos_libs.sh src-tauri/vendor/mpv/macos libmpv-x86_64
+
+      - name: Install system dependencies (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential libssl-dev \
+            libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev \
+            libasound2-dev libmpv-dev \
+            libpipewire-0.3-0 libclang-dev
+          # cpal's native PipeWire host needs 1.x PipeWire headers and 22.04
+          # ships 0.3.48: take 1.0.5's headers, link 22.04's own library so a
+          # symbol 0.3.48 lacks fails the build (scripts/pipewire_headers.sh).
+          bash scripts/pipewire_headers.sh "$RUNNER_TEMP/pipewire"
+          echo "PKG_CONFIG_PATH=$RUNNER_TEMP/pipewire/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      # ── ASIO: libclang for bindgen (Windows) ─────────────────────────────────
+      # asio-sys generates bindings from the vendored SDK headers via bindgen,
+      # which needs libclang. LLVM is preinstalled on the windows runner image;
+      # point bindgen at it (and install as a fallback if the image ever drops
+      # it). The SDK download step is unnecessary — it's committed in the repo.
+      - name: Set up libclang for ASIO bindgen (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'C:\Program Files\LLVM\bin\libclang.dll')) {
+            choco install llvm --no-progress -y
+          }
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      # ── Build + publish ───────────────────────────────────────────────────────
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater artifact signing (see header comment #3). Required — the
+          # build fails if TAURI_SIGNING_PRIVATE_KEY is missing because
+          # plugins.updater.pubkey + createUpdaterArtifacts are configured.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # OS code signing is intentionally OFF until certificates are configured.
+          # Passing empty APPLE_* secrets makes tauri attempt `security import` and
+          # fail the macOS build, so those signing env vars are omitted on purpose.
+          # To enable signing later: set the repository secrets listed in the header
+          # comment, then restore the APPLE_* env vars here.
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Inkue ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          args: --target ${{ matrix.target }} ${{ matrix.tauri-args }}

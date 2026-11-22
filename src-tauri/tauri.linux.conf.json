@@ -1,0 +1,12 @@
+{
+  "bundle": {
+    "fileAssociations": [
+      { "ext": ["inkue"], "name": "Inkue workspace", "mimeType": "application/x-inkue-workspace" }
+    ],
+    "linux": {
+      "deb": {
+        "files": { "/usr/share/mime/packages/inkue-workspace.xml": "resources/linux/inkue-workspace.xml" }
+      }
+    }
+  }
+}

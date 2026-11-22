@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "workspace": {
+    "name": "Operator rehearsal",
+    "created_at": "2026-11-21T00:00:00Z",
+    "modified_at": "2026-11-21T00:00:00Z"
+  },
+  "active_cue_list_id": "a63fa046-e401-57da-9e3a-261608b4fa88",
+  "osc_patches": [
+    {
+      "id": "44a16f21-76a8-559d-8e52-083ee075d00d",
+      "name": "Local rehearsal listener",
+      "ip": "127.0.0.1",
+      "port": 15391
+    }
+  ],
+  "cue_lists": [
+    {
+      "id": "a63fa046-e401-57da-9e3a-261608b4fa88",
+      "name": "Rehearsal",
+      "mode": "sequential",
+      "playhead_cue_id": "82e89932-1f64-54e2-a7a5-dd112b1ddfe2",
+      "cues": [
+        {
+          "id": "82e89932-1f64-54e2-a7a5-dd112b1ddfe2",
+          "number": "1",
+          "type": "audio",
+          "name": "Standby tone",
+          "notes": "GO starts the tone. Wait until you hear it, then take cue 2.",
+          "file_path": "standby.wav",
+          "loop_count": 20,
+          "volume_db": -6
+        },
+        {
+          "id": "4293b21c-78fc-55d6-bf77-f3d4396ff87d",
+          "number": "2",
+          "type": "fade",
+          "name": "Fade out",
+          "notes": "Fade cue 1 over two seconds. Cue 3 follows automatically.",
+          "target_cue_ids": [
+            "82e89932-1f64-54e2-a7a5-dd112b1ddfe2"
+          ],
+          "target_cue_numbers": [
+            "1"
+          ],
+          "target_volume_db": -60,
+          "fade_duration_ms": 2000,
+          "fade_volume": true,
+          "stop_at_end": true,
+          "continue_mode": "auto_follow"
+        },
+        {
+          "id": "bf6a82b7-fb26-5e4b-af60-238350e37064",
+          "number": "3",
+          "type": "osc",
+          "name": "Rehearsal complete",
+          "notes": "Sends one marker to the local rehearsal listener.",
+          "messages": [
+            {
+              "patch_id": "44a16f21-76a8-559d-8e52-083ee075d00d",
+              "address": "/rehearsal/complete",
+              "args": []
+            }
+          ]
+        },
+        {
+          "id": "2ffa0621-0451-5e51-97e6-58b7d193e84d",
+          "number": "4",
+          "type": "memo",
+          "name": "Hold",
+          "notes": "End of sequence. Switch to the Sound checks cart to audition a one-shot.",
+          "memo_text": "Hold for the next call."
+        }
+      ]
+    },
+    {
+      "id": "34672693-10b0-5b2d-abf3-de19e37bb194",
+      "name": "Sound checks",
+      "mode": "cart",
+      "chain_cart_cues": false,
+      "playhead_cue_id": null,
+      "cues": [
+        {
+          "id": "cbd20eb0-ff8c-53e6-a61c-468fe5360660",
+          "number": "S1",
+          "type": "audio",
+          "name": "Check tone",
+          "notes": "One two-second tone on the default output.",
+          "file_path": "standby.wav",
+          "volume_db": -6
+        }
+      ]
+    }
+  ]
+}

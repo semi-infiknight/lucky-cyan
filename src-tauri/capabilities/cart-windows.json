@@ -1,0 +1,7 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema/capability.json",
+  "identifier": "cart-windows",
+  "description": "Event updates and native close for operator cart windows",
+  "windows": ["cart-*"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "core:window:allow-close", "core:window:allow-set-title"]
+}

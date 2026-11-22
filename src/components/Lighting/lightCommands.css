@@ -1,0 +1,17 @@
+.light-commands { border-block: 1px solid var(--wc-border); margin: 12px 0; padding: 9px 0; color: var(--wc-text); font-size: 12px; }
+.light-commands summary { cursor: pointer; font-weight: 600; }
+.light-commands details, .light-commands > label, .light-command-settings, .light-command-review { margin-top: 9px; }
+.light-commands label { display: flex; flex-direction: column; gap: 4px; color: var(--wc-text-secondary); }
+.light-commands textarea, .light-commands select, .light-commands button {
+  border: 1px solid var(--wc-border-strong); border-radius: 4px; background: var(--wc-bg-surface); color: var(--wc-text); padding: 4px 7px; font: inherit;
+}
+.light-commands button { cursor: pointer; }
+.light-commands textarea, .light-commands pre { font-family: ui-monospace, monospace; }
+.light-commands textarea { resize: vertical; }
+.light-commands pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 15em; overflow: auto; }
+.light-commands p { line-height: 1.4; color: var(--wc-text-secondary); margin: 7px 0; }
+.light-command-settings { display: flex; flex-wrap: wrap; gap: 8px; }
+.light-commands ul { padding-left: 16px; }
+.light-command-table { max-height: 160px; overflow: auto; margin-bottom: 8px; }
+.light-command-table table { width: 100%; border-collapse: collapse; text-align: left; }
+.light-command-table td, .light-command-table th { padding: 3px; border-bottom: 1px solid var(--wc-border); }

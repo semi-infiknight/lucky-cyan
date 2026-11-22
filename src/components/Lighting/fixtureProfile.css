@@ -1,0 +1,11 @@
+.fixture-profile { width: 100%; color: var(--wc-text); }
+.fixture-profile fieldset { min-width: 0; border: 1px solid var(--wc-border); border-radius: 4px; padding: 8px; }
+.fixture-profile legend { font-weight: 600; }
+.fixture-profile-fields { display: grid; grid-template-columns: repeat(auto-fit,minmax(105px,1fr)); gap: 6px; }
+.fixture-profile-fields label { display: grid; gap: 2px; }
+.fixture-profile input, .fixture-profile select, .fixture-profile button { padding: 3px 5px; color: var(--wc-text); background: var(--wc-bg-app); border: 1px solid var(--wc-border-strong); border-radius: 4px; }
+.fixture-profile input { width: 100%; min-width: 0; box-sizing: border-box; }
+.fixture-profile table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+.fixture-profile th, .fixture-profile td { text-align: left; padding: 2px; border-bottom: 1px solid var(--wc-border); }
+.fixture-profile p { line-height: 1.4; color: var(--wc-text-muted); }
+.fixture-profile-actions { display: flex; align-items: center; gap: 6px; }

@@ -1,0 +1,638 @@
+//! [`DeviceManager`] enumerates audio output devices; [`OutputPatch`] is the
+//! named device+channels mapping (QLab's Output Patch concept) stored in the
+//! workspace and resolved by cues at GO time.
+
+use std::sync::mpsc;
+use std::time::Duration;
+
+use cpal::traits::{DeviceTrait, HostTrait};
+
+use super::audio_host::{self, HostKind};
+use super::cue_effects::{validate_effects, CueEffect};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// Serialisable summary of an audio output device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    /// Stable identifier derived from the device name.
+    pub id: String,
+    /// Human-readable device name returned by the OS.
+    pub name: String,
+    /// Number of output channels the device supports.
+    pub channels: u16,
+    /// Supported sample rate (first offered by the device).
+    pub sample_rate: u32,
+}
+
+/// Unique identifier for an Output Patch.
+pub type OutputPatchId = Uuid;
+
+/// A named mapping from a label to a specific audio device + channel range.
+///
+/// Every [`AudioCue`](crate::cue::audio_cue::AudioCue) references an
+/// `OutputPatch` rather than a device directly, so re-patching a show
+/// requires changing only one place.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputPatch {
+    pub id: OutputPatchId,
+    /// Display label shown in the UI (e.g. "Main PA", "Monitors").
+    pub name: String,
+    /// The OS device identifier this patch routes to.
+    pub device_id: String,
+    /// Zero-based channel indices on the target device (e.g. [0, 1] for stereo L/R).
+    pub channels: Vec<u16>,
+    /// Operator labels, indexed by logical patch output, independent of hardware routing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channel_names: Vec<String>,
+    /// Mixer fader for this patch, in dB (0 = unity).  Applied as a gain
+    /// multiplier to every voice routed through the patch.
+    #[serde(default)]
+    pub gain_db: f32,
+    /// File Audio starts on this exact device, or waits for operator action.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub require_named_device: bool,
+    /// Ordered effects applied to the sum of File Audio on this patch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) audio_effects: Vec<CueEffect>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+/// Admission constraints captured by an armed File Audio voice.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedOutput {
+    patch_id: OutputPatchId,
+    pub device_id: String,
+    channels: Vec<u16>,
+    pub(crate) audio_effects: Vec<CueEffect>,
+}
+
+impl NamedOutput {
+    pub(crate) fn matches_patch(&self, patch: &OutputPatch) -> bool {
+        self.patch_id == patch.id && self.device_id == patch.device_id && self.channels == patch.channels
+    }
+
+    pub(super) fn required_channel_count(&self) -> u32 {
+        self.channels.iter().copied().max().map_or(0, |channel| u32::from(channel) + 1)
+    }
+
+    pub(crate) fn has_audio_effects(&self) -> bool {
+        self.audio_effects.iter().any(|effect| effect.processes_audio())
+    }
+}
+
+impl OutputPatch {
+    /// Create a new patch with a fresh UUID.
+    pub fn new(name: impl Into<String>, device_id: impl Into<String>, channels: Vec<u16>) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            device_id: device_id.into(),
+            channels,
+            channel_names: Vec::new(),
+            gain_db: 0.0,
+            require_named_device: false,
+            audio_effects: Vec::new(),
+        }
+    }
+
+    pub fn named_output(&self) -> Result<Option<NamedOutput>, String> {
+        validate_effects(&self.audio_effects).map_err(|error| format!("Output Patch “{}”. {error}", self.name))?;
+        if !self.require_named_device {
+            if self.has_audio_effects() {
+                return Err(format!("Enable Require named device for Audio GO on Output Patch “{}” before using its effects.", self.name));
+            }
+            return Ok(None);
+        }
+        if !audio_host::is_named_output_id(&self.device_id) {
+            let action = if cfg!(target_os = "linux") {
+                "Choose a direct ALSA hardware output (hw:) in Audio Preferences."
+            } else {
+                "Choose a named hardware output in Audio Preferences."
+            };
+            return Err(format!("Output Patch “{}” cannot require its current device. {action}", self.name));
+        }
+        if self.channels.is_empty() {
+            return Err(format!("Assign at least one output channel to Output Patch “{}”.", self.name));
+        }
+        Ok(Some(NamedOutput {
+            patch_id: self.id,
+            device_id: self.device_id.clone(),
+            channels: self.channels.clone(),
+            audio_effects: self.audio_effects.clone(),
+        }))
+    }
+
+    pub(crate) fn has_audio_effects(&self) -> bool {
+        self.audio_effects.iter().any(|effect| effect.processes_audio())
+    }
+
+    /// Returns whether live audio routing needs to be rebuilt.
+    pub fn update_definition(&mut self, name: String, device: String, channels: Vec<u16>,
+                             names: Option<Vec<String>>) -> bool {
+        let reroute = self.device_id != device || self.channels != channels;
+        self.name = name;
+        self.device_id = device;
+        self.channels = channels;
+        if let Some(names) = names {
+            self.channel_names = names;
+        }
+        reroute
+    }
+}
+
+/// Manages device enumeration.
+///
+/// The Output Patch table itself lives in the workspace
+/// (`Workspace::output_patches`) — persisted with the show and read by
+/// `CueContext::resolve_patch` at GO time.
+pub struct DeviceManager {
+    /// Cached list of available devices; refreshed on demand.
+    cached_devices: Vec<DeviceInfo>,
+}
+
+impl DeviceManager {
+    /// Create a new manager with an **empty** cache.
+    ///
+    /// Enumeration is deliberately not run here.  On Windows the WASAPI device
+    /// query costs ~100 ms per device and can hang indefinitely on a misbehaving
+    /// driver (cpal #867); since `new()` is called on the main thread during app
+    /// setup, enumerating here froze startup (audio dead, hotkeys unresponsive).
+    /// The cache is warmed by a bounded background refresh spawned from
+    /// [`AudioEngine::new`](crate::engine::audio_engine::AudioEngine::new) and
+    /// re-filled on demand through [`replace_cache`](Self::replace_cache).
+    pub fn new() -> Self {
+        Self {
+            cached_devices: Vec::new(),
+        }
+    }
+
+    /// Overwrite the cached device list with a freshly enumerated one.
+    ///
+    /// Callers enumerate **off** this struct's lock — via
+    /// [`enumerate_output_devices`] wrapped in [`run_bounded`] — and only lock to
+    /// store the result, so the `DeviceManager` mutex is never held across a slow
+    /// (or hung) WASAPI call.
+    pub fn replace_cache(&mut self, devices: Vec<DeviceInfo>) {
+        self.cached_devices = devices;
+    }
+
+    /// Return the cached device list.
+    pub fn devices(&self) -> &[DeviceInfo] {
+        &self.cached_devices
+    }
+
+    /// Return the default output device info, if one exists.
+    pub fn default_device(&self) -> Option<&DeviceInfo> {
+        // Both Linux hosts name the default `default` (ALSA's PCM, PipeWire's
+        // synthetic default via `inkue_device_id`): no need to connect to
+        // PipeWire on the GO path just to learn that.
+        #[cfg(target_os = "linux")]
+        let default_id = "default".to_string();
+        #[cfg(not(target_os = "linux"))]
+        let default_id = {
+            let (host, kind) = audio_host::system_host();
+            host.default_output_device()
+                .and_then(|d| d.id().ok().map(|i| audio_host::inkue_device_id(kind, i.id())))?
+        };
+        self.cached_devices.iter().find(|d| d.id == default_id)
+    }
+
+}
+
+impl Default for DeviceManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Upper bound on one output-device enumeration before callers fall back to
+/// whatever they already have.  Generous for a healthy multi-device Windows box
+/// (~100 ms/device) yet short enough that a hung driver never strands the UI.
+pub const ENUM_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Build a [`DeviceInfo`] for a cpal device of host `kind` (queries its
+/// default config in direction `input`).
+fn device_info(device: &cpal::Device, kind: HostKind, input: bool) -> DeviceInfo {
+    let id = device
+        .id()
+        .ok()
+        .map(|i| audio_host::inkue_device_id(kind, i.id()))
+        .unwrap_or_else(|| device.to_string());
+    // cpal names its synthetic PipeWire defaults "output_default" etc.
+    let name = if kind == HostKind::PipeWire && id == "default" {
+        "System Default".to_string()
+    } else {
+        device.to_string()
+    };
+    let config = if input { device.default_input_config() } else { device.default_output_config() };
+    let (channels, sample_rate) = config
+        .map(|c| (c.channels(), c.sample_rate()))
+        .unwrap_or((2, if input { 48_000 } else { 44_100 }));
+    DeviceInfo {
+        id,
+        name,
+        channels,
+        sample_rate,
+    }
+}
+
+/// Enumerate the system host's devices of one direction, with Inkue ids
+/// (`pw:<node>` on the native PipeWire host — see [`audio_host`]).
+///
+/// **Slow on Windows** — see [`enumerate_output_devices`].
+pub fn enumerate_devices(input: bool) -> Vec<DeviceInfo> {
+    let (host, kind) = audio_host::system_host();
+    let found = if input {
+        host.input_devices().map(|it| it.collect::<Vec<_>>())
+    } else {
+        host.output_devices().map(|it| it.collect::<Vec<_>>())
+    };
+    let mut devices: Vec<DeviceInfo> = found
+        .unwrap_or_default()
+        .iter()
+        .filter(|d| {
+            kind != HostKind::PipeWire
+                || match (d.id(), d.description()) {
+                    (Ok(id), Ok(desc)) => audio_host::lists_pipewire_device(id.id(), desc.direction(), input),
+                    _ => false,
+                }
+        })
+        .map(|d| device_info(d, kind, input))
+        .collect();
+    // Fall back to just the default device if full enumeration yielded nothing.
+    if devices.is_empty() {
+        let default = if input { host.default_input_device() } else { host.default_output_device() };
+        devices.extend(default.map(|d| device_info(&d, kind, input)));
+    }
+    devices
+}
+
+/// Enumerate output devices directly from cpal.
+///
+/// **Slow on Windows** — WASAPI queries every device's mix format and can hang
+/// on a bad driver (cpal #867).  Never call this on the main thread: wrap it in
+/// [`run_bounded`], and inside a Tauri command run it via `spawn_blocking`.
+pub fn enumerate_output_devices() -> Vec<DeviceInfo> {
+    enumerate_devices(false)
+}
+
+/// Run `job` on a scratch thread, waiting at most `timeout` for its result.
+///
+/// Returns `None` on timeout — the scratch thread is then detached and its
+/// eventual value dropped.  This is the guard that stops a hung device
+/// enumeration from blocking the caller (and, for a main-thread caller, the
+/// whole UI).
+pub fn run_bounded<T, F>(timeout: Duration, job: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("inkue-device-enum".to_string())
+        .spawn(move || {
+            let _ = tx.send(job());
+        })
+        .ok()?;
+    rx.recv_timeout(timeout).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Linux: PipeWire device enumeration (pw-dump) + node helpers
+// ---------------------------------------------------------------------------
+
+/// On non-Linux, noop passthrough kept for call-site compatibility.
+#[cfg(not(target_os = "linux"))]
+pub fn humanize_linux_devices(devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
+    devices
+}
+
+#[cfg(target_os = "linux")]
+fn pipewire_objects() -> Option<Vec<serde_json::Value>> {
+    let out = std::process::Command::new("pw-dump").output().ok()?;
+    if !out.status.success() { return None; }
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+/// Check the target and the session manager responsible for enforcing the
+/// named-target/no-fallback policy before any audition samples are written.
+pub fn check_audition_output(device: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let graph = pipewire_objects().ok_or("Cannot inspect the local PipeWire graph.")?;
+        let policy_available = graph.iter().any(|object| {
+            let props = &object["info"]["props"];
+            object["type"] == "PipeWire:Interface:Client" && props["application.name"] == "WirePlumber"
+        });
+        if !policy_available {
+            return Err("Start WirePlumber to use dedicated headphone audition.".into());
+        }
+        let target = device.strip_prefix("pw:").ok_or("Choose a named PipeWire headphone output.")?;
+        if graph.iter().any(|object| {
+            let props = &object["info"]["props"];
+            object["type"] == "PipeWire:Interface:Node"
+                && props["media.class"] == "Audio/Sink" && props["node.name"] == target
+        }) {
+            return Ok(());
+        }
+        Err("The selected headphone output is unavailable. Reconnect it and refresh outputs.".into())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = device;
+        Err("Dedicated clip audition currently requires Linux PipeWire.".into())
+    }
+}
+
+/// Enumerate audio devices via PipeWire on Linux.
+/// Returns (input_devices, output_devices).  Falls back to an empty vec if
+/// `pw-dump` is unavailable — callers should then use cpal enumeration.
+#[cfg(target_os = "linux")]
+pub fn query_pipewire_devices() -> (Vec<DeviceInfo>, Vec<DeviceInfo>) {
+    let Some(arr) = pipewire_objects() else { return (Vec::new(), Vec::new()) };
+
+    let mut inputs  = Vec::new();
+    let mut outputs = Vec::new();
+
+    for node in arr {
+        let node_type = node.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+        if !node_type.contains("Node") { continue; }
+        let props = match node.get("info").and_then(|i| i.get("props")) {
+            Some(p) => p,
+            None    => continue,
+        };
+        let cls = props.get("media.class").and_then(|v| v.as_str()).unwrap_or_default();
+        if cls != "Audio/Source" && cls != "Audio/Sink" { continue; }
+
+        let node_name = props.get("node.name").and_then(|v| v.as_str()).unwrap_or_default();
+        if node_name.is_empty() { continue; }
+        let nick = props.get("node.nick").and_then(|v| v.as_str()).unwrap_or_default();
+        let desc = props.get("node.description").and_then(|v| v.as_str()).unwrap_or_default();
+        // Prefer nick when the description is just the nick repeated with
+        // PipeWire profile noise (e.g. "UMC404HD 192k Direct UMC404HD 192k").
+        let description = if !nick.is_empty() && (desc.is_empty() || desc.starts_with(nick)) {
+            nick
+        } else if !desc.is_empty() {
+            desc
+        } else {
+            node_name
+        };
+        let channels: u16 = props
+            .get("audio.channels").and_then(|v| v.as_u64())
+            .unwrap_or(2) as u16;
+
+        let info = DeviceInfo {
+            id: format!("pw:{node_name}"),
+            name: description.to_string(),
+            channels,
+            sample_rate: 48_000,
+        };
+        if cls == "Audio/Source" {
+            inputs.push(info);
+        } else {
+            outputs.push(info);
+        }
+    }
+    (inputs, outputs)
+}
+
+/// Return a device list for Linux using PipeWire enumeration.
+/// `is_input = true` → Audio/Source nodes; `false` → Audio/Sink nodes.
+/// Falls back to `fallback` if PipeWire is unavailable.
+#[cfg(target_os = "linux")]
+pub fn linux_devices(is_input: bool, fallback: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
+    let requested = std::env::var(audio_host::HOST_ENV).ok();
+    if audio_host::choose_linux_host(true, requested.as_deref()) == HostKind::Alsa {
+        return fallback;
+    }
+    let (inputs, outputs) = query_pipewire_devices();
+    let mut nodes = if is_input { inputs } else { outputs };
+    if nodes.is_empty() {
+        return fallback;
+    }
+    // Prepend "System Default" so the user can always choose the OS default.
+    nodes.insert(0, DeviceInfo {
+        id:          "default".to_string(),
+        name:        "System Default".to_string(),
+        channels:    2,
+        sample_rate: 48_000,
+    });
+    nodes
+}
+
+/// Channel count of the PipeWire sink `node_name` (its `audio.channels`), or
+/// `None` when PipeWire cannot be queried in time.
+///
+/// The ALSA stream to a `pw:` node must be opened this wide: the `pipewire`
+/// PCM accepts any width, so cpal's stereo-first default would silently cut a
+/// 4-out interface down to outputs 1–2.
+#[cfg(target_os = "linux")]
+pub fn pipewire_node_channels(node_name: &str) -> Option<u16> {
+    let id = format!("pw:{node_name}");
+    run_bounded(Duration::from_secs(2), query_pipewire_devices)
+        .and_then(|(_, outputs)| outputs.into_iter().find(|d| d.id == id))
+        .map(|d| d.channels)
+}
+
+/// Smallest period the PipeWire graph may run at, from `pw-metadata -n
+/// settings`; `None` when PipeWire is not running or cannot be queried.
+#[cfg(target_os = "linux")]
+pub fn pipewire_quantum_floor() -> Option<u32> {
+    let out = run_bounded(Duration::from_secs(2), || {
+        std::process::Command::new("pw-metadata")
+            .args(["-n", "settings"])
+            .output()
+            .ok()
+    })??;
+    parse_pw_quantum_floor(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parse `pw-metadata -n settings` output into the smallest quantum the graph
+/// may run at: `clock.force-quantum` when the operator forced one (non-zero),
+/// else `clock.min-quantum`.
+///
+/// An ALSA period below this floor cannot be fed fast enough: the PipeWire
+/// plugin is handed one graph cycle's worth of frames but cpal only keeps two
+/// periods in its ring, so it underruns every cycle — stuttering, wrong-speed
+/// playback (#10).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn parse_pw_quantum_floor(text: &str) -> Option<u32> {
+    let value_of = |key: &str| -> Option<u32> {
+        let needle = format!("key:'{key}'");
+        let line = text.lines().find(|l| l.contains(&needle))?;
+        let rest = &line[line.find("value:'")? + "value:'".len()..];
+        rest[..rest.find('\'')?].trim().parse().ok()
+    };
+    match value_of("clock.force-quantum") {
+        Some(q) if q > 0 => Some(q),
+        _ => value_of("clock.min-quantum").filter(|&q| q > 0),
+    }
+}
+
+/// If `device_id` is a `pw:…` synthetic ID, return the bare PipeWire node name.
+pub fn pipewire_node_of(device_id: &str) -> Option<&str> {
+    device_id.strip_prefix("pw:")
+}
+
+/// Legacy shim — still called from `preferences_cmds` for the ALSA fallback path
+/// (non-Linux is a noop, Linux now uses `linux_devices` instead).
+#[cfg(target_os = "linux")]
+pub fn humanize_linux_devices(devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
+    devices
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_bounded_returns_value_when_job_finishes_in_time() {
+        let out = run_bounded(Duration::from_secs(2), || 21 * 2);
+        assert_eq!(out, Some(42));
+    }
+
+    #[test]
+    fn run_bounded_gives_up_on_a_slow_job() {
+        // A job slower than the timeout must not block the caller past `timeout`.
+        let start = std::time::Instant::now();
+        let out = run_bounded(Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_millis(750));
+            42
+        });
+        assert_eq!(out, None);
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "run_bounded returned only after the slow job finished — it did not time out"
+        );
+    }
+
+    const PW_SETTINGS: &str = "\
+Found \"settings\" metadata 34
+update: id:0 key:'log.level' value:'2' type:''
+update: id:0 key:'clock.rate' value:'48000' type:''
+update: id:0 key:'clock.quantum' value:'1024' type:''
+update: id:0 key:'clock.min-quantum' value:'32' type:''
+update: id:0 key:'clock.max-quantum' value:'2048' type:''
+update: id:0 key:'clock.force-quantum' value:'0' type:''
+update: id:0 key:'clock.force-rate' value:'0' type:''
+";
+
+    #[test]
+    fn pw_quantum_floor_is_min_quantum_when_nothing_is_forced() {
+        assert_eq!(parse_pw_quantum_floor(PW_SETTINGS), Some(32));
+    }
+
+    #[test]
+    fn pw_quantum_floor_follows_a_forced_quantum() {
+        let forced = PW_SETTINGS.replace(
+            "key:'clock.force-quantum' value:'0'",
+            "key:'clock.force-quantum' value:'1024'",
+        );
+        assert_eq!(parse_pw_quantum_floor(&forced), Some(1024));
+    }
+
+    #[test]
+    fn pw_quantum_floor_is_none_without_pipewire_output() {
+        assert_eq!(parse_pw_quantum_floor(""), None);
+        assert_eq!(parse_pw_quantum_floor("Failed to connect: Host is down"), None);
+    }
+
+    #[test]
+    fn named_patch_outputs_roundtrip_and_metadata_edits_keep_streams() {
+        let legacy = serde_json::json!({"id":Uuid::new_v4(),"name":"Main","device_id":"desk","channels":[6,7]});
+        let mut patch: OutputPatch = serde_json::from_value(legacy).unwrap();
+        assert!(patch.channel_names.is_empty());
+        let names = vec!["Stage".to_string(), "Backstage".to_string()];
+        assert!(!patch.update_definition("Main".into(), "desk".into(), vec![6,7], Some(names.clone())));
+        let encoded = serde_json::to_value(patch).unwrap();
+        let mut loaded: OutputPatch = serde_json::from_value(encoded).unwrap();
+        assert!(loaded.update_definition("House".into(), "desk".into(), vec![7,6], None));
+        assert_eq!(loaded.channel_names, names);
+        assert!(!loaded.update_definition("House".into(), "desk".into(), vec![7,6], Some(vec![])));
+        assert!(loaded.channel_names.is_empty());
+    }
+
+    #[test]
+    fn named_device_requirement_is_opt_in_and_checks_the_full_patch() {
+        let legacy = serde_json::json!({
+            "id": Uuid::new_v4(), "name": "Backstage", "device_id": "default", "channels": [0, 7, 2]
+        });
+        let mut patch: OutputPatch = serde_json::from_value(legacy).unwrap();
+        assert!(patch.named_output().unwrap().is_none());
+        assert!(serde_json::to_value(&patch).unwrap().get("require_named_device").is_none());
+        patch.require_named_device = true;
+        assert!(patch.named_output().unwrap_err().contains("Backstage"));
+        patch.update_definition("Monitor".into(), "hw:CARD=Stage,DEV=0".into(), vec![0, 7, 2], None);
+        let saved = serde_json::to_value(&patch).unwrap();
+        let mut reopened: OutputPatch = serde_json::from_value(saved).unwrap();
+        let named = reopened.named_output().unwrap().unwrap();
+        assert_eq!(named.device_id, "hw:CARD=Stage,DEV=0");
+        assert_eq!(named.required_channel_count(), 8);
+        assert_eq!(named.channels, [0, 7, 2]);
+        assert_eq!(named.patch_id, reopened.id);
+        reopened.channels.clear();
+        assert!(reopened.named_output().unwrap_err().contains("at least one output channel"));
+        #[cfg(target_os = "linux")]
+        {
+            reopened.channels = vec![0, 1];
+            reopened.device_id = "pw:alsa_output.usb-venue".into();
+            assert!(reopened.named_output().unwrap_err().contains("direct ALSA"));
+        }
+    }
+
+    #[test]
+    fn named_output_identity_includes_patch_and_ordered_channels() {
+        let mut patch = OutputPatch::new("Stage", "hw:CARD=Stage", vec![0, 1]);
+        patch.require_named_device = true;
+        let original = patch.named_output().unwrap().unwrap();
+        patch.name = "Stage monitors".into();
+        assert_eq!(original, patch.named_output().unwrap().unwrap());
+
+        patch.channels.swap(0, 1);
+        let reordered = patch.named_output().unwrap().unwrap();
+        assert_eq!(original.required_channel_count(), reordered.required_channel_count());
+        assert_ne!(original, reordered);
+        patch.channels.swap(0, 1);
+        patch.id = Uuid::new_v4();
+        assert_ne!(original, patch.named_output().unwrap().unwrap());
+    }
+
+    #[test]
+    fn patch_effects_roundtrip_and_require_exact_admission() {
+        let mut patch = OutputPatch::new("Stage", "hw:CARD=Stage", vec![0, 1]);
+        assert!(serde_json::to_value(&patch).unwrap().get("audio_effects").is_none());
+        let id = Uuid::new_v4();
+        patch.audio_effects.push(CueEffect::HighPass { id, enabled: true, frequency_hz: 600.0 });
+        assert!(patch.named_output().unwrap_err().contains("Require named device"));
+        patch.require_named_device = true;
+        let saved = serde_json::to_value(&patch).unwrap();
+        let mut reopened: OutputPatch = serde_json::from_value(saved).unwrap();
+        let route = reopened.named_output().unwrap().unwrap();
+        assert_eq!(route.audio_effects, patch.audio_effects);
+        reopened.audio_effects[0] = CueEffect::HighPass { id, enabled: true, frequency_hz: 800.0 };
+        assert_ne!(route, reopened.named_output().unwrap().unwrap());
+    }
+
+    #[test]
+    fn new_device_manager_starts_with_an_empty_cache() {
+        // Startup must not enumerate (that is what froze the app on Windows).
+        assert!(DeviceManager::new().devices().is_empty());
+    }
+
+    #[test]
+    fn replace_cache_overwrites_the_device_list() {
+        let mut mgr = DeviceManager::new();
+        mgr.replace_cache(vec![DeviceInfo {
+            id: "dev-1".into(),
+            name: "Test".into(),
+            channels: 2,
+            sample_rate: 48_000,
+        }]);
+        assert_eq!(mgr.devices().len(), 1);
+        assert_eq!(mgr.devices()[0].id, "dev-1");
+    }
+}

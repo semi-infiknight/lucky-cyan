@@ -1,0 +1,13 @@
+.output-mask { color: var(--wc-text); font-size: 12px; margin: 0 0 24px; }
+.output-mask h5 { margin: 14px 0 0; font-size: 12px; }
+.output-mask h4 { margin: 0; font-size: 13px; }
+.output-mask p, .output-mask figcaption { color: var(--wc-text-muted); line-height: 1.45; margin: 5px 0 8px; }
+.output-mask-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
+.output-mask table { border-collapse: collapse; }
+.output-mask :is(th, td) { padding: 2px 5px; text-align: start; font-weight: 500; }
+.output-mask input, .output-mask button { background: var(--wc-bg-surface); color: var(--wc-text); border: 1px solid var(--wc-border-strong); border-radius: 4px; padding: 4px 6px; font: inherit; }
+.output-mask input { width: 58px; }
+.output-mask button { margin-top: 8px; cursor: pointer; }
+.output-mask button:disabled { opacity: .55; cursor: default; }
+.output-mask figure { width: 145px; margin: 0; }
+.output-mask figure div { aspect-ratio: 16/9; background-color: white; border: 1px solid var(--wc-border-strong); }

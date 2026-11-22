@@ -1,0 +1,31 @@
+.cue-effect-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.cue-effect-controls label {
+  margin-inline-end: auto;
+}
+
+.cue-effect-controls button {
+  background: var(--wc-bg-surface);
+  border: 1px solid var(--wc-border-strong);
+  border-radius: 4px;
+  color: var(--wc-text);
+  padding: 3px 7px;
+}
+
+.cue-effect-controls button:disabled {
+  opacity: 0.45;
+}
+
+.cue-effect {
+  border: 1px solid var(--wc-border);
+  border-radius: 4px;
+  font-size: 12px;
+  margin: 0 0 8px;
+  min-width: 0;
+}
