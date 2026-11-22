@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AudioMap, AudioMapPatch, AudioMark } from "../../lib/types";
+import type { AudioMap, AudioMapPatch, AudioMark, PointPosition } from "../../lib/types";
 import { AudioMapOutputMeters } from "./AudioMapOutputMeters";
 
 export function Coordinate({ label, value, onChange, min = 0, max = 100, step = 1 }: {
@@ -27,6 +27,29 @@ export interface MapDraft {
 }
 
 const SILENCE = -60;
+
+export type PointView = "plan" | "elevation";
+
+export function PointProjection({ label, view, onChange }: {
+  label: string; view: PointView; onChange: (next: PointView) => void;
+}) {
+  return <label>{label}<select value={view} onChange={e => onChange(e.target.value as PointView)}>
+    <option value="plan">Plan (X/Y)</option>
+    <option value="elevation">Elevation (X/Z)</option>
+  </select></label>;
+}
+
+export function markerPosition(position: PointPosition, view: PointView) {
+  return { left: `${position.x}%`, top: `${view === "plan" ? position.y : 100 - (position.z ?? 0)}%` };
+}
+
+export function moveOnProjection(position: PointPosition, view: PointView, bounds: DOMRect, x: number, y: number) {
+  const axis = (coordinate: number, length: number) => Math.min(100, Math.max(0, Math.round(100 * coordinate / length)));
+  const horizontal = axis(x - bounds.left, bounds.width);
+  const vertical = axis(y - bounds.top, bounds.height);
+  return view === "plan" ? { ...position, x: horizontal, y: vertical }
+    : { ...position, x: horizontal, z: 100 - vertical };
+}
 
 function makeMark(name: string, x: number, outputs: number, activeOutput?: number): AudioMark {
   return {
@@ -56,6 +79,7 @@ export function AudioMapEditor({ draft, outputLabels, workspaceId, patch, busy, 
   onCancel: () => void;
 }) {
   const [markId, setMarkId] = useState(draft.marks[0]?.id);
+  const [view, setView] = useState<PointView>("plan");
   const selected = draft.marks.find(mark => mark.id === markId) ?? draft.marks[0];
   const changeMark = (update: Partial<AudioMark>) => {
     onChange({ ...draft, marks: draft.marks.map(mark => mark.id === selected.id ? { ...mark, ...update } : mark) });
@@ -78,18 +102,18 @@ export function AudioMapEditor({ draft, outputLabels, workspaceId, patch, busy, 
       <button type="button" disabled={draft.marks.length >= 128} onClick={add}>Add mark</button>
       <button type="button" disabled={draft.marks.length <= 2}
         onClick={() => onChange({ ...draft, marks: draft.marks.filter(mark => mark.id !== selected.id) })}>Remove mark</button>
+      <PointProjection label="Calibration view" view={view} onChange={setView} />
     </div>
     <div className="point-plane" role="group" aria-label="Calibration positions"
       onClick={e => {
         if (busy) return;
         const box = e.currentTarget.getBoundingClientRect();
-        const axis = (position: number, length: number) => Math.min(100, Math.max(0, Math.round(100 * position / length)));
-        changeMark({ position: { x: axis(e.clientX - box.left, box.width), y: axis(e.clientY - box.top, box.height) } });
+        changeMark({ position: moveOnProjection(selected.position, view, box, e.clientX, e.clientY) });
       }}>
       {draft.marks.map((mark, index) => <button className="audio-map-mark" type="button" key={mark.id}
         aria-label={mark.name || `Mark ${index + 1}`} aria-pressed={mark.id === selected.id}
         onClick={e => { e.stopPropagation(); setMarkId(mark.id); }}
-        style={{ left: `${mark.position.x}%`, top: `${mark.position.y}%` }}>{index + 1}</button>)}
+        style={markerPosition(mark.position, view)}>{index + 1}</button>)}
     </div>
     <div className="point-row">
       <label className="audio-map-name">Mark name <input type="text" maxLength={100} value={selected.name}
@@ -98,6 +122,8 @@ export function AudioMapEditor({ draft, outputLabels, workspaceId, patch, busy, 
         onChange={x => changeMark({ position: { ...selected.position, x } })} />
       <Coordinate key={`${selected.id}-y`} label="Mark Y" step={0.1} value={selected.position.y}
         onChange={y => changeMark({ position: { ...selected.position, y } })} />
+      <Coordinate key={`${selected.id}-z`} label="Mark Z (height)" step={0.1} value={selected.position.z ?? 0}
+        onChange={z => changeMark({ position: { ...selected.position, z } })} />
     </div>
     <fieldset className="audio-map-calibration">
       <legend>Mix at this mark (dB)</legend>

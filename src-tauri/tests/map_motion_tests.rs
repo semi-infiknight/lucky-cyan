@@ -22,7 +22,7 @@ fn a_map_motion_resolves_the_named_live_voice_and_preserves_its_saved_start() {
     let mark = |x, y, levels| AudioMark {
         id: Uuid::new_v4(),
         name: format!("Mark {x}"),
-        position: Position { x, y },
+        position: Position { x, y, z: 0.0 },
         levels,
     };
     let map = AudioMap {

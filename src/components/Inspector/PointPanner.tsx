@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { deleteAudioMap, listAudioMaps, previewPointMix, saveAudioMap } from "../../lib/commands";
 import type { AudioMap, AudioMapLibrary, AudioMapPatch, PointMix, PointPosition } from "../../lib/types";
-import { AudioMapEditor, Coordinate, newMapDraft, type MapDraft } from "./AudioMapEditor";
+import { AudioMapEditor, Coordinate, markerPosition, moveOnProjection, newMapDraft, PointProjection, type MapDraft, type PointView } from "./AudioMapEditor";
 import "./pointPanner.css";
 
 const stereo: PointMix = {
@@ -26,6 +26,7 @@ function matchesPatch(map: AudioMap, patch: AudioMapPatch | null) {
 
 function Editor({ saved, patch, patchName, outputLabels, onApply }: Props) {
   const [draft, setDraft] = useState<PointMix>(saved ?? stereo);
+  const [view, setView] = useState<PointView>("plan");
   const [library, setLibrary] = useState<AudioMapLibrary>();
   const [libraryError, setLibraryError] = useState("");
   const [result, setResult] = useState<{ draft: PointMix; width: number; levels?: number[]; error?: string }>();
@@ -165,25 +166,26 @@ function Editor({ saved, patch, patchName, outputLabels, onApply }: Props) {
       busy={busy} onSave={saveMap} onChange={setMapEditor} onCancel={() => { setMapEditor(null); setError(""); }} />}
     <fieldset className="point-mix-fields" disabled={busy || !!mapEditor || confirmDelete}>
       <legend>Source placement</legend>
+      <div className="point-row"><PointProjection label="Source view" view={view} onChange={setView} /></div>
       <div className="point-plane" role="group" aria-label="Speaker layout and draft source position"
         onClick={e => {
           if (busy || mapEditor || confirmDelete) return;
           const r = e.currentTarget.getBoundingClientRect();
-          const axis = (position: number, length: number) => Math.min(100, Math.max(0, Math.round(100 * position / length)));
-          move({ x: axis(e.clientX - r.left, r.width), y: axis(e.clientY - r.top, r.height) });
+          move(moveOnProjection(draft.source, view, r, e.clientX, e.clientY));
         }}>
         {map ? map.marks.map((mark, i) => <button className="audio-map-mark" type="button" key={mark.id}
           title={mark.name} aria-label={`Place source at ${mark.name}`}
           onClick={e => { e.stopPropagation(); move(mark.position); }}
-          style={{ left: `${mark.position.x}%`, top: `${mark.position.y}%` }}>{i + 1}</button>)
+          style={markerPosition(mark.position, view)}>{i + 1}</button>)
           : speakers.map((s, i) => <span className="point-speaker" key={i} title={`Output ${s.output}`}
-            style={{ left: `${s.x}%`, top: `${s.y}%` }}>{s.output}</span>)}
-        <span className="point-source" title="Draft source position" style={{ left: `${draft.source.x}%`, top: `${draft.source.y}%` }} />
+            style={markerPosition(s, view)}>{s.output}</span>)}
+        <span className="point-source" title="Draft source position" style={markerPosition(draft.source, view)} />
       </div>
       <div className="point-row">
         <Coordinate label="File input" min={1} max={128} value={draft.input} onChange={input => setDraft({ ...draft, input })} />
         <Coordinate label="Source X" step={0.1} value={draft.source.x} onChange={x => move({ ...draft.source, x })} />
         <Coordinate label="Source Y" step={0.1} value={draft.source.y} onChange={y => move({ ...draft.source, y })} />
+        <Coordinate label="Source Z (height)" step={0.1} value={draft.source.z ?? 0} onChange={z => move({ ...draft.source, z })} />
         {map && <label>Place at mark <select value="" onChange={e => {
           const mark = map.marks.find(mark => mark.id === e.target.value);
           if (mark) move(mark.position);
@@ -200,6 +202,7 @@ function Editor({ saved, patch, patchName, outputLabels, onApply }: Props) {
           <Coordinate label="Output" min={1} max={outputs} value={speaker.output} onChange={output => editSpeaker(index, { output })} />
           <Coordinate label="X" value={speaker.x} onChange={x => editSpeaker(index, { x })} />
           <Coordinate label="Y" value={speaker.y} onChange={y => editSpeaker(index, { y })} />
+          <Coordinate label="Z (height)" step={0.1} value={speaker.z ?? 0} onChange={z => editSpeaker(index, { z })} />
           <output>{formatLevel(preview?.levels?.[speaker.output - 1])}</output>
           <button type="button" aria-label={`Remove speaker ${index + 1}`} disabled={speakers.length <= 2}
             onClick={() => setDraft(d => ({ ...d, speakers: speakers.filter((_, i) => i !== index) }))}>Remove</button>
@@ -226,7 +229,7 @@ function formatLevel(db?: number) {
 export function PointPanner(props: Props) {
   const [open, setOpen] = useState(false);
   return <section className="point-panner">
-    <button type="button" aria-expanded={open} onClick={() => setOpen(value => !value)}>2D point panner</button>
+    <button type="button" aria-expanded={open} onClick={() => setOpen(value => !value)}>Point panner</button>
     {open && <Editor key={JSON.stringify(props.saved ?? null)} {...props} />}
   </section>;
 }

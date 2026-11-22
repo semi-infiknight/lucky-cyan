@@ -5,8 +5,9 @@
 /// Bumped whenever the `.inkue` JSON format gains a breaking change.
 /// Files written by newer Inkue versions (schema > this) are rejected
 /// at load time to prevent silent data corruption.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 const FINE_CHANNEL_SCHEMA: u32 = 2;
+const AUDIO_HEIGHT_SCHEMA: u32 = 3;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -18,12 +19,20 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    cue::{registry::CueRegistry, traits::Cue, types::CueType},
+    cue::{point_mix::{AudioMap, PointMix}, registry::CueRegistry, traits::Cue, types::CueType},
     engine::{output_engine::{MaskImage, OutputConfig, OutputRegions, OutputsConfig}, audio_input::InputPatch, device_manager::OutputPatch, dmx_sink::UniverseOutput, fixture::{FixtureGroup, PatchedFixture}, osc_patch::OscPatch},
     preferences::AppPreferences,
 };
 
 use super::cue_list::CueList;
+
+fn uses_audio_height(maps: &[AudioMap], lists: &[CueList]) -> bool {
+    fn any_cue_uses_height(cues: &[Box<dyn Cue>]) -> bool {
+        cues.iter().any(|cue| cue.applied_point_mix().is_some_and(PointMix::uses_height)
+            || cue.child_cues().is_some_and(any_cue_uses_height))
+    }
+    maps.iter().any(AudioMap::uses_height) || lists.iter().any(|list| any_cue_uses_height(&list.cues))
+}
 
 const TEMPLATE_KIND: &str = "inkue_workspace_template";
 
@@ -82,9 +91,36 @@ pub(crate) fn relativize_paths(value: &mut serde_json::Value, base: &std::path::
 }
 
 #[cfg(test)]
-mod fine_channel_tests {
+mod schema_tests {
     use super::*;
     use crate::engine::fixture::builtin_fixture_types;
+
+    #[test]
+    fn calibration_height_uses_the_new_schema_even_when_only_a_cue_copy_remains() {
+        use crate::cue::{audio_cue::{AudioCue, AudioCueFactory}, point_mix::{stereo_calibration, PointMix}};
+        let mut workspace = Workspace::new("Height rehearsal");
+        let mut map = stereo_calibration();
+        let path = Path::new("show.inkue");
+        workspace.audio_maps.push(map.clone());
+        assert_eq!(workspace.document_for(path, None)["schema_version"], 1);
+        map.marks[1].position.z = 70.0;
+        workspace.audio_maps.clear();
+        let mut cue = AudioCue::new();
+        cue.point_mix = Some(PointMix {
+            input: 1, source: map.marks[1].position.clone(), speakers: Vec::new(), map: Some(map),
+        });
+        let id = cue.id();
+        workspace.active_cue_list_mut().unwrap().push(Box::new(cue));
+        let mut doc = workspace.document_for(path, None);
+        assert_eq!(doc["schema_version"], AUDIO_HEIGHT_SCHEMA);
+        let mut registry = CueRegistry::new();
+        registry.register(CueType::Audio, Box::new(AudioCueFactory));
+        let loaded = Workspace::from_workspace_document(doc.clone(), None, &registry).unwrap();
+        assert_eq!(loaded.active_cue_list().unwrap().get(&id).unwrap().applied_point_mix().unwrap().source.z, 70.0);
+        doc["schema_version"] = FINE_CHANNEL_SCHEMA.into();
+        assert!(Workspace::from_workspace_document(doc, None, &registry).err().unwrap()
+            .to_string().contains("Audio map heights require workspace schema"));
+    }
 
     #[test]
     fn separated_fine_channels_require_a_compatible_workspace_version() {
@@ -452,7 +488,9 @@ impl Workspace {
     }
 
     fn document_schema(&self) -> u32 {
-        if self.fixtures.iter().any(PatchedFixture::has_explicit_fine_channels) {
+        if uses_audio_height(&self.audio_maps, &self.cue_lists) {
+            AUDIO_HEIGHT_SCHEMA
+        } else if self.fixtures.iter().any(PatchedFixture::has_explicit_fine_channels) {
             FINE_CHANNEL_SCHEMA
         } else {
             1
@@ -890,6 +928,8 @@ impl Workspace {
         if cue_lists.is_empty() {
             cue_lists.push(CueList::new("Cue List 1"));
         }
+        anyhow::ensure!(file_schema >= AUDIO_HEIGHT_SCHEMA || !uses_audio_height(&audio_maps, &cue_lists),
+            "Audio map heights require workspace schema {AUDIO_HEIGHT_SCHEMA}.");
 
         // Resolve the active cue list: try the saved ID, fall back to first list.
         let saved_active_id: Option<Uuid> = doc

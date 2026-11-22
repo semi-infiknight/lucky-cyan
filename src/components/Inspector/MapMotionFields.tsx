@@ -33,7 +33,7 @@ export function MapMotionFields({ targetId, motion, onApply }: {
           return;
         }
         const appliedStart = map.marks.find(mark => mark.position.x === point.source.x &&
-          mark.position.y === point.source.y)?.id;
+          mark.position.y === point.source.y && (mark.position.z ?? 0) === (point.source.z ?? 0))?.id;
         setCalibration({ cueId: targetId, map, appliedStart });
       } catch (failure) {
         if (mounted && ticket === request) {

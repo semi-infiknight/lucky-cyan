@@ -330,7 +330,7 @@ export interface SliceList {
 
 export const EMPTY_SLICES: SliceList = { markers: [], play_counts: [1] };
 
-export interface PointPosition { x: number; y: number; }
+export interface PointPosition { x: number; y: number; z?: number; }
 export interface AudioMapPatch {
   id: string | null;
   device_id: string | null;

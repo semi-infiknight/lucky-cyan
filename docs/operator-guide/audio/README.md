@@ -129,23 +129,29 @@ The release applies to the playing File Audio voice and stops further repeats. I
 ## Place a stationary source between speakers
 
 1. Create an Audio cue with a mono file. In **Levels**, select a stereo output patch whose first two logical outputs feed the left and right speakers. For a larger layout, select a patch containing the additional outputs.
-2. Open **2D point panner**. Set **File input** to 1. Each speaker has a logical output and two coordinates. X increases to the right and Y increases down the diagram. Coordinates run from 0 to 100. Place output 1 at X 0, Y 50 and output 2 at X 100, Y 50.
+2. Open **Point panner**. Set **File input** to 1. Choose **Plan (X/Y)**. X increases to the right and Y increases down the diagram. Coordinates run from 0 to 100. Place output 1 at X 0, Y 50 and output 2 at X 100, Y 50. Set Z to 0 for both speakers.
 3. Set the source to X 50, Y 50. The two readouts should each show about −3.0 dB. Move the draft source to X 0, Y 50. The left readout should show 0.0 dB and the right −∞ dB. Clicking the layout or typing coordinates only updates this preview.
 4. With the desk at a suitable rehearsal level, choose **Apply point mix**. An active voice receives the change immediately. The selected input row in the matrix now contains those levels. Other configured input rows retain their routes. When starting from Pan mode, Apply creates a matrix, so add routes for any additional file inputs you intend to hear.
 5. Save, close and reopen the workspace. The Audio cue retains its speaker layout, source position and matrix. GO plays the saved matrix through the current patch. A subsequent manual matrix edit clears the saved point preset. **Undo** restores the previous edit.
 
-Custom speakers use planar distance and constant-power panning. Each speaker drives a single logical output, and the layout belongs to that Audio cue.
+Custom speakers use distance in X, Y and Z with constant-power panning. Each speaker drives a single logical output, and the layout belongs to that Audio cue.
 
 ## Reuse a calibrated audio map
 
 For this exercise, a prop radio is heard from the left of the audience with some spill to the right. A second sound comes from the hallway on the right.
 
-1. Create two Audio cues with mono practice files and assign the same named stereo Output Patch to both. On the first cue, open **Levels → 2D point panner → New map…** and name the map **Studio A**. Select the first calibration mark and rename it **Prop radio**. Set its levels to 0 dB on output 1 and −12 dB on output 2. Rename the second mark **Hallway** and set its levels to −60 dB on output 1 and −6 dB on output 2. Choose **Save map**.
+1. Create two Audio cues with mono practice files and assign the same named stereo Output Patch to both. On the first cue, open **Levels → Point panner → New map…** and name the map **Studio A**. Select the first calibration mark and rename it **Prop radio**. Set its levels to 0 dB on output 1 and −12 dB on output 2. Rename the second mark **Hallway** and set its levels to −60 dB on output 1 and −6 dB on output 2. Choose **Save map**.
 2. On the first cue, choose **Prop radio** under **Place at mark**. Check the two readouts against the calibration. Click midway between the marks and check that output 1 is approximately −3.0 dB and output 2 is approximately −8.0 dB. Return to **Prop radio** and choose **Apply point mix**. Check the first input row in the level matrix.
 3. Open the second cue’s panner, choose **Studio A**, place the source at **Hallway** and apply. With an isolated stereo monitor at rehearsal level, GO each cue and listen for the two positions. Saving or previewing a map leaves every cue’s routes as they were. Apply updates the selected input of the selected cue, including its active voice if it is playing.
 4. Edit **Studio A** from the second cue and change the Hallway’s right output to −18 dB. Save the map and compare both cues’ matrices. They still use their previous calibration. Apply the revised mix to the second cue, then save and reopen. Confirm the radio stays at 0 and −12 dB and the hallway uses −18 dB on the right. Delete the map from the library and reopen again to verify both mixes survive.
 
 A mark specifies the whole mix at one location. Between marks, Inkue interpolates each output in power with greater weight on the closest marks. Map revisions match the output patch ID, device and ordered channel assignment. If the assignment changes, create a map for that assignment before applying another mix. Verify physical routing on the destination desk after transferring a workspace. The import review calls out QLab object audio for manual reconstruction. Map-owned audio objects, filters, spread, and QLab object-map import remain open. [QLab The Audio Map Editor](https://qlab.app/docs/v5/audio/audio-map-editor/) · [QLab Object Audio Basics](https://qlab.app/docs/v5/tutorials/object-audio-basics/)
+
+### Calibrate floor and overhead positions
+
+1. Give two marks the same X and Y coordinates. In **Elevation (X/Z)**, put the floor mark at Z 0 and the overhead mark at Z 100. The elevation view lets you place marks and sources along X and Z while preserving their Y coordinates.
+2. Give the floor and overhead marks different output levels. Place the source at each mark to check its exact mix. Move the source to Z 50 at the same X and Y to preview the midpoint. A movement Fade between those marks changes the source height over time.
+3. Save and reopen using an Inkue build with height support. Older planar maps use Z 0.
 
 ### Verify a calibration on the live outputs
 
@@ -181,7 +187,7 @@ Per-output trim multiplies the complete cue signal for that output after the pro
 
 ## Move a sound between calibration marks
 
-1. Use a quiet, sustained mono recording on a practice show. Set the machine’s main audio output to the named interface used by **Studio A**. Assign that same named patch explicitly in the Audio cue’s **Levels** tab. In **2D point panner**, place the file input at **Prop radio** and choose **Apply point mix**.
+1. Use a quiet, sustained mono recording on a practice show. Set the machine’s main audio output to the named interface used by **Studio A**. Assign that same named patch explicitly in the Audio cue’s **Levels** tab. In **Point panner**, place the file input at **Prop radio** and choose **Apply point mix**.
 2. Add a Fade targeting that one Audio cue. In **Audio map movement**, choose **Prop radio** as **Start mark** and **Hallway** as **Destination mark**. Choose **Apply movement**, which makes this a dedicated manual Fade. Set a five-second duration and use the rising curve to shape the travel.
 3. GO the Audio cue and then the Fade. The source traverses the straight line between the marks. Listen for the calibrated destination mix. On another pass, pause the Fade halfway, listen to the held position, then resume. Stop the Fade or edit the target’s crosspoints to take control. A fresh GO of the stopped Audio cue starts at the saved **Prop radio** mix.
 4. For a return Fade, reverse the two marks. Call it once the first move has landed. If the map revision, start mix, or output assignment is wrong, the desk withholds the movement. Reopening the output stream ends an active movement. Confirm those behaviors during rehearsal before calling a movement live.

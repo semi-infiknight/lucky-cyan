@@ -6,7 +6,12 @@ use uuid::Uuid;
 pub struct Position {
     pub x: f64,
     pub y: f64,
+    /// Height on the same calibrated scale as the plan axes.
+    #[serde(default, skip_serializing_if = "is_floor_height")]
+    pub z: f64,
 }
+
+fn is_floor_height(value: &f64) -> bool { *value == 0.0 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Speaker {
@@ -83,6 +88,10 @@ pub struct AudioMark {
 }
 
 impl AudioMap {
+    pub(crate) fn uses_height(&self) -> bool {
+        self.marks.iter().any(|mark| mark.position.z != 0.0)
+    }
+
     /// Reject ambiguous marks and calibrations outside the matrix limits.
     pub fn validate(&self) -> Result<(), String> {
         let width = self.patch.channels.len();
@@ -106,7 +115,7 @@ impl AudioMap {
                 return Err("Each mark needs its own ID.".into());
             }
             if !mark.position.valid() {
-                return Err("Enter mark positions between 0 and 100 on both axes.".into());
+                return Err("Enter mark coordinates between 0 and 100.".into());
             }
             if mark.levels.len() != width
                 || mark.levels.iter().any(|db| !(-60.0..=24.0).contains(db))
@@ -166,13 +175,13 @@ pub(crate) fn stereo_calibration() -> AudioMap {
             AudioMark {
                 id: Uuid::new_v4(),
                 name: "Prop radio".into(),
-                position: Position { x: 0.0, y: 50.0 },
+                position: Position { x: 0.0, y: 50.0, z: 0.0 },
                 levels: vec![0.0, -12.0],
             },
             AudioMark {
                 id: Uuid::new_v4(),
                 name: "Hallway".into(),
-                position: Position { x: 100.0, y: 50.0 },
+                position: Position { x: 100.0, y: 50.0, z: 0.0 },
                 levels: vec![-60.0, -6.0],
             },
         ],
@@ -181,11 +190,11 @@ pub(crate) fn stereo_calibration() -> AudioMap {
 
 impl Position {
     fn valid(&self) -> bool {
-        (0.0..=100.0).contains(&self.x) && (0.0..=100.0).contains(&self.y)
+        [self.x, self.y, self.z].iter().all(|axis| (0.0..=100.0).contains(axis))
     }
 
     fn distance_to(&self, other: &Self) -> f64 {
-        (self.x - other.x).hypot(self.y - other.y)
+        (self.x - other.x).hypot(self.y - other.y).hypot(self.z - other.z)
     }
 }
 
@@ -198,6 +207,11 @@ fn distance_weights(distances: &[f64]) -> Vec<f64> {
 }
 
 impl PointMix {
+    pub(crate) fn uses_height(&self) -> bool {
+        self.source.z != 0.0 || self.speakers.iter().any(|speaker| speaker.position.z != 0.0)
+            || self.map.as_ref().is_some_and(AudioMap::uses_height)
+    }
+
     /// Inverse-distance weights normalized to unit power. At a speaker's
     /// exact position its output receives unity. Colocated speakers share it.
     pub fn levels(&self, outputs: usize) -> Result<Vec<f64>, String> {
@@ -206,13 +220,13 @@ impl PointMix {
             return Err("Select a file input between 1 and 128.".into());
         }
         if !self.source.valid() {
-            return Err("Enter positions between 0 and 100 on both axes.".into());
+            return Err("Enter coordinates between 0 and 100.".into());
         }
         if let Some(map) = &self.map {
             return map.levels_at(&self.source, outputs);
         }
         if self.speakers.iter().any(|s| !s.position.valid()) {
-            return Err("Enter positions between 0 and 100 on both axes.".into());
+            return Err("Enter coordinates between 0 and 100.".into());
         }
         if self.speakers.len() < 2 || outputs > limit || self.speakers.len() > outputs {
             return Err("Assign at least two different outputs from the current patch.".into());
@@ -333,7 +347,11 @@ impl Position {
     fn toward(&self, end: &Self, progress: f64) -> Self {
         if progress <= 0.0 { return self.clone(); }
         if progress >= 1.0 { return end.clone(); }
-        Self { x: self.x + (end.x - self.x) * progress, y: self.y + (end.y - self.y) * progress }
+        Self {
+            x: self.x + (end.x - self.x) * progress,
+            y: self.y + (end.y - self.y) * progress,
+            z: self.z + (end.z - self.z) * progress,
+        }
     }
 }
 
@@ -347,15 +365,16 @@ mod tests {
             source: Position {
                 x: source_x,
                 y: 50.0,
+                z: 0.0,
             },
             speakers: vec![
                 Speaker {
                     output: 2,
-                    position: Position { x: 0.0, y: 50.0 },
+                    position: Position { x: 0.0, y: 50.0, z: 0.0 },
                 },
                 Speaker {
                     output: 4,
-                    position: Position { x: 100.0, y: 50.0 },
+                    position: Position { x: 100.0, y: 50.0, z: 0.0 },
                 },
             ],
             map: None,
@@ -405,12 +424,31 @@ mod tests {
     }
 
     #[test]
+    fn calibration_height_distinguishes_marks_with_the_same_floor_position() {
+        let mut map = stereo_calibration();
+        map.marks[0].levels = vec![0.0, -60.0];
+        map.marks[1].position = map.marks[0].position.clone();
+        map.marks[1].position.z = 100.0;
+        map.marks[1].levels = vec![-60.0, 0.0];
+        let floor = &map.marks[0].position;
+        let overhead = &map.marks[1].position;
+        assert_eq!(map.levels_at(floor, 2).unwrap(), [0.0, -60.0]);
+        assert_eq!(map.levels_at(overhead, 2).unwrap(), [-60.0, 0.0]);
+        let midway = floor.toward(overhead, 0.5);
+        assert_eq!(midway.z, 50.0);
+        let levels = map.levels_at(&midway, 2).unwrap();
+        assert!((levels[0] + 3.0102999566).abs() < 1e-8);
+        assert_eq!(levels[0], levels[1]);
+        assert!(!serde_json::to_value(floor).unwrap().as_object().unwrap().contains_key("z"));
+    }
+
+    #[test]
     fn calibrated_marks_keep_exact_mixes_and_interpolate_in_power() {
         let mut map = stereo_calibration();
         for mark in &map.marks {
             assert_eq!(map.levels_at(&mark.position, 2).unwrap(), mark.levels);
         }
-        let source = Position { x: 50.0, y: 50.0 };
+        let source = Position { x: 50.0, y: 50.0, z: 0.0 };
         let levels = map.levels_at(&source, 2).unwrap();
         let right_power = (10.0_f64.powf(-1.2) + 10.0_f64.powf(-0.6)) * 0.5;
         assert!((levels[0] - 10.0 * 0.5_f64.log10()).abs() < 1e-10);
