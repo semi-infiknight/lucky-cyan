@@ -5,8 +5,8 @@ A MIDI cue sends its message list from top to bottom when its action starts. Eac
 ## Suspend MIDI cue triggers during programming
 
 1. Bind a MIDI note to a silent Wait in a rehearsal list. Verify one press starts it and stop it.
-2. Open **Preferences → Network → MIDI Triggers** and select **Suspend cue triggers for this session**. Close Preferences and check the suspension message in the transport bar. Play the bound note. The Wait stays idle, and a local **GO** can still start it.
-3. Choose **Restore MIDI triggers** in the transport bar. New MIDI messages can start cues as usual. Messages discarded during suspension stay discarded.
+2. Open **Preferences → Network → MIDI Input** and select **Suspend incoming MIDI control for this session**. Close Preferences and check the suspension message in the transport bar. Play the bound note. The Wait stays idle, and a local **GO** can still start it.
+3. Choose **Restore MIDI input** in the transport bar. New MIDI messages can start cues as usual. Messages discarded during suspension stay discarded.
 
 The override follows the running desk across workspace changes until you restore it or quit. MIDI Learn and MIDI cues that send messages remain available. [QLab Override Controls](https://qlab.app/docs/v5/tools/override-controls/)
 
@@ -55,6 +55,15 @@ The complete message can use up to 128 bytes. For commands that take a cue addre
 **GO_OFF** can specify an exact cue address. The command list also includes previous standby and next and previous sequence. Device commands apply to the addressed receiver.
 
 Message framing and operand examples follow the MSC specification and QLab's command/format table. [MIDI Show Control 1.1 specification](https://www.richmondsounddesign.com/docs/midi-show-control-specification.pdf) · [QLab parameter reference](https://qlab.app/docs/v5/scripting/parameter-reference/) · [ETC Eos MSC formatting](https://www.etcconnect.com/WebDocs/Controls/EosFamilyOnlineHelp/en/Content/23_Show_Control/05_MIDI_Show_Control/Hexadecimal_MIDI.htm)
+
+## Run the desk from a Show Control console
+
+1. Add two silent, top-level Wait cues with numbers `1.2` and `01.2` in a rehearsal list. Under **Preferences → Network → MIDI Input**, choose the named input connected to the console. Set **Show Control device ID** to match the console's destination, then enable **Receive MIDI Show Control**.
+2. Send a Sound (General) **GO** addressed to `01.2`. Check that only that cue starts. Send numbered **STOP** and confirm that its countdown pauses. Send numbered **RESUME** and check that the countdown continues from the held point.
+3. Stop the rehearsal. Send **STANDBY_+** or **STANDBY_-** and confirm that standby moves one armed row without starting a cue. Send an unnumbered **GO** to start the current standby. Send **ALL_OFF** to stop playback across lists.
+4. Suspend incoming MIDI in Preferences. Send a rehearsal command and confirm the desk stays idle. Choose **Restore MIDI input** in the transport bar and send a fresh command.
+
+Inkue accepts Lighting (General), Sound (General) and Video (General) at the configured device ID and the standard all-call ID 127. Numbered GO, STOP, RESUME and LOAD use an exact, unique top-level number in the active list. LOAD prepares supported media for a separate start. Unnumbered RESUME resumes paused playback across lists while held Load media awaits Start. Unnumbered STOP and LOAD, Q list and path operands, sequence steps and RESET remain open. [QLab MIDI and MSC](https://reference.qlab.app/docs/v5/networking/using-midi-and-msc/)
 
 ## Rehearse one SysEx message
 

@@ -68,7 +68,7 @@ pub fn go(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<()
     go_locked(&state, &app_handle, &mut ws).map(|_| ())
 }
 
-fn accept_chained_go(state: &AppState, protection_ms: u32) -> bool {
+pub(crate) fn accept_chained_go(state: &AppState, protection_ms: u32) -> bool {
     // Double-GO protection: silently ignore a second GO that arrives within
     // `double_go_protection_ms` of the previous one (default 500 ms).
     // This catches duplicate UDP packets from OSC controllers and accidental

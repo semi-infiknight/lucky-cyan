@@ -297,17 +297,13 @@ pub fn run() {
             let tc_receiver = app.state::<AppState>().tc_receiver.clone();
             let tc_dispatch = app.state::<AppState>().timecode_dispatch.clone();
 
-            // Start the per-cue MIDI trigger listener if this machine has it on.
+            // Restore the machine's MIDI trigger and Show Control input.
             let midi_listener = app.state::<AppState>().midi_listener.clone();
             let midi_trigger_gate = app.state::<AppState>().midi_trigger_gate.clone();
             {
                 let config = crate::machine_config::load_midi_trigger_config();
-                if config.enabled {
-                    if let Ok(mut slot) = midi_listener.lock() {
-                        *slot = Some(Arc::new(
-                            crate::engine::midi_trigger::MidiTriggerListener::new(config.port, midi_trigger_gate),
-                        ));
-                    }
+                if let Ok(mut slot) = midi_listener.lock() {
+                    *slot = crate::engine::midi_trigger::MidiTriggerListener::open(config, midi_trigger_gate);
                 }
             }
             let midi_listener_for_loop = midi_listener.clone();

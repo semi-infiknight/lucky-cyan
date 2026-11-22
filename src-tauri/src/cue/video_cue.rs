@@ -600,7 +600,6 @@ impl Default for VideoCue {
 
 impl ClockMediaCue for VideoCue {
     fn clock_run(&mut self) -> &mut Option<(Uuid, ClockRun)> { &mut self.clock_run }
-    fn has_prepared_media(&self) -> bool { self.preloaded }
 }
 
 impl Cue for VideoCue {
@@ -618,6 +617,7 @@ impl Cue for VideoCue {
 
     fn id(&self) -> CueId { self.id }
     fn cue_type(&self) -> CueType { CueType::Video }
+    fn has_prepared_media(&self) -> bool { self.preloaded }
     fn source_channel_names_mut(&mut self) -> Option<&mut Vec<String>> { Some(&mut self.source_channel_names) }
     fn output_patch_id(&self) -> Option<uuid::Uuid> { self.output_patch_id }
     fn name(&self) -> &str { &self.name }

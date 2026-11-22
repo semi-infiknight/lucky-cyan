@@ -70,7 +70,6 @@ impl ClockRun {
 
 pub(crate) trait ClockMediaCue: Cue {
     fn clock_run(&mut self) -> &mut Option<(Uuid, ClockRun)>;
-    fn has_prepared_media(&self) -> bool;
 }
 
 fn media_cue(cue: &mut dyn Cue) -> Option<&mut dyn ClockMediaCue> {

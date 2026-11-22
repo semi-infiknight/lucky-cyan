@@ -28,6 +28,68 @@ impl MscCommand {
     }
 }
 
+/// Incoming transport operations in the active list, or across the desk for
+/// an unnumbered Resume and ALL_OFF.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MscTransport {
+    Go(Option<String>),
+    Pause(String),
+    Resume(Option<String>),
+    Load(String),
+    AllOff,
+    Standby(bool),
+}
+
+impl MscTransport {
+    pub(crate) fn decode(bytes: &[u8], destination: u8) -> Option<Self> {
+        if bytes.len() > 128 {
+            return None;
+        }
+        let [0xf0, 0x7f, device, 0x02, 0x01 | 0x10 | 0x30, command, payload @ .., 0xf7] = bytes else {
+            return None;
+        };
+        if destination > 126 || !matches!(*device, 127) && *device != destination {
+            return None;
+        }
+        let command = MscCommand::from_code(u64::from(*command))?;
+        if payload.is_empty() {
+            return match command {
+                MscCommand::Go => Some(Self::Go(None)),
+                MscCommand::Resume => Some(Self::Resume(None)),
+                MscCommand::AllOff => Some(Self::AllOff),
+                MscCommand::StandbyNext => Some(Self::Standby(true)),
+                MscCommand::StandbyPrevious => Some(Self::Standby(false)),
+                _ => None,
+            };
+        }
+        // Trailing separators can stand for omitted list and path operands.
+        // A frame containing a real list or path never resolves in the desk.
+        let mut fields = payload.split(|&byte| byte == 0);
+        let number = std::str::from_utf8(fields.next()?).ok()?;
+        let mut omitted = 0;
+        for field in fields {
+            omitted += 1;
+            if !field.is_empty() || omitted > 2 {
+                return None;
+            }
+        }
+        if !valid_cue_number(number) {
+            return None;
+        }
+        match command {
+            MscCommand::Go => Some(Self::Go(Some(number.into()))),
+            MscCommand::Stop => Some(Self::Pause(number.into())),
+            MscCommand::Resume => Some(Self::Resume(Some(number.into()))),
+            MscCommand::Load => Some(Self::Load(number.into())),
+            _ => None,
+        }
+    }
+}
+
+fn valid_cue_number(number: &str) -> bool {
+    number.split('.').all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MscMessage {
     pub device_id: u8,
@@ -92,10 +154,7 @@ impl MscMessage {
             if bytes.len() + usize::from(index > 0) + field.len() + 1 > 128 {
                 return Err("MSC messages can contain at most 128 bytes including framing.".into());
             }
-            if !field
-                .split('.')
-                .all(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit()))
-            {
+            if !valid_cue_number(field) {
                 return Err(
                     "MSC cue, list and path use numeric sections separated by periods.".into(),
                 );
@@ -122,6 +181,34 @@ mod tests {
             q_number: "235.6".into(),
             q_list: "36.6".into(),
             q_path: "59".into(),
+        }
+    }
+
+    #[test]
+    fn msc_input_checks_device_format_and_keeps_literal_cue_numbers() {
+        let frame = |device, format, command, fields: &[u8]| {
+            let mut bytes = vec![0xf0, 0x7f, device, 0x02, format, command];
+            bytes.extend_from_slice(fields);
+            bytes.push(0xf7);
+            bytes
+        };
+        assert_eq!(MscTransport::decode(&frame(7, 16, 1, b"01.2"), 7),
+            Some(MscTransport::Go(Some("01.2".into()))));
+        assert_eq!(MscTransport::decode(&frame(127, 48, 2, b"01.2\0"), 7),
+            Some(MscTransport::Pause("01.2".into())));
+        assert_eq!(MscTransport::decode(&frame(7, 1, 3, b""), 7), Some(MscTransport::Resume(None)));
+        assert_eq!(MscTransport::decode(&frame(7, 16, 8, b""), 7), Some(MscTransport::AllOff));
+        for rejected in [
+            frame(8, 16, 1, b"1"),
+            frame(7, 17, 1, b"1"),
+            frame(7, 16, 1, b"1\x004"),
+            frame(7, 16, 1, b"1\x00\x004"),
+            frame(7, 16, 1, b"1..2"),
+            frame(7, 16, 2, b""),
+            frame(7, 16, 8, b"1"),
+            frame(7, 16, 1, &[b'1'; 122]),
+        ] {
+            assert_eq!(MscTransport::decode(&rejected, 7), None);
         }
     }
 

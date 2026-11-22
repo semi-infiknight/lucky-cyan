@@ -28,48 +28,64 @@ const labelStyle: React.CSSProperties = {
 };
 
 export function MidiTriggerPreferences() {
-  const [config, setConfig] = useState<MidiTriggerConfig>({ enabled: false, port: null });
+  const [config, setConfig] = useState<MidiTriggerConfig>({ enabled: false, port: null, msc_device_id: null });
   const [ports, setPorts] = useState<string[]>([]);
+  const [ready, setReady] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [selectedMscId, setSelectedMscId] = useState(0);
   const override = useTriggerOverride("midi");
+  const mscEnabled = config.msc_device_id != null;
+  const disabled = !ready || saving;
 
   useEffect(() => {
-    getMidiTriggerConfig().then(setConfig).catch(console.error);
-    listMidiInputPorts().then(setPorts).catch(console.error);
+    getMidiTriggerConfig().then(next => {
+      setConfig(next);
+      setSelectedMscId(next.msc_device_id ?? 0);
+      setReady(true);
+    })
+      .catch(cause => setError(String(cause)));
+    listMidiInputPorts().then(setPorts).catch(cause => setError(String(cause)));
   }, []);
 
   const apply = async (next: MidiTriggerConfig) => {
-    setConfig(next);
+    setSaving(true);
+    setError("");
     try {
       await setMidiTriggerConfig(next);
+      setConfig(next);
     } catch (e) {
-      console.error(e);
+      setError(String(e));
+    } finally {
+      setSaving(false);
     }
   };
 
   return (
     <div style={{ marginBottom: 24 }}>
-      <div style={labelStyle}>MIDI Triggers</div>
+      <div style={labelStyle}>MIDI Input</div>
 
       <div style={{ marginBottom: 12 }}>
         <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
           <input
             type="checkbox"
             checked={config.enabled}
+            disabled={disabled}
             onChange={(e) => apply({ ...config, enabled: e.target.checked })}
             style={{ accentColor: "var(--wc-accent)", width: 14, height: 14 }}
           />
           Fire cues from incoming MIDI
         </label>
-        {(config.enabled || override.suspended) && <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, marginTop: 8 }}>
+        {(config.enabled || mscEnabled || override.suspended) && <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, marginTop: 8 }}>
           <input type="checkbox" checked={override.suspended === true}
             disabled={override.suspended === null || override.pending}
             onChange={event => void override.change(event.target.checked)} />
-          Suspend cue triggers for this session
+          Suspend incoming MIDI control for this session
         </label>}
         {override.error && <div role="alert" style={{ fontSize: 11 }}>{override.error}</div>}
       </div>
 
-      {config.enabled && (
+      {(config.enabled || mscEnabled || ports.length > 0) && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 11, color: "var(--wc-text-secondary)", marginBottom: 4 }}>
             Input port
@@ -78,10 +94,12 @@ export function MidiTriggerPreferences() {
             <Select
               style={{ ...inputStyle, cursor: "pointer" }}
               value={config.port ?? ""}
+              ariaLabel="MIDI input port"
+              disabled={disabled}
               onChange={(e) => apply({ ...config, port: e.target.value || null })}
             >
-              <option value="">(first available)</option>
-              {ports.map((p) => (
+              <option value="" disabled={mscEnabled}>(first available)</option>
+              {[...new Set(ports)].map((p) => (
                 <option key={p} value={p}>{p}</option>
               ))}
               {config.port && !ports.includes(config.port) && (
@@ -97,11 +115,26 @@ export function MidiTriggerPreferences() {
         </div>
       )}
 
-      <div style={{ fontSize: 11, color: "var(--wc-text-faint)" }}>
-        Bind a message to a cue in its Triggers tab — the Learn button fills it
-        in from whatever you press. Timing clock and active sensing are ignored,
-        so a clocked device will not flood the show.
-      </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+        <input type="checkbox" checked={mscEnabled} disabled={disabled || !config.port}
+          onChange={event => void apply({ ...config, msc_device_id: event.target.checked ? selectedMscId : null })} />
+        Receive MIDI Show Control
+      </label>
+      {!config.port && <p style={{ fontSize: 11, color: "var(--wc-text-secondary)" }}>
+        Choose a named input port to receive Show Control.
+      </p>}
+      {config.port && <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, marginTop: 8 }}>
+        Show Control device ID
+        <select value={config.msc_device_id ?? selectedMscId} disabled={disabled} style={{ ...inputStyle, width: "auto" }}
+          onChange={event => {
+            const id = Number(event.target.value);
+            setSelectedMscId(id);
+            if (mscEnabled) void apply({ ...config, msc_device_id: id });
+          }}>
+          {Array.from({ length: 127 }, (_, id) => <option key={id} value={id}>{id}</option>)}
+        </select>
+      </label>}
+      {error && <p role="alert" style={{ fontSize: 11 }}>{error}</p>}
     </div>
   );
 }

@@ -73,7 +73,7 @@ Start with the rows your show actually uses. The reference is QLab 5.6.5 with al
 
 | QLab workflow | What to try or account for on Linux |
 | --- | --- |
-| Remote GO from OSC, MIDI, MSC or iOS | OSC and MIDI triggers are available. The full MSC vocabulary, QLab Remote layouts and its iOS client remain open. |
+| Remote GO from OSC, MIDI, MSC or iOS | MIDI Show Control can start, pause, resume and load a numbered top-level cue from a named input. Rehearse standby GO, standby steps, desk-wide RESUME and ALL_OFF. MSC list and path operands, other commands and QLab Remote workflows remain open. [Show Control exercise](../midi/README.md#run-the-desk-from-a-show-control-console) |
 | Override incoming MIDI cue triggers | Suspend incoming cue triggers for the desk session and restore them from the transport bar. MIDI Learn and authored MIDI output remain available. [Override exercise](../midi/README.md#suspend-midi-cue-triggers-during-programming) |
 | Diagnose a listening-port conflict | Inspect the actual OSC receive endpoint in Preferences. Release the conflicting UDP listener and retry. Validate sender permissions and selection with the isolated workshop before using remote GO. |
 | Host collaborative editing | The primary can grant and revoke local review for one workspace and separately authorize cue renaming when it issues the credential. LAN collaboration and wider programming permissions remain open. [Cue-note exercise](../automation/README.md#review-cue-notes-from-a-second-terminal) |

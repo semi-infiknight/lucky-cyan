@@ -126,7 +126,7 @@ Workspace-scoped `start`, `stop`, `pause`, and `resume` accept no arguments and 
 
 **Equipment** — a MIDI footswitch, pad or virtual controller sending Control Change. Set it to send value 127 on press and 0 on release.
 
-1. In Preferences under **MIDI Triggers**, choose **Fire cues from incoming MIDI** and the named input port. If the port is absent, connect the controller and reopen Preferences.
+1. In Preferences under **MIDI Input**, choose **Fire cues from incoming MIDI** and the named input port. If the port is absent, connect the controller and reopen Preferences.
 2. Select 101. Open **Triggers**, enable its MIDI trigger and choose **Learn**. Press the pedal. Check the learned message type, channel and controller number against the controller.
 3. Set the value filter to **Exactly** and enter **127**. Start with both Wait cues stopped. Press the pedal once, hold it through the end of the five seconds, then release it.
 4. One press should start Standby once. Release should leave the active-cue display empty. Press again to confirm a second deliberate press works. If release fires, inspect the learned message and release value. A keyboard that sends Note Off on release needs a matching Note On binding for the press.

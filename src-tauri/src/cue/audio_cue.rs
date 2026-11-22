@@ -613,7 +613,6 @@ pub(crate) fn build_level_matrix(
 
 impl ClockMediaCue for AudioCue {
     fn clock_run(&mut self) -> &mut Option<(Uuid, ClockRun)> { &mut self.clock_run }
-    fn has_prepared_media(&self) -> bool { self.prepared.is_some() }
 }
 
 impl Cue for AudioCue {
@@ -625,6 +624,7 @@ impl Cue for AudioCue {
 
     fn id(&self) -> CueId { self.id }
     fn cue_type(&self) -> CueType { CueType::Audio }
+    fn has_prepared_media(&self) -> bool { self.prepared.is_some() }
     fn source_channel_names_mut(&mut self) -> Option<&mut Vec<String>> { Some(&mut self.source_channel_names) }
     fn output_patch_id(&self) -> Option<uuid::Uuid> { self.output_patch_id }
     fn name(&self) -> &str { &self.name }

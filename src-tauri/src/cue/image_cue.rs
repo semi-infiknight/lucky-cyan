@@ -195,6 +195,7 @@ impl Cue for ImageCue {
 
     fn id(&self) -> CueId { self.id }
     fn cue_type(&self) -> CueType { CueType::Image }
+    fn has_prepared_media(&self) -> bool { self.preloaded }
     fn name(&self) -> &str { &self.name }
     fn set_name(&mut self, name: String) { self.name = name; }
     fn number(&self) -> Option<&str> { self.number.as_deref() }

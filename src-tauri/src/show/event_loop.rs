@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::{
     cue::{
@@ -24,6 +24,7 @@ use crate::{
         types::{ContinueMode, CueId, CueState, CueType, GroupMode},
     },
     engine::{
+        midi_trigger::MidiDeskInput,
         output_engine::{OutputEngine, OutputStatus},
         ring_command::AudioStatus,
         timecode_receiver::TimecodeReceiver,
@@ -719,15 +720,6 @@ fn tick(
         let messages = slot.as_ref()?.drain();
         same_show.then_some(messages)
     }).unwrap_or_default();
-    let mut midi_fire = Vec::new();
-    for message in &midi_messages {
-        for cl in &ws.cue_lists {
-            midi_fire.extend(cl.midi_triggers_matching(message).into_iter()
-                .filter(|id| cl.get_recursive(id).is_some())
-                .map(|id| (cl.id, id)));
-        }
-    }
-
     // Retain required-device losses and fatal playback errors until the owning show can be locked.
     // Reset before device-loss resume or any group and follow clocks tick.
     let mut exact_output_resets = Vec::new();
@@ -1079,7 +1071,7 @@ fn tick(
     }
 
     // 9b. Dispatch the new marks kept after the clock barriers.
-    let transport = Transport::new(tick_ctx.clone());
+    let mut transport = Transport::new(tick_ctx.clone());
     for &(list_id, cue_id, elapsed) in &timecode.join {
         if let Some(list) = ws.cue_list_by_id_mut(list_id) {
             match transport.join_from_timecode(list, cue_id, elapsed) {
@@ -1092,21 +1084,44 @@ fn tick(
             }
         }
     }
-    for ((list_id, cue_id), clock_started) in timecode.fire.iter().map(|mark| (mark, true))
-        .chain(midi_fire.iter().map(|mark| (mark, false)))
-    {
-        if let Some(cl) = ws.cue_list_by_id_mut(*list_id) {
-            let context = tick_ctx.clone();
-            let mut transport = Transport::new(context);
-            let result = if clock_started {
-                transport.go_from_timecode(cl, cue_id)
-            } else {
-                transport.go_by_id(cl, cue_id)
-            };
-            if let Ok(result) = result {
+    for &(list_id, cue_id) in &timecode.fire {
+        if let Some(list) = ws.cue_list_by_id_mut(list_id) {
+            if let Ok(result) = transport.go_from_timecode(list, &cue_id) {
                 cue_prepared |= result.prepared;
                 all_go_triggered.extend(result.triggered);
                 all_go_stopped.extend(result.stopped);
+            }
+        }
+    }
+
+    let mut msc_changed = false;
+    for message in midi_messages {
+        match message {
+            MidiDeskInput::Voice(bytes) => {
+                for list in &mut ws.cue_lists {
+                    for id in list.midi_triggers_matching(&bytes) {
+                        if let Ok(result) = transport.go_by_id(list, &id) {
+                            cue_prepared |= result.prepared;
+                            all_go_triggered.extend(result.triggered);
+                            all_go_stopped.extend(result.stopped);
+                        }
+                    }
+                }
+            }
+            MidiDeskInput::ShowControl(command) => {
+                let protection = ws.preferences.general.double_go_protection_ms;
+                let result = super::msc_transport::apply(&mut transport, &mut ws, command, || {
+                    handle.try_state::<crate::state::AppState>().is_some_and(|state| {
+                        crate::commands::transport_cmds::accept_chained_go(&state, protection)
+                    })
+                });
+                match result {
+                    Ok(changed) => msc_changed |= changed,
+                    Err(error) => {
+                        msc_changed = true;
+                        log::warn!("MIDI Show Control action failed: {error}");
+                    }
+                }
             }
         }
     }
@@ -1317,7 +1332,7 @@ fn tick(
     }
 
     // Refresh summary attributes that are not part of the cue-state event.
-    if group_child_changed || nested_rows_changed || cue_projection_changed || cue_prepared {
+    if !msc_changed && (group_child_changed || nested_rows_changed || cue_projection_changed || cue_prepared) {
         let _ = handle.emit("cue-list-refresh", serde_json::json!({}));
     }
 
@@ -1346,6 +1361,12 @@ fn tick(
                 }),
             );
         }
+    }
+
+    // Refresh from the final native state after the ordinary event deltas.
+    // A batch can include a GO followed by a Pause or ALL_OFF.
+    if msc_changed {
+        let _ = handle.emit("cue-list-refresh", serde_json::json!({}));
     }
 
     if emit_workspace_modified {

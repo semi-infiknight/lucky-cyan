@@ -224,6 +224,17 @@ pub struct MidiTriggerMachineConfig {
     /// MIDI input port name. `None` = the first available port.
     #[serde(default)]
     pub port: Option<String>,
+    /// Individual or group destination. Also receives the standard all-call
+    /// address when deliberately enabled on a named input.
+    #[serde(default)]
+    pub msc_device_id: Option<u8>,
+}
+
+impl MidiTriggerMachineConfig {
+    pub(crate) fn msc_destination(&self) -> Option<u8> {
+        self.port.as_deref().filter(|name| !name.trim().is_empty())?;
+        self.msc_device_id.filter(|&id| id <= 126)
+    }
 }
 
 fn midi_trigger_config_path() -> std::path::PathBuf {

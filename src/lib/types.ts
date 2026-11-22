@@ -154,6 +154,7 @@ export interface MidiTrigger {
 export interface MidiTriggerConfig {
   enabled: boolean;
   port: string | null;
+  msc_device_id: number | null;
 }
 
 /** Memo Cue payload. A Memo performs no action; `memo_text` is its whole

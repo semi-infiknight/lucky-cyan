@@ -19,6 +19,8 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
 
+use crate::{cue::msc::MscTransport, machine_config::MidiTriggerMachineConfig};
+
 /// The kinds of MIDI message a cue can be triggered by.
 ///
 /// These four cover how show control actually uses MIDI: a note from a
@@ -193,10 +195,15 @@ pub fn list_midi_input_ports() -> Vec<String> {
     }
 }
 
-/// Listens on one MIDI input port and queues the channel-voice messages that
-/// arrive, for the show layer to match against its cues.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MidiDeskInput {
+    Voice(Vec<u8>),
+    ShowControl(MscTransport),
+}
+
+/// Queues channel-voice and addressed Show Control messages for the show.
 pub struct MidiTriggerListener {
-    receiver: Receiver<(u64, Vec<u8>)>,
+    receiver: Receiver<(u64, MidiDeskInput)>,
     gate: Arc<MidiTriggerGate>,
     /// Most recent message, for the inspector's Learn button.
     last_message: Arc<Mutex<Option<Vec<u8>>>>,
@@ -230,8 +237,10 @@ impl MidiTriggerGate {
 }
 
 impl MidiTriggerListener {
-    /// Start listening on `port_name` (or the first available port).
-    pub(crate) fn new(port_name: Option<String>, gate: Arc<MidiTriggerGate>) -> Self {
+    pub(crate) fn open(config: MidiTriggerMachineConfig, gate: Arc<MidiTriggerGate>) -> Option<Arc<Self>> {
+        if !config.enabled && config.msc_destination().is_none() {
+            return None;
+        }
         let (sender, receiver) = crossbeam_channel::unbounded();
         let last_message = Arc::new(Mutex::new(None));
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -241,13 +250,13 @@ impl MidiTriggerListener {
         let thread_gate = Arc::clone(&gate);
         let _ = std::thread::Builder::new()
             .name("inkue-midi-trigger".into())
-            .spawn(move || listen(port_name, sender, thread_last, thread_shutdown, thread_gate));
+            .spawn(move || listen(config, sender, thread_last, thread_shutdown, thread_gate));
 
-        Self { receiver, gate, last_message, shutdown }
+        Some(Arc::new(Self { receiver, gate, last_message, shutdown }))
     }
 
     /// Take everything received since the last call. Never blocks.
-    pub fn drain(&self) -> Vec<Vec<u8>> {
+    pub(crate) fn drain(&self) -> Vec<MidiDeskInput> {
         let current = self.gate.capture();
         self.receiver.try_iter()
             .filter_map(|(epoch, message)| (current == Some(epoch)).then_some(message))
@@ -274,8 +283,8 @@ impl Drop for MidiTriggerListener {
 }
 
 fn listen(
-    port_name: Option<String>,
-    sender: Sender<(u64, Vec<u8>)>,
+    config: MidiTriggerMachineConfig,
+    sender: Sender<(u64, MidiDeskInput)>,
     last_message: Arc<Mutex<Option<Vec<u8>>>>,
     shutdown: Arc<AtomicBool>,
     gate: Arc<MidiTriggerGate>,
@@ -284,18 +293,28 @@ fn listen(
         log::error!("[midi-trigger] failed to create MIDI input");
         return;
     };
-    // Clock and active sensing would otherwise flood the queue at 24 ppqn.
-    midi_in.ignore(midir::Ignore::All);
+    let msc_destination = config.msc_destination();
+    midi_in.ignore(if msc_destination.is_some() {
+        midir::Ignore::TimeAndActiveSense
+    } else {
+        midir::Ignore::All
+    });
 
     let ports = midi_in.ports();
-    let port = match &port_name {
-        Some(name) => ports
-            .iter()
-            .find(|p| midi_in.port_name(p).ok().as_deref() == Some(name.as_str())),
+    let port = match &config.port {
+        Some(name) => {
+            let mut matching = ports.iter().filter(|p| midi_in.port_name(p).ok().as_deref() == Some(name.as_str()));
+            let first = matching.next();
+            if msc_destination.is_some() && matching.next().is_some() {
+                log::warn!("[midi-trigger] Show Control input name {name:?} is ambiguous");
+                return;
+            }
+            first
+        }
         None => ports.first(),
     };
     let Some(port) = port else {
-        log::warn!("[midi-trigger] input port {port_name:?} not found");
+        log::warn!("[midi-trigger] input port {:?} not found", config.port);
         return;
     };
     let display = midi_in.port_name(port).unwrap_or_default();
@@ -308,18 +327,18 @@ fn listen(
             if callback_shutdown.load(Ordering::Relaxed) {
                 return;
             }
-            // Channel-voice messages only; everything else is noise here.
             let Some(&status) = message.first() else { return };
-            if !is_channel_voice(status) {
-                return;
-            }
             let epoch = gate.capture();
-            let owned = message.to_vec();
-            if let Ok(mut slot) = last_message.lock() {
-                *slot = Some(owned.clone());
-            }
-            if let Some(epoch) = epoch {
-                let _ = sender.send((epoch, owned));
+            if config.enabled && is_channel_voice(status) {
+                let owned = message.to_vec();
+                if let Ok(mut slot) = last_message.lock() {
+                    *slot = Some(owned.clone());
+                }
+                if let Some(epoch) = epoch {
+                    let _ = sender.send((epoch, MidiDeskInput::Voice(owned)));
+                }
+            } else if let Some((epoch, command)) = epoch.zip(msc_destination.and_then(|id| MscTransport::decode(message, id))) {
+                let _ = sender.send((epoch, MidiDeskInput::ShowControl(command)));
             }
         },
         (),
@@ -347,7 +366,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn midi_override_retires_queued_messages_without_replaying_them() {
+    fn midi_override_retires_queued_voice_and_msc_messages_without_replaying_them() {
         let gate = Arc::new(MidiTriggerGate::default());
         let (sender, receiver) = crossbeam_channel::unbounded();
         let listener = MidiTriggerListener {
@@ -356,7 +375,8 @@ mod tests {
             shutdown: Arc::default(),
         };
         let before = gate.capture().unwrap();
-        sender.send((before, vec![0x90, 60, 100])).unwrap();
+        sender.send((before, MidiDeskInput::Voice(vec![0x90, 60, 100]))).unwrap();
+        sender.send((before, MidiDeskInput::ShowControl(MscTransport::Go(None)))).unwrap();
         gate.set_suspended(true);
         assert!(gate.suspended());
         assert_eq!(gate.capture(), None);
@@ -365,10 +385,10 @@ mod tests {
         gate.set_suspended(false);
         let after = gate.capture().unwrap();
         assert_ne!(before, after);
-        sender.send((before, vec![0x90, 60, 100])).unwrap();
-        sender.send((after, vec![0x90, 61, 100])).unwrap();
+        sender.send((before, MidiDeskInput::ShowControl(MscTransport::Go(None)))).unwrap();
+        sender.send((after, MidiDeskInput::Voice(vec![0x90, 61, 100]))).unwrap();
         gate.set_suspended(false);
-        assert_eq!(listener.drain(), [vec![0x90, 61, 100]]);
+        assert_eq!(listener.drain(), [MidiDeskInput::Voice(vec![0x90, 61, 100])]);
     }
 
     fn note_on_trigger() -> MidiTrigger {

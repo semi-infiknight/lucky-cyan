@@ -74,13 +74,14 @@ pub fn set_midi_trigger_config(
     config: MidiTriggerMachineConfig,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    machine_config::save_midi_trigger_config(&config).map_err(|e| e.to_string())?;
+    if config.msc_device_id.is_some() && config.msc_destination().is_none() {
+        return Err("Choose a named MIDI input and a Show Control device ID from 0 to 126.".into());
+    }
+    let _workspace = state.workspace.lock().map_err(|e| e.to_string())?;
     let mut slot = state.midi_listener.lock().map_err(|e| e.to_string())?;
-    // The listener owns its connection for its whole life, so a port change is
-    // a fresh listener rather than a reconfiguration.
-    *slot = config
-        .enabled
-        .then(|| Arc::new(MidiTriggerListener::new(config.port, Arc::clone(&state.midi_trigger_gate))));
+    machine_config::save_midi_trigger_config(&config).map_err(|e| e.to_string())?;
+    drop(slot.take());
+    *slot = MidiTriggerListener::open(config, Arc::clone(&state.midi_trigger_gate));
     Ok(())
 }
 

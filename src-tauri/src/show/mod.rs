@@ -6,6 +6,7 @@ pub mod crossfade;
 pub(crate) mod cue_colors;
 pub mod cue_list;
 pub mod event_loop;
+mod msc_transport;
 pub(crate) mod timecode_loss;
 pub mod transport;
 pub mod undo_stack;

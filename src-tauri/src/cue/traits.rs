@@ -271,6 +271,9 @@ pub trait Cue: Send + std::any::Any {
 
     fn cancel_loaded_time(&mut self) -> bool { false }
 
+    /// An ordinary Load cue created a held engine voice that awaits a Start.
+    fn has_prepared_media(&self) -> bool { false }
+
     /// `true` when [`seek`](Cue::seek) moves this cue's playback — the UI
     /// offers scrubbing only then.  Types that implement `seek` override it.
     fn supports_seek(&self) -> bool {

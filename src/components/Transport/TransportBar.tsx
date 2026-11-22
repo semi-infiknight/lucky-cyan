@@ -127,9 +127,9 @@ export function TransportBar({ onRefresh, showMode, onInspectCue }: {
     <div className="desk-output-tools">
       <BlackoutStatus blackout={blackout} restore={() => setDmxBlackout(false)} />
       {midiOverride.suspended && <div className="desk-trigger-status">
-        <strong role="status">MIDI cue triggers suspended</strong>
+        <strong role="status">Incoming MIDI suspended</strong>
         <button type="button" disabled={midiOverride.pending}
-          onClick={() => void midiOverride.change(false)}>Restore MIDI triggers</button>
+          onClick={() => void midiOverride.change(false)}>Restore MIDI input</button>
         {midiOverride.error && <span role="alert">{midiOverride.error}</span>}
       </div>}
       {tcOverride.suspended && <div className="desk-trigger-status">
