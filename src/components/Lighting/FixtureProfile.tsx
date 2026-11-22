@@ -1,5 +1,6 @@
 import { useState } from "react";
-import type { FixtureType, ParamKind, PatchedFixture } from "../../lib/types";
+import type { FixtureParam, FixtureType, ParamKind, PatchedFixture } from "../../lib/types";
+import { channelSlots, fixtureParameterAddress } from "../../lib/fixtureChannels";
 import "./fixtureProfile.css";
 
 const roles: ParamKind[] = [
@@ -17,14 +18,19 @@ export function FixtureProfile({ fixture, save, exportSaved, close }: {
   const [draft, setDraft] = useState(fixture.fixture_type);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  function updateRole(index: number, kind: ParamKind) {
+  function updateParameter(index: number, edit: Partial<FixtureParam>) {
     setDraft(previous => ({
       ...previous,
-      parameters: previous.parameters.map((p, i) => i === index ? { ...p, kind } : p),
+      parameters: previous.parameters.map((p, i) => i === index ? { ...p, ...edit } : p),
     }));
   }
   async function apply() {
     if (busy || !draft.name.trim()) return;
+    if (draft.parameters.some(({ fine_channel_offset: fine }) =>
+      fine !== undefined && (!Number.isInteger(fine) || fine < 0 || fine >= 512))) {
+      setError("Enter a fine slot from 1 to 512 relative to the profile.");
+      return;
+    }
     setBusy(true);
     try {
       await save({ ...draft, name: draft.name.trim(), mode: draft.mode?.trim(), manufacturer: draft.manufacturer?.trim() });
@@ -54,16 +60,22 @@ export function FixtureProfile({ fixture, save, exportSaved, close }: {
         <label>Model / definition<input value={draft.name} required onChange={e => setDraft({ ...draft, name: e.target.value })} /></label>
         <label>Mode<input value={draft.mode ?? ""} onChange={e => setDraft({ ...draft, mode: e.target.value })} /></label>
       </div>
-      <table><thead><tr><th>Address</th><th>Parameter</th><th>Width</th><th>Control role</th></tr></thead>
+      <table><thead><tr><th>DMX address</th><th>Parameter</th><th>Width</th><th>Fine slot</th><th>Control role</th></tr></thead>
         <tbody>{draft.parameters.map((p, i) => <tr key={i}>
-          <td>{fixture.base_address + p.channel_offset}
-            {p.width === "Bit16" && `–${fixture.base_address + p.channel_offset + 1}`}</td><td>{p.name}</td>
+          <td>{channelSlots(fixtureParameterAddress(fixture, p)).map(slot => slot + 1)
+            .join(p.fine_channel_offset === undefined ? "–" : " / ")}</td><td>{p.name}</td>
           <td>{p.width === "Bit16" ? "16 bit" : "8 bit"}</td>
-          <td><select aria-label={`Control role for ${p.name}`} value={p.kind} onChange={e => updateRole(i, e.target.value as ParamKind)}>
+          <td>{p.width === "Bit16" && <input className="fixture-profile-fine-slot" type="number" min={1} max={512} step={1}
+            aria-label={`Fine slot for ${p.name}`} placeholder={String(p.channel_offset + 2)}
+            value={p.fine_channel_offset === undefined ? "" : p.fine_channel_offset + 1}
+            onChange={e => updateParameter(i, { fine_channel_offset: e.target.value === "" ? undefined : Number(e.target.value) - 1 })} />}</td>
+          <td><select aria-label={`Control role for ${p.name}`} value={p.kind} onChange={e => updateParameter(i, { kind: e.target.value as ParamKind })}>
             {roles.map(role => <option key={role} value={role}>{roleLabels[role] ?? role}</option>)}
           </select></td>
         </tr>)}</tbody>
       </table>
+      {draft.parameters.some(parameter => parameter.width === "Bit16") &&
+        <p>Fine slots are relative to the fixture. Leave the slot blank to use the channel after coarse.</p>}
       <p>Assign red, green and blue to link additive channels to the color picker. Repeated RGB roles move together. Assign one cyan, magenta and yellow for CMY. For HSI or HSV, assign one hue, one saturation and one matching HSI intensity or HSV value. Use intensity for a separate master dimmer.</p>
       <div className="fixture-profile-actions">
         <button type="button" onClick={apply} disabled={!draft.name.trim()}>Save profile</button>

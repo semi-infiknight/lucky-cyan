@@ -16,18 +16,14 @@ import {
   removeFixture,
   updateFixture,
 } from "../../lib/commands";
-import type { ChannelWidth, FixtureConflict, FixtureType, PatchedFixture } from "../../lib/types";
+import type { FixtureConflict, FixtureType, PatchedFixture } from "../../lib/types";
+import { fixtureFootprint } from "../../lib/fixtureChannels";
 import { FixtureProfile } from "./FixtureProfile";
 import { Select } from "../common/Select";
 import { DragNumber } from "../common/DragNumber";
 
 const PROFILE_EXTENSION = "inkue-fixture";
 const profileFilter = { name: "Inkue Fixture Profile", extensions: [PROFILE_EXTENSION] };
-const widthChannels = (w: ChannelWidth) => (w === "Bit16" ? 2 : 1);
-
-function footprint(t: FixtureType): number {
-  return t.parameters.reduce((max, p) => Math.max(max, p.channel_offset + widthChannels(p.width)), 0);
-}
 
 export function FixturePatch({ workspaceId }: { workspaceId: string }) {
   const [fixtures, setFixtures] = useState<PatchedFixture[]>([]);
@@ -82,7 +78,7 @@ export function FixturePatch({ workspaceId }: { workspaceId: string }) {
       } else {
         await addFixture(label, newUniverse, newAddress, t);
       }
-      setNewAddress(Math.min(512, newAddress + footprint(t)));
+      setNewAddress(Math.min(512, newAddress + fixtureFootprint(t)));
       await refresh();
     } catch (error) {
       setPatchError(String(error));
@@ -148,7 +144,7 @@ export function FixturePatch({ workspaceId }: { workspaceId: string }) {
       )}
 
       {fixtures.map((f) => {
-        const fp = footprint(f.fixture_type);
+        const fp = fixtureFootprint(f.fixture_type);
         const last = f.base_address + fp - 1;
         const conflict = conflictIds.has(f.id);
         return (
@@ -234,7 +230,7 @@ export function FixturePatch({ workspaceId }: { workspaceId: string }) {
       <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
         <button type="button" style={smallBtn} disabled={patchBusy} onClick={importProfile}>Import profile…</button>
         {importedProfile && newTypeIdx === "imported" && <small role="status" style={{ color: "var(--wc-text-secondary)" }}>
-          {[importedProfile.manufacturer, importedProfile.mode, `${footprint(importedProfile)} channels`]
+          {[importedProfile.manufacturer, importedProfile.mode, `${fixtureFootprint(importedProfile)} channels`]
             .filter(Boolean).join(" · ")}
         </small>}
       </div>

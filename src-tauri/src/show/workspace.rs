@@ -5,7 +5,8 @@
 /// Bumped whenever the `.inkue` JSON format gains a breaking change.
 /// Files written by newer Inkue versions (schema > this) are rejected
 /// at load time to prevent silent data corruption.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+const FINE_CHANNEL_SCHEMA: u32 = 2;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -77,6 +78,31 @@ pub(crate) fn relativize_paths(value: &mut serde_json::Value, base: &std::path::
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod fine_channel_tests {
+    use super::*;
+    use crate::engine::fixture::builtin_fixture_types;
+
+    #[test]
+    fn separated_fine_channels_require_a_compatible_workspace_version() {
+        let mut workspace = Workspace::new("Patch rehearsal");
+        let profile = builtin_fixture_types().into_iter()
+            .find(|profile| profile.name.starts_with("Moving Head")).unwrap();
+        workspace.fixtures.push(PatchedFixture::new("Head", 1, 50, profile));
+        let path = Path::new("show.inkue");
+        assert_eq!(workspace.document_for(path, None)["schema_version"], 1);
+        workspace.fixtures[0].fixture_type.parameters[0].fine_channel_offset = Some(8);
+        let mut doc = workspace.document_for(path, None);
+        assert_eq!(doc["schema_version"], FINE_CHANNEL_SCHEMA);
+        let registry = CueRegistry::new();
+        let reopened = Workspace::from_workspace_document(doc.clone(), None, &registry).unwrap();
+        assert_eq!(reopened.fixtures[0].resolve_channel(0).unwrap().fine_channel, Some(57));
+        doc["schema_version"] = 1.into();
+        assert!(Workspace::from_workspace_document(doc, None, &registry).err().unwrap()
+            .to_string().contains("require workspace schema"));
     }
 }
 
@@ -425,6 +451,14 @@ impl Workspace {
         serde_json::to_string_pretty(&self.document_for(save_path, None)).context("Failed to serialize workspace")
     }
 
+    fn document_schema(&self) -> u32 {
+        if self.fixtures.iter().any(PatchedFixture::has_explicit_fine_channels) {
+            FINE_CHANNEL_SCHEMA
+        } else {
+            1
+        }
+    }
+
     /// Copy saved cue programming and settings without a live desk position or audit history.
     pub(crate) fn to_template_json(&self, target: &Path) -> Result<String> {
         // Live cues normally hold absolute paths already. Resolve any relative
@@ -453,7 +487,7 @@ impl Workspace {
         }
 
         serde_json::json!({
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": self.document_schema(),
             "workspace": self.metadata,
             "programming_history": self.programming_history,
             "output_patches": self.output_patches,
@@ -485,7 +519,7 @@ impl Workspace {
             self.cue_lists.iter().map(|cl| cl.to_json()).collect();
 
         let doc = serde_json::json!({
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": self.document_schema(),
             "recovery_original_path": self.file_path.as_ref().map(|p| p.to_string_lossy().to_string()),
             "workspace": self.metadata,
             "programming_history": self.programming_history,
@@ -643,7 +677,7 @@ impl Workspace {
         }
 
         let doc = serde_json::json!({
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": self.document_schema(),
             "workspace": self.metadata,
             "programming_history": self.programming_history,
             "output_patches": self.output_patches,
@@ -806,10 +840,16 @@ impl Workspace {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 
-        let fixtures: Vec<PatchedFixture> = doc
-            .get("fixtures")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+        let fixtures: Vec<PatchedFixture> = match doc.get("fixtures") {
+            Some(value) if file_schema >= FINE_CHANNEL_SCHEMA =>
+                serde_json::from_value(value.clone()).context("Invalid workspace fixture patch")?,
+            Some(value) => serde_json::from_value(value.clone()).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        for fixture in fixtures.iter().filter(|fixture| fixture.has_explicit_fine_channels()) {
+            anyhow::ensure!(file_schema >= FINE_CHANNEL_SCHEMA, "Explicit fixture fine slots require workspace schema {FINE_CHANNEL_SCHEMA}.");
+            fixture.validate_profile_placement().map_err(|error| anyhow::anyhow!("{}: {error}", fixture.label))?;
+        }
 
         let fixture_groups: Vec<FixtureGroup> = doc
             .get("fixture_groups")

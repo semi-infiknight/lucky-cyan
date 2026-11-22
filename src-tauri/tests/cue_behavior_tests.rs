@@ -21,6 +21,7 @@ use common::{
 };
 use inkue_lib::cue::group_cue::GroupCue;
 use inkue_lib::cue::light_cue::{LightCue, ParamTarget};
+use inkue_lib::engine::dmx_engine::{ChannelWidth, PatchedChannel};
 use inkue_lib::cue::osc_cue::OscCue;
 use inkue_lib::cue::osc_types::{OscArg, OscMessage};
 use inkue_lib::cue::traits::{Cue, CueFactory};
@@ -406,17 +407,17 @@ fn light_cue_go_submits_a_fade_to_the_patched_fixture() {
     let [EngineCall::DmxSubmitFadeBatch { channels, .. }] = log.as_slice() else {
         panic!("Light GO must submit one DMX look for a patched target");
     };
-    assert_eq!(channels.as_slice(), &[(1, 0, inkue_lib::engine::dmx_engine::ChannelWidth::Bit8, 1.0)]);
+    assert_eq!(channels.as_slice(), &[(PatchedChannel::adjacent(1, 0, ChannelWidth::Bit8), 1.0)]);
 }
 
 #[test]
 fn an_unavailable_dmx_engine_leaves_the_light_cue_ready_to_retry() {
     use inkue_lib::cue::context::CueEvent;
-    use inkue_lib::engine::{dmx_engine::{ChannelWidth, DmxChannelLevel}, engine_traits::DmxEngineApi, ring_command::FadeCurve};
+    use inkue_lib::engine::{dmx_engine::DmxChannelLevel, engine_traits::DmxEngineApi, ring_command::FadeCurve};
 
     struct Unavailable;
     impl DmxEngineApi for Unavailable {
-        fn submit_fade(&self, _: u16, _: u16, _: ChannelWidth, _: f64, _: Duration, _: FadeCurve) {
+        fn submit_fade(&self, _: PatchedChannel, _: f64, _: Duration, _: FadeCurve) {
             unreachable!("a light cue must send one batch");
         }
         fn submit_fade_batch(&self, _: Vec<DmxChannelLevel>, _: Duration, _: FadeCurve) -> anyhow::Result<()> {
@@ -468,7 +469,7 @@ fn saved_native_color_mix_runs_through_the_light_cue_at_its_patched_channels() {
 #[test]
 fn a_grouped_light_cue_submits_one_timed_look_in_target_order() {
     use inkue_lib::cue::types::{FadeCurve, FadeSpec};
-    use inkue_lib::engine::{dmx_engine::ChannelWidth, fixture::{FixtureGroup, ParamKind}};
+    use inkue_lib::engine::fixture::{FixtureGroup, ParamKind};
 
     let fixture_type = builtin_fixture_types().into_iter().find(|fixture| fixture.name == "CMY (3ch)").unwrap();
     let a = PatchedFixture::new("Warm filter", 1, 1, fixture_type.clone());
@@ -492,13 +493,13 @@ fn a_grouped_light_cue_submits_one_timed_look_in_target_order() {
     };
     assert_eq!(*duration, Duration::from_millis(1200));
     assert_eq!(*curve, inkue_lib::engine::ring_command::FadeCurve::Linear);
-    assert_eq!(channels.as_slice(), &[(1, 0, ChannelWidth::Bit8, 0.25), (2, 8, ChannelWidth::Bit8, 0.25), (1, 0, ChannelWidth::Bit8, 0.75)]);
+    assert_eq!(channels.as_slice(), &[(PatchedChannel::adjacent(1, 0, ChannelWidth::Bit8), 0.25), (PatchedChannel::adjacent(2, 8, ChannelWidth::Bit8), 0.25), (PatchedChannel::adjacent(1, 0, ChannelWidth::Bit8), 0.75)]);
 }
 
 #[test]
 fn a_saved_native_group_color_is_atomic_and_stays_retryable_on_an_invalid_patch() {
     use inkue_lib::cue::types::{FadeCurve, FadeSpec};
-    use inkue_lib::engine::{dmx_engine::ChannelWidth, fixture::{FixtureColorModel, FixtureGroup, ParamKind}};
+    use inkue_lib::engine::fixture::{FixtureColorModel, FixtureGroup, ParamKind};
 
     let mut fixture_type = builtin_fixture_types().into_iter().find(|fixture| fixture.name == "HSI (3ch)").unwrap();
     let mut dimmer = fixture_type.parameters[0].clone();
@@ -533,13 +534,13 @@ fn a_saved_native_group_color_is_atomic_and_stays_retryable_on_an_invalid_patch(
     };
     assert_eq!(*duration, Duration::from_millis(800));
     assert_eq!(channels.as_slice(), &[
-        (1, 23, ChannelWidth::Bit8, 0.9),
-        (1, 20, ChannelWidth::Bit8, levels[0]),
-        (1, 21, ChannelWidth::Bit8, levels[1]),
-        (1, 22, ChannelWidth::Bit8, levels[2]),
-        (2, 50, ChannelWidth::Bit8, levels[0]),
-        (2, 51, ChannelWidth::Bit8, levels[1]),
-        (2, 52, ChannelWidth::Bit8, levels[2]),
+        (PatchedChannel::adjacent(1, 23, ChannelWidth::Bit8), 0.9),
+        (PatchedChannel::adjacent(1, 20, ChannelWidth::Bit8), levels[0]),
+        (PatchedChannel::adjacent(1, 21, ChannelWidth::Bit8), levels[1]),
+        (PatchedChannel::adjacent(1, 22, ChannelWidth::Bit8), levels[2]),
+        (PatchedChannel::adjacent(2, 50, ChannelWidth::Bit8), levels[0]),
+        (PatchedChannel::adjacent(2, 51, ChannelWidth::Bit8), levels[1]),
+        (PatchedChannel::adjacent(2, 52, ChannelWidth::Bit8), levels[2]),
     ]);
 }
 

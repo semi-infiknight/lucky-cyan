@@ -17,7 +17,7 @@ use anyhow::Result;
 use uuid::Uuid;
 
 use super::audio_engine::AudioEngine;
-use super::dmx_engine::{ChannelWidth, DmxChannelLevel, DmxEngine};
+use super::dmx_engine::{DmxChannelLevel, DmxEngine, PatchedChannel};
 use super::output_engine::{
     ContentRequest, CrossfadePhase, CrossfadeRequest, OutputEngine, OutputId, SilentSpeedOrigin,
 };
@@ -380,17 +380,15 @@ impl OutputEngineApi for OutputEngine {
 pub trait DmxEngineApi: Send + Sync {
     fn submit_fade(
         &self,
-        universe: u16,
-        channel: u16,
-        width: ChannelWidth,
+        address: PatchedChannel,
         target_norm: f64,
         dur: Duration,
         curve: FadeCurve,
     );
 
     fn submit_fade_batch(&self, channels: Vec<DmxChannelLevel>, dur: Duration, curve: FadeCurve) -> Result<()> {
-        for (universe, channel, width, level) in channels {
-            self.submit_fade(universe, channel, width, level, dur, curve);
+        for (address, level) in channels {
+            self.submit_fade(address, level, dur, curve);
         }
         Ok(())
     }
@@ -399,14 +397,12 @@ pub trait DmxEngineApi: Send + Sync {
 impl DmxEngineApi for DmxEngine {
     fn submit_fade(
         &self,
-        universe: u16,
-        channel: u16,
-        width: ChannelWidth,
+        address: PatchedChannel,
         target_norm: f64,
         dur: Duration,
         curve: FadeCurve,
     ) {
-        DmxEngine::submit_fade(self, universe, channel, width, target_norm, dur, curve)
+        self.submit_patched_fade(address, target_norm, dur, curve)
     }
 
     fn submit_fade_batch(&self, channels: Vec<DmxChannelLevel>, dur: Duration, curve: FadeCurve) -> Result<()> {

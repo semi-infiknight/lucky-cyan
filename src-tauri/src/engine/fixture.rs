@@ -8,7 +8,7 @@
 //! fixture's parameters can be tweaked independently.
 //!
 //! A Light Cue references a fixture by ID and a parameter by index; at GO it
-//! resolves `(universe, channel, width)` from the patch and submits a fade to
+//! resolves the exact DMX slots from the patch and submits a fade to
 //! the [`super::dmx_engine::DmxEngine`].
 
 use std::collections::{HashMap, HashSet};
@@ -18,14 +18,7 @@ use uuid::Uuid;
 
 use super::dmx_engine::ChannelWidth;
 use super::dmx_sink::DMX_UNIVERSE_SIZE;
-
-/// Number of DMX slots a [`ChannelWidth`] occupies.
-pub fn width_channels(width: ChannelWidth) -> u16 {
-    match width {
-        ChannelWidth::Bit8 => 1,
-        ChannelWidth::Bit16 => 2,
-    }
-}
+pub use super::dmx_engine::PatchedChannel;
 
 /// What a fixture parameter controls.  Drives the patch UI grouping, the
 /// identify ("test fixture") value, and future colour-mixing helpers.
@@ -96,10 +89,28 @@ pub struct FixtureParam {
     /// Zero-based offset of this parameter's (coarse) channel from the
     /// fixture's base address.
     pub channel_offset: u16,
+    /// Explicit fine slot relative to the fixture base. Older 16-bit
+    /// definitions omit it and use the slot immediately after coarse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fine_channel_offset: Option<u16>,
     /// Whether this parameter is 8- or 16-bit on the wire.
     pub width: ChannelWidth,
     /// Default normalised value `[0, 1]`.
     pub default: f64,
+}
+
+impl FixtureParam {
+    fn address(&self, universe: u16, base: u16) -> Option<PatchedChannel> {
+        Some(PatchedChannel {
+            universe,
+            channel: base.checked_add(self.channel_offset)?,
+            width: self.width,
+            fine_channel: match self.fine_channel_offset {
+                Some(fine) => Some(base.checked_add(fine)?),
+                None => None,
+            },
+        })
+    }
 }
 
 /// The channel layout of a kind of lighting instrument.
@@ -116,12 +127,13 @@ pub struct FixtureType {
 }
 
 impl FixtureType {
-    /// Number of DMX channels this fixture occupies, i.e. the highest
-    /// `channel_offset + width` across its parameters.
+    /// Number of reserved DMX slots, through the highest coarse or fine offset.
     pub fn footprint(&self) -> u16 {
         self.parameters
             .iter()
-            .map(|p| p.channel_offset.saturating_add(width_channels(p.width)))
+            .filter_map(|param| param.address(0, 0))
+            .flat_map(PatchedChannel::slots)
+            .map(|(_, offset)| offset.saturating_add(1))
             .max()
             .unwrap_or(0)
     }
@@ -151,14 +163,21 @@ pub(crate) fn validate_fixture_profile(profile: &FixtureType) -> Result<(), Stri
         if !parameter.default.is_finite() || !(0.0..=1.0).contains(&parameter.default) {
             return Err(format!("{} has a default outside 0–1.", parameter.name));
         }
-        let first = usize::from(parameter.channel_offset);
-        let limit = first + usize::from(width_channels(parameter.width));
-        let range = slots.get_mut(first..limit)
-            .ok_or_else(|| format!("{} extends beyond channel 512.", parameter.name))?;
-        if range.iter().any(|used| *used) {
-            return Err(format!("{} overlaps another coarse or fine channel.", parameter.name));
+        if parameter.fine_channel_offset.is_some() && parameter.width != ChannelWidth::Bit16 {
+            return Err(format!("{} needs 16-bit resolution to use a fine channel.", parameter.name));
         }
-        range.fill(true);
+        let address = parameter.address(0, 0).expect("zero base fits u16");
+        if address.fine_channel == Some(address.channel) {
+            return Err(format!("{} needs different coarse and fine channels.", parameter.name));
+        }
+        if !address.fits() {
+            return Err(format!("{} extends beyond channel 512.", parameter.name));
+        }
+        for (_, slot) in address.slots() {
+            if std::mem::replace(&mut slots[usize::from(slot)], true) {
+                return Err(format!("{} overlaps another coarse or fine channel.", parameter.name));
+            }
+        }
     }
     Ok(())
 }
@@ -185,7 +204,7 @@ pub(crate) fn decode_fixture_profile(bytes: &[u8]) -> Result<FixtureType, String
     check_profile_fields(layout, &["name", "manufacturer", "mode", "parameters"])?;
     let parameters = layout["parameters"].as_array().ok_or("Profile parameters must be a list.")?;
     for parameter in parameters {
-        check_profile_fields(parameter, &["kind", "name", "channel_offset", "width", "default"])?;
+        check_profile_fields(parameter, &["kind", "name", "channel_offset", "fine_channel_offset", "width", "default"])?;
     }
     validate_fixture_profile(&file.profile)?;
     Ok(file.profile)
@@ -214,27 +233,11 @@ pub struct PatchedFixture {
     pub fixture_type: FixtureType,
 }
 
-/// An exact physical channel assignment used by the live color controls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PatchedChannel {
-    pub universe: u16,
-    /// Zero-based coarse channel within the universe.
-    pub channel: u16,
-    pub width: ChannelWidth,
-}
-
 /// The ordered color channels actually assigned to one fixture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FixtureColorChannels {
     pub id: Uuid,
     pub channels: [PatchedChannel; 3],
-}
-
-impl PatchedChannel {
-    fn slots(self) -> impl Iterator<Item = (u16, u16)> {
-        (self.channel..self.channel + width_channels(self.width))
-            .map(move |channel| (self.universe, channel))
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -276,6 +279,18 @@ impl PatchedFixture {
         }
     }
 
+    pub(crate) fn has_explicit_fine_channels(&self) -> bool {
+        self.fixture_type.parameters.iter().any(|param| param.fine_channel_offset.is_some())
+    }
+
+    pub(crate) fn validate_profile_placement(&self) -> Result<(), String> {
+        validate_fixture_profile(&self.fixture_type)?;
+        if !self.address_span().is_some_and(|(first, last)| first > 0 && usize::from(last) <= DMX_UNIVERSE_SIZE) {
+            return Err("The fixture must fit within DMX addresses 1–512.".into());
+        }
+        Ok(())
+    }
+
     /// Inclusive one-based address range `(first, last)` this fixture occupies.
     /// Returns `None` for a fixture with no parameters.
     pub fn address_span(&self) -> Option<(u16, u16)> {
@@ -286,16 +301,11 @@ impl PatchedFixture {
         Some((self.base_address, self.base_address.saturating_add(footprint - 1)))
     }
 
-    /// Resolve a parameter index to its `(universe, zero-based channel, width)`
-    /// for the DMX engine.  Returns `None` if the index is out of range.
-    pub fn resolve_channel(&self, param_index: usize) -> Option<(u16, u16, ChannelWidth)> {
+    /// Resolve a parameter to the exact coarse and fine slots on the wire.
+    pub fn resolve_channel(&self, param_index: usize) -> Option<PatchedChannel> {
         let param = self.fixture_type.parameters.get(param_index)?;
-        // base_address is 1-based; the engine addresses channels 0-based.
-        let channel = self.base_address.checked_sub(1)?.checked_add(param.channel_offset)?;
-        if channel.checked_add(width_channels(param.width))? as usize > DMX_UNIVERSE_SIZE {
-            return None;
-        }
-        Some((self.universe, channel, param.width))
+        let address = param.address(self.universe, self.base_address.checked_sub(1)?)?;
+        address.fits().then_some(address)
     }
 
     /// Find a native color triplet by explicit roles. Ambiguous roles and
@@ -321,18 +331,17 @@ impl PatchedFixture {
             if matches.next().is_some() {
                 return Err(format!("Assign exactly one channel for each {} role", model.name()));
             }
-            let (universe, channel, width) = self
+            let address = self
                 .resolve_channel(index)
                 .ok_or_else(|| format!("{} parameter is outside the universe", model.name()))?;
-            let end = channel + width_channels(width);
-            for other_index in (0..params.len()).filter(|&other| other != index) {
-                let other = &params[other_index];
-                let Some(start) = self.base_address.checked_sub(1).and_then(|base| base.checked_add(other.channel_offset)) else { continue; };
-                if start < end && start.saturating_add(width_channels(other.width)) > channel {
+            for (_, param) in params.iter().enumerate().filter(|(other, _)| *other != index) {
+                // Compare even legacy parameters whose other slot is out of range.
+                let Some(other) = param.address(self.universe, self.base_address - 1) else { continue; };
+                if address.slots().any(|slot| other.slots().any(|candidate| slot == candidate)) {
                     return Err(format!("{} channels overlap another fixture parameter", model.name()));
                 }
             }
-            Ok(PatchedChannel { universe, channel, width })
+            Ok(address)
         };
         let [first, second, third] = model.roles();
         Ok([resolve(first)?, resolve(second)?, resolve(third)?])
@@ -400,8 +409,7 @@ pub(crate) fn check_color_patch(
     }
     for fixture in fixtures {
         for index in 0..fixture.fixture_type.parameters.len() {
-            let Some((universe, channel, width)) = fixture.resolve_channel(index) else { continue; };
-            let physical = PatchedChannel { universe, channel, width };
+            let Some(physical) = fixture.resolve_channel(index) else { continue; };
             if physical.slots().any(|slot| slots.get(&slot).is_some_and(|id| *id != fixture.id)) {
                 return Err(format!("A {} channel overlaps {} in the patch", model.name(), fixture.label));
             }
@@ -459,7 +467,7 @@ pub fn find_conflicts(fixtures: &[PatchedFixture]) -> Vec<FixtureConflict> {
 // ---------------------------------------------------------------------------
 
 fn param(kind: ParamKind, name: &str, offset: u16, width: ChannelWidth, default: f64) -> FixtureParam {
-    FixtureParam { kind, name: name.to_string(), channel_offset: offset, width, default }
+    FixtureParam { kind, name: name.to_string(), channel_offset: offset, fine_channel_offset: None, width, default }
 }
 
 /// The built-in fixture templates offered when patching.  These are pure
@@ -585,8 +593,27 @@ mod tests {
         for key in ["id", "label", "universe", "base_address"] {
             assert!(document["profile"].get(key).is_none());
         }
-        document["profile"]["parameters"][0]["fine_channel_offset"] = serde_json::json!(7);
+        document["profile"]["parameters"][0]["unknown_address"] = serde_json::json!(7);
         assert!(decode_fixture_profile(&serde_json::to_vec(&document).unwrap()).is_err());
+    }
+
+    #[test]
+    fn portable_profile_round_trips_separated_fine_slots_and_reserves_the_full_span() {
+        use ChannelWidth::{Bit16, Bit8};
+        let mut pan = param(ParamKind::Pan, "Pan", 0, Bit16, 0.5);
+        pan.fine_channel_offset = Some(6);
+        let mut profile = FixtureType {
+            name: "Split coarse and fine".into(), manufacturer: String::new(), mode: String::new(),
+            parameters: vec![pan, param(ParamKind::Intensity, "Dimmer", 1, Bit8, 0.0)],
+        };
+        let decoded = decode_fixture_profile(&encode_fixture_profile(&profile).unwrap()).unwrap();
+        assert_eq!(decoded, profile);
+        let fixture = PatchedFixture::new("Head", 3, 506, decoded);
+        let address = fixture.resolve_channel(0).unwrap();
+        assert_eq!(address.slots().collect::<Vec<_>>(), [(3, 505), (3, 511)]);
+        assert_eq!(fixture.address_span(), Some((506, 512)));
+        profile.parameters[1].channel_offset = 6;
+        assert!(validate_fixture_profile(&profile).unwrap_err().contains("overlaps"));
     }
 
     #[test]
@@ -628,9 +655,9 @@ mod tests {
     fn resolve_channel_is_zero_based() {
         let f = PatchedFixture::new("Wash", 1, 10, rgb());
         // base 10 (1-based) → channel 9 (0-based); Green offset 1 → 10.
-        assert_eq!(f.resolve_channel(0), Some((1, 9, ChannelWidth::Bit8)));
-        assert_eq!(f.resolve_channel(1), Some((1, 10, ChannelWidth::Bit8)));
-        assert_eq!(f.resolve_channel(2), Some((1, 11, ChannelWidth::Bit8)));
+        assert_eq!(f.resolve_channel(0), Some(PatchedChannel::adjacent(1, 9, ChannelWidth::Bit8)));
+        assert_eq!(f.resolve_channel(1), Some(PatchedChannel::adjacent(1, 10, ChannelWidth::Bit8)));
+        assert_eq!(f.resolve_channel(2), Some(PatchedChannel::adjacent(1, 11, ChannelWidth::Bit8)));
         assert_eq!(f.resolve_channel(3), None);
     }
 
@@ -760,8 +787,8 @@ mod tests {
         let mut fixtures = vec![first, second];
 
         let channels = group.color_channels(&fixtures, FixtureColorModel::Cmy).unwrap();
-        assert_eq!(channels[0].channels[0], PatchedChannel { universe: 1, channel: 10, width: ChannelWidth::Bit16 });
-        assert_eq!(channels[1].channels[0], PatchedChannel { universe: 2, channel: 10, width: ChannelWidth::Bit8 });
+        assert_eq!(channels[0].channels[0], PatchedChannel::adjacent(1, 10, ChannelWidth::Bit16));
+        assert_eq!(channels[1].channels[0], PatchedChannel::adjacent(2, 10, ChannelWidth::Bit8));
         assert!(group.color_channels(&fixtures[..1], FixtureColorModel::Cmy).is_err());
         assert!(group.color_channels(&fixtures, FixtureColorModel::Hsi).is_err());
         let repeated = FixtureGroup::new("Duplicate", vec![fixtures[0].id, fixtures[0].id]);

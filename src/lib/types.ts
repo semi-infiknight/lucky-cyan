@@ -1044,6 +1044,7 @@ export interface PatchedChannel {
   universe: number;
   channel: number;
   width: ChannelWidth;
+  fine_channel?: number;
 }
 
 export interface FixtureColorChannels {
@@ -1056,6 +1057,7 @@ export interface FixtureParam {
   kind: ParamKind;
   name: string;
   channel_offset: number;
+  fine_channel_offset?: number;
   width: ChannelWidth;
   default: number;
 }

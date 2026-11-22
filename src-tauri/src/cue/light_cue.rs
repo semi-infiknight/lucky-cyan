@@ -125,8 +125,8 @@ impl LightCue {
                         log::warn!("LightCue {}: fixture {fixture_id} not patched", self.id);
                         continue;
                     };
-                    if let Some((u, ch, w)) = fixture.resolve_channel(*param_index) {
-                        channels.push((u, ch, w, *value));
+                    if let Some(address) = fixture.resolve_channel(*param_index) {
+                        channels.push((address, *value));
                     }
                 }
                 ParamTarget::Group { group_id, param_kind, value } => {
@@ -139,8 +139,8 @@ impl LightCue {
                         let Some(fixture) = context.resolve_fixture(*member_id) else { continue };
                         for (i, p) in fixture.fixture_type.parameters.iter().enumerate() {
                             if p.kind == *param_kind {
-                                if let Some((u, ch, w)) = fixture.resolve_channel(i) {
-                                    channels.push((u, ch, w, *value));
+                                if let Some(address) = fixture.resolve_channel(i) {
+                                    channels.push((address, *value));
                                 }
                             }
                         }
@@ -156,9 +156,7 @@ impl LightCue {
                     let mapped = group.color_channels(&context.fixtures, *model)
                         .map_err(|error| anyhow!("{}: {error}", group.label))?;
                     for member in mapped {
-                        channels.extend(member.channels.into_iter().zip(*levels).map(|(slot, level)| {
-                            (slot.universe, slot.channel, slot.width, level)
-                        }));
+                        channels.extend(member.channels.into_iter().zip(*levels));
                     }
                 }
                 ParamTarget::GroupColor { levels: None, .. } => {}

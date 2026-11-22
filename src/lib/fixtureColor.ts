@@ -1,5 +1,6 @@
 // Shared helpers for fixture colour mixing (Dashboard + Light Cue inspector).
 import type { ColorLevels, FixtureColorChannels, FixtureColorModel, FixtureGroup, PatchedChannel, PatchedFixture } from "./types";
+import { channelSlots, fixtureChannelFits, fixtureParameterAddress } from "./fixtureChannels";
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 const to255 = (v: number) => Math.round(clamp01(v) * 255);
@@ -88,21 +89,16 @@ export function fixtureColorBinding(fixture: PatchedFixture, model: FixtureColor
   if (indices.some(matches => matches.length !== 1)) return null;
   const [first, second, third] = indices.map(matches => matches[0]);
   const selected: [number, number, number] = [first, second, third];
-  const spans = params.map(param => {
-    const start = fixture.base_address - 1 + param.channel_offset;
-    return { start, end: start + (param.width === "Bit16" ? 2 : 1) };
-  });
+  const addresses = params.map(param => fixtureParameterAddress(fixture, param));
 
   if (!Number.isInteger(fixture.base_address) || fixture.base_address < 1 ||
       selected.some(index => {
-        const { start, end } = spans[index];
-        return !Number.isInteger(start) || start < 0 || end > 512 ||
-          spans.some((other, otherIndex) => otherIndex !== index && other.start < end && other.end > start);
+        const address = addresses[index];
+        const slots = channelSlots(address);
+        return !fixtureChannelFits(address) || addresses.some((other, otherIndex) =>
+          otherIndex !== index && channelSlots(other).some(slot => slots.includes(slot)));
       })) return null;
-  const channelAt = (index: number): PatchedChannel => ({
-    universe: fixture.universe, channel: spans[index].start, width: params[index].width,
-  });
-  return { indices: selected, channels: [channelAt(first), channelAt(second), channelAt(third)] };
+  return { indices: selected, channels: [addresses[first], addresses[second], addresses[third]] };
 }
 
 export function fixtureColorBindings(fixture: PatchedFixture) {
@@ -112,10 +108,8 @@ export function fixtureColorBindings(fixture: PatchedFixture) {
   });
 }
 
-function slots({ universe, channel, width }: PatchedChannel): string[] {
-  return width === "Bit16"
-    ? [`${universe}/${channel}`, `${universe}/${channel + 1}`]
-    : [`${universe}/${channel}`];
+function slots(address: PatchedChannel): string[] {
+  return channelSlots(address).map(slot => `${address.universe}/${slot}`);
 }
 
 /** Each member must support the same mix. Color slots must be exclusive to their fixture. */
@@ -138,10 +132,9 @@ export function groupColorBindings(group: FixtureGroup, fixtures: PatchedFixture
     }
     for (const fixture of fixtures) {
       for (const param of fixture.fixture_type.parameters) {
-        const channel = fixture.base_address - 1 + param.channel_offset;
-        const width = param.width;
-        if (channel < 0 || channel + (width === "Bit16" ? 2 : 1) > 512) continue;
-        const conflicts = slots({ universe: fixture.universe, channel, width }).some(slot => {
+        const address = fixtureParameterAddress(fixture, param);
+        if (fixture.base_address < 1 || !fixtureChannelFits(address)) continue;
+        const conflicts = slots(address).some(slot => {
           const owner = occupied.get(slot);
           return owner !== undefined && owner !== fixture.id;
         });

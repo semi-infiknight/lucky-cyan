@@ -56,7 +56,7 @@ impl Show {
 
     pub fn from_reader(reader: impl std::io::Read) -> Result<Self> {
         let show: Self = serde_json::from_reader(reader).context("read Inkue workspace JSON")?;
-        if show.schema_version > 1 {
+        if show.schema_version > 2 {
             bail!("unsupported workspace schema {}", show.schema_version);
         }
         Ok(show)

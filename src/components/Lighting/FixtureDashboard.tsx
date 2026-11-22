@@ -14,6 +14,7 @@ import {
   dmxSetFixtureParam, loadFixtureDashboard,
 } from "../../lib/commands";
 import type { DmxUniverseSnapshot, FixtureGroup, FixtureParam, PatchedFixture } from "../../lib/types";
+import { channelSlots, fixtureChannelFits, fixtureParameterAddress } from "../../lib/fixtureChannels";
 import { fixtureColorBindings, groupColorBindings, groupColorLevels, paramIndexOfKind, rgbChannelChanges, rgbToHex } from "../../lib/fixtureColor";
 import { FixtureColorControl } from "./FixtureColorControl";
 
@@ -23,13 +24,11 @@ const applyFixtureColor = { cmy: dmxSetFixtureCmy, hsi: dmxSetFixtureHsi, hsv: d
 function valueFromSnapshot(fixture: PatchedFixture, param: FixtureParam, snap: DmxUniverseSnapshot[]): number {
   const u = snap.find((s) => s.universe === fixture.universe);
   if (!u) return 0;
-  const addr0 = fixture.base_address - 1 + param.channel_offset;
-  if (param.width === "Bit16") {
-    const hi = u.channels[addr0] ?? 0;
-    const lo = u.channels[addr0 + 1] ?? 0;
-    return ((hi << 8) | lo) / 65535;
-  }
-  return (u.channels[addr0] ?? 0) / 255;
+  const address = fixtureParameterAddress(fixture, param);
+  if (fixture.base_address < 1 || !fixtureChannelFits(address)) return 0;
+  const [coarse, fine] = channelSlots(address);
+  const hi = u.channels[coarse] ?? 0;
+  return fine === undefined ? hi / 255 : ((hi << 8) | (u.channels[fine] ?? 0)) / 65535;
 }
 
 export function FixtureDashboard({ workspaceId }: { workspaceId: string }) {

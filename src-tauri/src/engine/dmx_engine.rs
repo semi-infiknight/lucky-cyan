@@ -37,12 +37,57 @@ const KEEPALIVE: Duration = Duration::from_millis(800);
 pub enum ChannelWidth {
     /// One DMX channel (0–255).
     Bit8,
-    /// Two adjacent channels, coarse then fine (0–65535).
+    /// Coarse and fine channels (0–65535).
     Bit16,
 }
 
-/// Universe, zero-based coarse channel, resolution, and normalized target level.
-pub type DmxChannelLevel = (u16, u16, ChannelWidth, f64);
+/// A physical DMX parameter. Both channel numbers are zero-based.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchedChannel {
+    pub universe: u16,
+    pub channel: u16,
+    pub width: ChannelWidth,
+    /// If absent, a 16-bit parameter uses the next slot for its fine byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fine_channel: Option<u16>,
+}
+
+impl PatchedChannel {
+    pub fn adjacent(universe: u16, channel: u16, width: ChannelWidth) -> Self {
+        Self { universe, channel, width, fine_channel: None }
+    }
+
+    fn fine(self) -> Option<u16> {
+        match self.width {
+            ChannelWidth::Bit8 => None,
+            ChannelWidth::Bit16 => self.fine_channel.or_else(|| self.channel.checked_add(1)),
+        }
+    }
+
+    pub(super) fn fits(self) -> bool {
+        usize::from(self.channel) < DMX_UNIVERSE_SIZE && match self.width {
+            ChannelWidth::Bit8 => self.fine_channel.is_none(),
+            ChannelWidth::Bit16 => self.fine().is_some_and(|fine| fine != self.channel && usize::from(fine) < DMX_UNIVERSE_SIZE),
+        }
+    }
+
+    pub(super) fn slots(self) -> impl Iterator<Item = (u16, u16)> {
+        [Some(self.channel), self.fine()].into_iter().flatten().map(move |slot| (self.universe, slot))
+    }
+
+    pub(crate) fn read(self, buf: &[u8]) -> f64 {
+        let coarse = u16::from(buf.get(usize::from(self.channel)).copied().unwrap_or(0));
+        match self.width {
+            ChannelWidth::Bit8 => f64::from(coarse) / 255.0,
+            ChannelWidth::Bit16 => {
+                let fine = self.fine().and_then(|slot| buf.get(usize::from(slot))).copied().unwrap_or(0);
+                f64::from((coarse << 8) | u16::from(fine)) / 65535.0
+            }
+        }
+    }
+}
+
+pub type DmxChannelLevel = (PatchedChannel, f64);
 
 /// Convert a normalised value `[0, 1]` to its coarse (+ optional fine) DMX byte.
 fn norm_to_bytes(norm: f64, width: ChannelWidth) -> (u8, Option<u8>) {
@@ -58,7 +103,7 @@ fn norm_to_bytes(norm: f64, width: ChannelWidth) -> (u8, Option<u8>) {
 
 /// A single in-progress fade on one channel.
 struct ChannelFade {
-    width: ChannelWidth,
+    address: PatchedChannel,
     start_norm: f64,
     target_norm: f64,
     t0: Instant,
@@ -69,8 +114,10 @@ struct ChannelFade {
 /// Pure DMX render state: universe buffers + active fades + blackout.
 pub struct DmxState {
     universes: HashMap<u16, [u8; DMX_UNIVERSE_SIZE]>,
-    /// Keyed by `(universe, coarse_channel)`. Active fades have disjoint slot spans.
+    /// Keyed by `(universe, coarse_channel)`. Active fades use distinct slots.
     fades: HashMap<(u16, u16), ChannelFade>,
+    /// Find a fade from a write to its fine slot, including separated pairs.
+    fine_owners: HashMap<(u16, u16), u16>,
     blackout: bool,
 }
 
@@ -82,7 +129,7 @@ impl Default for DmxState {
 
 impl DmxState {
     pub fn new() -> Self {
-        Self { universes: HashMap::new(), fades: HashMap::new(), blackout: false }
+        Self { universes: HashMap::new(), fades: HashMap::new(), fine_owners: HashMap::new(), blackout: false }
     }
 
     fn buffer_mut(&mut self, universe: u16) -> &mut [u8; DMX_UNIVERSE_SIZE] {
@@ -91,29 +138,25 @@ impl DmxState {
 
     /// Current normalised value of a channel (0.0 if the universe is untouched).
     pub fn read_norm(&self, universe: u16, channel: u16, width: ChannelWidth) -> f64 {
-        let Some(buf) = self.universes.get(&universe) else { return 0.0 };
-        let i = channel as usize;
-        match width {
-            ChannelWidth::Bit8 => *buf.get(i).unwrap_or(&0) as f64 / 255.0,
-            ChannelWidth::Bit16 => {
-                let hi = *buf.get(i).unwrap_or(&0) as u16;
-                let lo = *buf.get(i + 1).unwrap_or(&0) as u16;
-                ((hi << 8) | lo) as f64 / 65535.0
-            }
+        self.read_patched(PatchedChannel::adjacent(universe, channel, width))
+    }
+
+    fn read_patched(&self, address: PatchedChannel) -> f64 {
+        self.universes.get(&address.universe).map_or(0.0, |buf| address.read(buf))
+    }
+
+    fn write_patched(&mut self, address: PatchedChannel, norm: f64) {
+        let (hi, lo) = norm_to_bytes(norm, address.width);
+        let buf = self.buffer_mut(address.universe);
+        buf[usize::from(address.channel)] = hi;
+        if let Some((fine, lo)) = address.fine().zip(lo) {
+            buf[usize::from(fine)] = lo;
         }
     }
 
-    fn write_norm(&mut self, universe: u16, channel: u16, width: ChannelWidth, norm: f64) {
-        let (hi, lo) = norm_to_bytes(norm, width);
-        let i = channel as usize;
-        let buf = self.buffer_mut(universe);
-        if i < DMX_UNIVERSE_SIZE {
-            buf[i] = hi;
-        }
-        if let Some(lo) = lo {
-            if i + 1 < DMX_UNIVERSE_SIZE {
-                buf[i + 1] = lo;
-            }
+    fn remove_fade(&mut self, key: (u16, u16)) {
+        if let Some(fine) = self.fades.remove(&key).and_then(|fade| fade.address.fine()) {
+            self.fine_owners.remove(&(key.0, fine));
         }
     }
 
@@ -131,24 +174,29 @@ impl DmxState {
         curve: FadeCurve,
         now: Instant,
     ) {
-        self.fades.remove(&(universe, channel));
-        if let Some(coarse) = channel.checked_sub(1) {
-            let key = (universe, coarse);
-            if self.fades.get(&key).is_some_and(|fade| fade.width == ChannelWidth::Bit16) {
-                self.fades.remove(&key);
-            }
-        }
-        if width == ChannelWidth::Bit16 {
-            self.fades.remove(&(universe, channel.saturating_add(1)));
-        }
-        if dur.is_zero() {
-            self.write_norm(universe, channel, width, target_norm);
+        self.submit_patched_fade(PatchedChannel::adjacent(universe, channel, width), target_norm, dur, curve, now);
+    }
+
+    fn submit_patched_fade(&mut self, address: PatchedChannel, target_norm: f64, dur: Duration, curve: FadeCurve, now: Instant) {
+        if !address.fits() {
             return;
         }
-        let start_norm = self.read_norm(universe, channel, width);
+        let PatchedChannel { universe, channel, .. } = address;
+        for key in address.slots() {
+            let owner = self.fine_owners.get(&key).copied().unwrap_or(key.1);
+            self.remove_fade((universe, owner));
+        }
+        if dur.is_zero() {
+            self.write_patched(address, target_norm);
+            return;
+        }
+        let start_norm = self.read_patched(address);
+        if let Some(fine) = address.fine() {
+            self.fine_owners.insert((universe, fine), channel);
+        }
         self.fades.insert(
             (universe, channel),
-            ChannelFade { width, start_norm, target_norm, t0: now, dur, curve },
+            ChannelFade { address, start_norm, target_norm, t0: now, dur, curve },
         );
     }
 
@@ -157,31 +205,31 @@ impl DmxState {
     }
 
     fn submit_fade_batch(&mut self, channels: &[DmxChannelLevel], dur: Duration, curve: FadeCurve, now: Instant) {
-        for &(universe, channel, width, level) in channels {
-            self.submit_fade(universe, channel, width, level, dur, curve, now);
+        for &(address, level) in channels {
+            self.submit_patched_fade(address, level, dur, curve, now);
         }
     }
 
     /// Advance every fade to `now`, writing interpolated values into the buffers.
     /// Completed fades are removed, leaving their final value in place (tracking).
     pub fn tick(&mut self, now: Instant) {
-        let mut writes: Vec<(u16, u16, ChannelWidth, f64)> = Vec::new();
+        let mut writes: Vec<DmxChannelLevel> = Vec::new();
         let mut done: Vec<(u16, u16)> = Vec::new();
         for (&(universe, channel), fade) in self.fades.iter() {
             let elapsed = now.saturating_duration_since(fade.t0).as_secs_f64();
             let t = (elapsed / fade.dur.as_secs_f64()).clamp(0.0, 1.0);
             let k = fade.curve.apply(t);
             let norm = fade.start_norm + (fade.target_norm - fade.start_norm) * k;
-            writes.push((universe, channel, fade.width, norm));
+            writes.push((fade.address, norm));
             if t >= 1.0 {
                 done.push((universe, channel));
             }
         }
-        for (universe, channel, width, norm) in writes {
-            self.write_norm(universe, channel, width, norm);
+        for (address, norm) in writes {
+            self.write_patched(address, norm);
         }
         for key in done {
-            self.fades.remove(&key);
+            self.remove_fade(key);
         }
     }
 
@@ -208,9 +256,7 @@ pub type DmxSnapshot = HashMap<u16, [u8; DMX_UNIVERSE_SIZE]>;
 
 enum DmxCommand {
     SubmitFade {
-        universe: u16,
-        channel: u16,
-        width: ChannelWidth,
+        address: PatchedChannel,
         target_norm: f64,
         dur: Duration,
         curve: FadeCurve,
@@ -257,10 +303,12 @@ impl DmxEngine {
         dur: Duration,
         curve: FadeCurve,
     ) {
+        self.submit_patched_fade(PatchedChannel::adjacent(universe, channel, width), target_norm, dur, curve);
+    }
+
+    pub fn submit_patched_fade(&self, address: PatchedChannel, target_norm: f64, dur: Duration, curve: FadeCurve) {
         let _ = self.cmd_tx.send(DmxCommand::SubmitFade {
-            universe,
-            channel,
-            width,
+            address,
             target_norm,
             dur,
             curve,
@@ -270,6 +318,10 @@ impl DmxEngine {
     /// Set a channel immediately (no fade).
     pub fn set_channel(&self, universe: u16, channel: u16, width: ChannelWidth, value_norm: f64) {
         self.submit_fade(universe, channel, width, value_norm, Duration::ZERO, FadeCurve::Linear);
+    }
+
+    pub(crate) fn set_patched_channel(&self, address: PatchedChannel, value: f64) {
+        self.submit_patched_fade(address, value, Duration::ZERO, FadeCurve::Linear);
     }
 
     /// Apply a look in one rendered frame and use a common start time.
@@ -339,8 +391,8 @@ fn dmx_thread(cmd_rx: crossbeam_channel::Receiver<DmxCommand>, snapshot: Arc<Mut
         loop {
             match cmd_rx.try_recv() {
                 Ok(DmxCommand::Shutdown) | Err(TryRecvError::Disconnected) => return,
-                Ok(DmxCommand::SubmitFade { universe, channel, width, target_norm, dur, curve }) => {
-                    state.submit_fade(universe, channel, width, target_norm, dur, curve, Instant::now());
+                Ok(DmxCommand::SubmitFade { address, target_norm, dur, curve }) => {
+                    state.submit_patched_fade(address, target_norm, dur, curve, Instant::now());
                 }
                 Ok(DmxCommand::SubmitFadeBatch { channels, dur, curve }) => {
                     state.submit_fade_batch(&channels, dur, curve, Instant::now());
@@ -426,9 +478,9 @@ mod tests {
         };
         wait([255, 0, 0, 0, 0]);
         engine.submit_fade_batch(vec![
-            (1, 2, ChannelWidth::Bit16, 0.5),
-            (1, 4, ChannelWidth::Bit8, 0.25),
-            (1, 5, ChannelWidth::Bit8, 1.0),
+            (PatchedChannel::adjacent(1, 2, ChannelWidth::Bit16), 0.5),
+            (PatchedChannel::adjacent(1, 4, ChannelWidth::Bit8), 0.25),
+            (PatchedChannel::adjacent(1, 5, ChannelWidth::Bit8), 1.0),
         ], Duration::ZERO, FadeCurve::Linear).unwrap();
         wait([255, 128, 0, 64, 255]);
     }
@@ -438,9 +490,9 @@ mod tests {
         let mut state = DmxState::new();
         let start = t0();
         state.submit_fade_batch(&[
-            (1, 0, ChannelWidth::Bit8, 0.25),
-            (2, 8, ChannelWidth::Bit8, 0.5),
-            (1, 0, ChannelWidth::Bit8, 0.75),
+            (PatchedChannel::adjacent(1, 0, ChannelWidth::Bit8), 0.25),
+            (PatchedChannel::adjacent(2, 8, ChannelWidth::Bit8), 0.5),
+            (PatchedChannel::adjacent(1, 0, ChannelWidth::Bit8), 0.75),
         ], Duration::from_secs(2), FadeCurve::Linear, start);
         state.tick(start + Duration::from_secs(1));
         assert_eq!((state.rendered(1)[0], state.rendered(2)[8]), (96, 64));
@@ -455,17 +507,38 @@ mod tests {
         let middle = start + Duration::from_secs(1);
         let duration = Duration::from_secs(2);
         state.submit_fade_batch(&[
-            (1, 8, ChannelWidth::Bit16, 1.0),
-            (1, 10, ChannelWidth::Bit8, 1.0),
-            (2, 9, ChannelWidth::Bit8, 1.0),
+            (PatchedChannel::adjacent(1, 8, ChannelWidth::Bit16), 1.0),
+            (PatchedChannel::adjacent(1, 10, ChannelWidth::Bit8), 1.0),
+            (PatchedChannel::adjacent(2, 9, ChannelWidth::Bit8), 1.0),
         ], duration, FadeCurve::Linear, start);
 
         state.tick(middle);
         assert_eq!(&state.rendered(1)[8..11], &[128, 0, 128]);
-        state.submit_fade_batch(&[(1, 9, ChannelWidth::Bit8, 0.25)], Duration::ZERO, FadeCurve::Linear, middle);
+        state.submit_fade_batch(&[(PatchedChannel::adjacent(1, 9, ChannelWidth::Bit8), 0.25)], Duration::ZERO, FadeCurve::Linear, middle);
         state.tick(start + duration);
         assert_eq!(&state.rendered(1)[8..11], &[128, 64, 255]);
         assert_eq!(state.rendered(2)[9], 255);
+    }
+
+    #[test]
+    fn separated_fine_channel_tracks_coarse_and_cancels_the_whole_fade() {
+        let mut state = DmxState::new();
+        let start = t0();
+        let duration = Duration::from_secs(2);
+        let middle = start + duration / 2;
+        let address = PatchedChannel { universe: 1, channel: 8, width: ChannelWidth::Bit16, fine_channel: Some(3) };
+        state.submit_patched_fade(address, f64::from(0xabcdu16) / 65535.0, duration, FadeCurve::Linear, start);
+        state.submit_fade(1, 9, ChannelWidth::Bit8, 1.0, duration, FadeCurve::Linear, start);
+        state.tick(middle);
+        let halfway = state.rendered(1);
+        assert_eq!((halfway[8], halfway[3], halfway[9]), (0x55, 0xe7, 128));
+        assert_eq!(address.read(&halfway), f64::from(0x55e7u16) / 65535.0);
+
+        state.submit_fade(1, 3, ChannelWidth::Bit8, 0.25, Duration::ZERO, FadeCurve::Linear, middle);
+        state.tick(start + duration);
+        let final_frame = state.rendered(1);
+        assert_eq!((final_frame[8], final_frame[3], final_frame[9]), (0x55, 64, 255));
+        assert!(state.fine_owners.is_empty());
     }
 
     #[test]
@@ -603,7 +676,7 @@ mod tests {
     // Small test helper: write a raw 8-bit channel value directly.
     impl DmxState {
         fn set_channel_now(&mut self, universe: u16, channel: u16, value: u8) {
-            self.write_norm(universe, channel, ChannelWidth::Bit8, value as f64 / 255.0);
+            self.write_patched(PatchedChannel::adjacent(universe, channel, ChannelWidth::Bit8), f64::from(value) / 255.0);
         }
     }
 }

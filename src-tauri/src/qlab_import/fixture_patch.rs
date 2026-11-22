@@ -235,6 +235,7 @@ fn definition(def: &Value) -> Result<FixtureType, String> {
             }),
             name: name.to_owned(),
             channel_offset,
+            fine_channel_offset: None,
             width: ChannelWidth::Bit8,
             default: 0.0,
         })
@@ -340,7 +341,7 @@ mod tests {
             assert_eq!(f.fixture_type.parameters[i].kind, *role);
             assert_eq!(
                 f.resolve_channel(i),
-                Some((1, i as u16, ChannelWidth::Bit8))
+                Some(crate::engine::dmx_engine::PatchedChannel::adjacent(1, i as u16, ChannelWidth::Bit8))
             );
         }
     }

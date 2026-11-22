@@ -255,6 +255,9 @@ pub fn add_fixture(
     app_handle: tauri::AppHandle,
 ) -> Result<PatchedFixture, String> {
     let fixture = PatchedFixture::new(label, universe, base_address, fixture_type);
+    if fixture.has_explicit_fine_channels() {
+        fixture.validate_profile_placement()?;
+    }
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
     ws.fixtures.push(fixture.clone());
     ws.mark_modified();
@@ -271,6 +274,11 @@ pub fn update_fixture(
 ) -> Result<(), String> {
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
     if let Some(existing) = ws.fixtures.iter_mut().find(|f| f.id == fixture.id) {
+        if (existing.has_explicit_fine_channels() || fixture.has_explicit_fine_channels())
+            && (existing.base_address != fixture.base_address || existing.fixture_type != fixture.fixture_type)
+        {
+            fixture.validate_profile_placement()?;
+        }
         *existing = fixture;
         ws.mark_modified();
         let _ = app_handle.emit("workspace-modified", serde_json::json!({}));
@@ -319,9 +327,9 @@ pub fn dmx_test_fixture(
     let ws = state.workspace.lock().map_err(|e| e.to_string())?;
     let fixture = ws.fixtures.iter().find(|f| f.id == id).ok_or("Fixture not found")?;
     for (i, param) in fixture.fixture_type.parameters.iter().enumerate() {
-        if let Some((universe, channel, width)) = fixture.resolve_channel(i) {
+        if let Some(address) = fixture.resolve_channel(i) {
             let value = if on { param.kind.identify_value() } else { 0.0 };
-            state.dmx_engine.set_channel(universe, channel, width, value);
+            state.dmx_engine.set_patched_channel(address, value);
         }
     }
     Ok(())
@@ -332,17 +340,8 @@ pub fn dmx_test_fixture(
 // ---------------------------------------------------------------------------
 
 /// Read one channel's normalised value `[0, 1]` from a universe snapshot.
-fn read_norm_from_snapshot(snap: &DmxSnapshot, universe: u16, channel: u16, width: ChannelWidth) -> f64 {
-    let Some(buf) = snap.get(&universe) else { return 0.0 };
-    let i = channel as usize;
-    match width {
-        ChannelWidth::Bit8 => *buf.get(i).unwrap_or(&0) as f64 / 255.0,
-        ChannelWidth::Bit16 => {
-            let hi = *buf.get(i).unwrap_or(&0) as u16;
-            let lo = *buf.get(i + 1).unwrap_or(&0) as u16;
-            ((hi << 8) | lo) as f64 / 65535.0
-        }
-    }
+fn read_norm_from_snapshot(snap: &DmxSnapshot, address: PatchedChannel) -> f64 {
+    snap.get(&address.universe).map_or(0.0, |buf| address.read(buf))
 }
 
 #[derive(Serialize)]
@@ -391,8 +390,8 @@ pub fn dmx_set_fixture_param(
 ) -> Result<(), String> {
     let ws = lock_dashboard(&state, workspace_id)?;
     let fixture = ws.fixtures.iter().find(|f| f.id == fixture_id).ok_or("Fixture not found")?;
-    if let Some((universe, channel, width)) = fixture.resolve_channel(param_index) {
-        state.dmx_engine.set_channel(universe, channel, width, value);
+    if let Some(address) = fixture.resolve_channel(param_index) {
+        state.dmx_engine.set_patched_channel(address, value);
     }
     Ok(())
 }
@@ -462,9 +461,7 @@ fn fixture_color_levels(
         return Err("Fixture patch changed. Refresh the Dashboard before applying color".into());
     }
     check_color_patch(&ws.fixtures, &[FixtureColorChannels { id: fixture_id, channels: current }], model)?;
-    Ok(current.into_iter().zip(levels).map(|(channel, level)| {
-        (channel.universe, channel.channel, channel.width, level)
-    }).collect())
+    Ok(current.into_iter().zip(levels).collect())
 }
 
 /// Apply a group mix only when the exact ordered patch still matches the Dashboard.
@@ -499,9 +496,7 @@ fn group_color_levels(
     if current.as_slice() != expected {
         return Err("Fixture group or patch changed. Refresh the Dashboard before applying color.".into());
     }
-    Ok(current.into_iter().flat_map(|member| member.channels.into_iter().zip(levels))
-        .map(|(channel, level)| (channel.universe, channel.channel, channel.width, level))
-        .collect())
+    Ok(current.into_iter().flat_map(|member| member.channels.into_iter().zip(levels)).collect())
 }
 
 fn check_color_levels(levels: [f64; 3], model: FixtureColorModel) -> Result<(), String> {
@@ -517,8 +512,8 @@ pub fn dmx_clear_fixtures(workspace_id: Uuid, state: State<'_, AppState>) -> Res
     let ws = lock_dashboard(&state, workspace_id)?;
     for fixture in &ws.fixtures {
         for i in 0..fixture.fixture_type.parameters.len() {
-            if let Some((universe, channel, width)) = fixture.resolve_channel(i) {
-                state.dmx_engine.set_channel(universe, channel, width, 0.0);
+            if let Some(address) = fixture.resolve_channel(i) {
+                state.dmx_engine.set_patched_channel(address, 0.0);
             }
         }
     }
@@ -535,11 +530,11 @@ pub fn capture_live_targets(state: State<'_, AppState>) -> Result<Vec<ParamTarge
     let mut targets = Vec::new();
     for fixture in &ws.fixtures {
         for i in 0..fixture.fixture_type.parameters.len() {
-            if let Some((universe, channel, width)) = fixture.resolve_channel(i) {
+            if let Some(address) = fixture.resolve_channel(i) {
                 targets.push(ParamTarget::Fixture {
                     fixture_id: fixture.id.to_string(),
                     param_index: i,
-                    value: read_norm_from_snapshot(&snapshot, universe, channel, width),
+                    value: read_norm_from_snapshot(&snapshot, address),
                 });
             }
         }
@@ -676,9 +671,9 @@ mod tests {
             let accepted =
                 fixture_color_levels(&reopened, reopened.instance_id, id, channels, levels, model).unwrap();
             assert_eq!(accepted, vec![
-                (5, 400, ChannelWidth::Bit8, 0.25),
-                (5, 401, ChannelWidth::Bit8, 0.6),
-                (5, 402, ChannelWidth::Bit8, 0.4),
+                (PatchedChannel::adjacent(5, 400, ChannelWidth::Bit8), 0.25),
+                (PatchedChannel::adjacent(5, 401, ChannelWidth::Bit8), 0.6),
+                (PatchedChannel::adjacent(5, 402, ChannelWidth::Bit8), 0.4),
             ]);
 
             for invalid in [f64::NAN, f64::INFINITY, -0.001, 1.001] {
@@ -705,9 +700,9 @@ mod tests {
         let resolve = |ws: &Workspace| group_color_levels(ws, ws.instance_id, group_id, model, &expected, levels);
 
         assert_eq!(resolve(&ws).unwrap(), [
-            (7, 100, ChannelWidth::Bit8, levels[0]), (7, 101, ChannelWidth::Bit8, levels[1]),
-            (7, 102, ChannelWidth::Bit8, levels[2]), (7, 110, ChannelWidth::Bit8, levels[0]),
-            (7, 111, ChannelWidth::Bit8, levels[1]), (7, 112, ChannelWidth::Bit16, levels[2]),
+            (PatchedChannel::adjacent(7, 100, ChannelWidth::Bit8), levels[0]), (PatchedChannel::adjacent(7, 101, ChannelWidth::Bit8), levels[1]),
+            (PatchedChannel::adjacent(7, 102, ChannelWidth::Bit8), levels[2]), (PatchedChannel::adjacent(7, 110, ChannelWidth::Bit8), levels[0]),
+            (PatchedChannel::adjacent(7, 111, ChannelWidth::Bit8), levels[1]), (PatchedChannel::adjacent(7, 112, ChannelWidth::Bit16), levels[2]),
         ]);
         assert!(group_color_levels(&ws, ws.instance_id, group_id, model, &expected, [0.0, 0.5, f64::NAN]).is_err());
 

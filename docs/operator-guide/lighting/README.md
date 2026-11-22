@@ -25,7 +25,13 @@ Preview and Replace update cue data only. The dashboard and test channel in **Li
 
 1. In a rehearsal copy, open **DMX → Patch** and add **Moving Head 16-bit (8ch)**. Open **Profile**, give it a distinct model and mode, and save the profile. Reopen **Profile** and choose **Export saved profile…**. Save `Tour moving head.inkue-fixture`.
 2. Open a second rehearsal workspace. Choose **DMX → Patch → Import profile…** and select the file. Check the selected name, mode and footprint. Choose a free universe and start address, then use **Patch fixture**. Import and patch prepare fixture data without sending DMX. The selected profile can be patched again at another free address.
-3. Open the new fixture’s **Profile** and verify the roles and both addresses on each 16-bit row. Try patching the same profile at an already used address to see the conflict. Save and reopen the workspace to confirm the new fixture carries its own copy of the definition. The format carries channel roles, defaults, and adjacent coarse and fine slots. It omits fixture addresses, group membership and cue targets. [QLab Light Library](https://qlab.app/docs/v5/lighting/light-library/)
+3. Open the new fixture’s **Profile** and verify the roles and both addresses on each 16-bit row. Try patching the same profile at an already used address to see the conflict. Save and reopen the workspace to confirm the new fixture carries its own copy of the definition. The format carries channel roles, defaults, and coarse and fine slots relative to the fixture start address. [QLab Light Library](https://qlab.app/docs/v5/lighting/light-library/)
+
+## Patch separated 16-bit channels
+
+1. In an offline workspace, open the **Profile** for **Moving Head 16-bit (8ch)** patched at address 101. On the Pan row, enter **9** in **Fine slot**. Slot 1 is the fixture's first address. The row shows coarse address 101 and fine address 109. A blank field means the next slot after coarse.
+2. Save the profile. In the Dashboard, move Pan to a quarter turn and check addresses 101 and 109 in the output monitor. Adjust another parameter at its own address, then capture the look into a Light cue and play it back with a fade. The patch reserves through address 109. Choose a different fixture start when that span would cross address 512.
+3. Save the workspace and reopen it using an Inkue build that supports explicit fine slots. Check the same two addresses after moving or importing the profile into another show.
 
 ## Program a CMY filter look
 

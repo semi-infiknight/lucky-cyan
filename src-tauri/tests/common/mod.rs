@@ -28,7 +28,7 @@ use uuid::Uuid;
 use inkue_lib::cue::context::{CueContext, CueEvent};
 use inkue_lib::cue::registry::CueRegistry;
 use inkue_lib::cue::types::CueType;
-use inkue_lib::engine::dmx_engine::{ChannelWidth, DmxChannelLevel};
+use inkue_lib::engine::dmx_engine::{DmxChannelLevel, PatchedChannel};
 use inkue_lib::engine::engine_traits::{AudioEngineApi, DmxEngineApi, OutputEngineApi};
 use inkue_lib::engine::output_engine::{
     ContentRequest, CrossfadePhase, CrossfadeRequest, SilentSpeedOrigin, VideoGeometry,
@@ -649,8 +649,8 @@ impl OutputEngineApi for RecOutput {
 
 struct RecDmx(CallLog);
 impl DmxEngineApi for RecDmx {
-    fn submit_fade(&self, universe: u16, channel: u16, width: ChannelWidth, level: f64, duration: Duration, curve: FadeCurve) {
-        self.submit_fade_batch(vec![(universe, channel, width, level)], duration, curve).unwrap();
+    fn submit_fade(&self, address: PatchedChannel, level: f64, duration: Duration, curve: FadeCurve) {
+        self.submit_fade_batch(vec![(address, level)], duration, curve).unwrap();
     }
 
     fn submit_fade_batch(&self, channels: Vec<DmxChannelLevel>, duration: Duration, curve: FadeCurve) -> anyhow::Result<()> {

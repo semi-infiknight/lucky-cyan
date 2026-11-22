@@ -38,6 +38,12 @@ describe("fixture profiles", () => {
     }));
     expect(html).toContain("<td>50–51</td>");
     expect(html).toContain("Export saved profile…");
+    fixture.fixture_type.parameters[0].fine_channel_offset = 7;
+    const separated = renderToStaticMarkup(createElement(FixtureProfile, {
+      fixture, save: async () => {}, close() {},
+    }));
+    expect(separated).toContain("<td>50 / 55</td>");
+    expect(separated).toContain('aria-label="Fine slot for Pan"');
   });
 
   it("resolves one explicit CMY triplet without including the dimmer or guessing channel names", () => {
