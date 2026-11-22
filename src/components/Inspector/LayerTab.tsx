@@ -32,6 +32,7 @@ export const BLEND_MODES: { value: BlendMode; label: string }[] = [
   { value: "saturation", label: "Saturation" },
   { value: "color", label: "Color" },
   { value: "luminosity", label: "Luminosity" },
+  { value: "source_atop", label: "Source Atop" },
 ];
 
 export function LayerTab({

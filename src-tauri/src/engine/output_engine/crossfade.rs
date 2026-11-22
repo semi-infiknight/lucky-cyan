@@ -489,10 +489,10 @@ mod tests {
 
     // ── The picture, on the CPU ──────────────────────────────────────────────
 
-    /// Composite a stack of straight-alpha pixels over the opaque black stage,
+    /// Composite a stack of straight-alpha layers on the black stage,
     /// leaving out `excluded`.
     fn stack(layers: &[[f32; 4]], excluded: &[usize]) -> [f32; 4] {
-        let mut out = [0.0, 0.0, 0.0, 1.0];
+        let mut out = [0.0; 4];
         for (index, layer) in layers.iter().enumerate() {
             if !excluded.contains(&index) {
                 out = composite_pixel(BlendMode::Normal, out, *layer, 1.0);

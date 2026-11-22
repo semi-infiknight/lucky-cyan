@@ -40,10 +40,5 @@ void main() {
         float luma = dot(s.rgb, vec3(0.2126, 0.7152, 0.0722));
         s.rgb = clamp(mix(vec3(luma), s.rgb, u_saturation), 0.0, 1.0);
     }
-    float sa = clamp(s.a * u_opacity, 0.0, 1.0);
-    float ao = sa + b.a * (1.0 - sa);
-    vec3 blended = (1.0 - b.a) * s.rgb + b.a * blend_rgb(u_blend_mode, b.rgb, s.rgb);
-    vec3 rgb = sa * blended + (1.0 - sa) * b.a * b.rgb;
-    if (ao > 0.0) rgb /= ao;
-    color = vec4(rgb, ao);
+    color = composite_stage(u_blend_mode, b, s.rgb, clamp(s.a * u_opacity, 0.0, 1.0));
 }

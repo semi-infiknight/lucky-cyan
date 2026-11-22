@@ -126,6 +126,10 @@ Rehearse with the show’s treatment and actual viewing conditions. Brightness c
 
 Route two pictures to a spare output, with a colored still above a picture that includes both gray and colored detail. Start both cues, select the foreground and open **Layer → Blend Mode**. Compare **Linear Burn** and **Pin Light**, then try **Hue**, **Saturation**, **Color** and **Luminosity** to choose how the two pictures contribute to the result. Lower the foreground opacity to see more of the picture underneath. The **Saturation** slider adjusts the foreground before the blend, and the **Saturation** blend mode uses its resulting color strength for the overlap. Save and reopen to check your choice. [QLab blend modes](https://qlab.app/docs/v5/video/blend-modes/) · [W3C component blend formulas](https://www.w3.org/TR/compositing-1/#blendingnonseparable)
 
+### Fill a shape with another cue
+
+On a spare output, run a PNG with a transparent cutout or margin as an **Image** cue on a lower layer. To preserve the PNG’s transparent edges, turn on **Continuous still rotation** in **Geometry** and leave the angle at zero. Put a larger colored Image or Video above it and set that cue’s **Blend Mode** to **Source Atop**. The upper cue fills the shape where the lower picture has coverage. Lower the fill opacity to reveal the original shape color. Stop the lower cue to check that its fill disappears. Any other pictures below the fill also contribute to its key, so isolate the pair on the output during rehearsal. [QLab Source Atop](https://qlab.app/docs/v5/video/blend-modes/#compositing-blends)
+
 ## Make one video layer monochrome
 
 1. Route two Image cues to a spare output. Use a still with prominent colors for the foreground and choose a higher layer number for it. Leave a part of the background visible by scaling down the foreground in **Geometry**. Start both cues.

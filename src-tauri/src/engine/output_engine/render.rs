@@ -579,7 +579,7 @@ fn render_thread_main(
         }
 
         // ── Composite the layer stack ─────────────────────────────────────────
-        // Base = opaque black; each layer blends over the accumulated result.
+        // The stage starts black with zero layer coverage.
         // A dissolve in flight composites the stack once per side and mixes
         // the pictures (crossfade.rs) — never a dip, never a cut in the bars.
         let targets = StackTargets {
@@ -1014,7 +1014,7 @@ void main() { gl_Position = vec4(POS[gl_VertexID], 0.0, 1.0); }
 /// One blend step: `result = blend(backdrop, layer, mode, opacity)`.
 ///
 /// The blend math is [`super::blend::GLSL_BLEND_FN`], mirrored by the Rust
-/// `blend_rgb` reference in `blend.rs`.
+/// `composite_pixel` reference in `blend.rs`.
 fn build_composite_shader(gl: &glow::Context) -> Result<(glow::Program, glow::VertexArray)> {
     const VERT: &str = r#"
 #version 150 core
@@ -1161,9 +1161,9 @@ struct StackTargets<'a> {
     h: u32,
 }
 
-/// Composite every layer not in `excluded` over opaque black, ping-ponging
-/// between the two buffers.  Returns the texture holding the result and the
-/// index of the ping-pong buffer left free.
+/// Composite every layer not in `excluded`, ping-ponging between two buffers.
+/// The working texture carries RGB over black and separate layer coverage in
+/// alpha. Returns the result and the index of the buffer left free.
 fn composite_stack(
     gl: &glow::Context,
     compositor: &Compositor,
@@ -1176,7 +1176,7 @@ fn composite_stack(
     unsafe {
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(base.fbo));
         gl.viewport(0, 0, targets.w as i32, targets.h as i32);
-        gl.clear_color(0.0, 0.0, 0.0, 1.0);
+        gl.clear_color(0.0, 0.0, 0.0, 0.0);
         gl.clear(glow::COLOR_BUFFER_BIT);
     }
     for l in layers {
@@ -1258,7 +1258,7 @@ fn mix_links(slots: &[Arc<slot::VideoSlot>], layers: &[LayerDraw]) -> Vec<MixLin
 }
 
 /// `color = mix(a, b, t)` — folds one composite of a dissolve into the
-/// running average.  Both inputs are opaque (composited over black).
+/// running average. RGB is composited over black in both inputs.
 fn build_mix_shader(gl: &glow::Context) -> Result<(glow::Program, glow::VertexArray)> {
     const VERT: &str = r#"
 #version 150 core

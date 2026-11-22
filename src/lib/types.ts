@@ -447,7 +447,8 @@ export type BlendMode =
   | "normal" | "add" | "multiply" | "screen" | "overlay"
   | "soft_light" | "hard_light" | "darken" | "lighten"
   | "color_dodge" | "color_burn" | "difference" | "exclusion" | "subtract"
-  | "linear_burn" | "pin_light" | "hue" | "saturation" | "color" | "luminosity";
+  | "linear_burn" | "pin_light" | "hue" | "saturation" | "color" | "luminosity"
+  | "source_atop";
 
 /** Compositing properties of a visual cue (QLab layer model). */
 export interface LayerStyle {

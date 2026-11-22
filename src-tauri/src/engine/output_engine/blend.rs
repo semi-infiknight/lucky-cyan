@@ -40,11 +40,12 @@ pub enum BlendMode {
     Saturation,
     Color,
     Luminosity,
+    SourceAtop,
 }
 
 impl BlendMode {
     /// All modes, in inspector display order.
-    pub const ALL: [BlendMode; 20] = [
+    pub const ALL: [BlendMode; 21] = [
         BlendMode::Normal,
         BlendMode::Add,
         BlendMode::Multiply,
@@ -65,6 +66,7 @@ impl BlendMode {
         BlendMode::Saturation,
         BlendMode::Color,
         BlendMode::Luminosity,
+        BlendMode::SourceAtop,
     ];
 
     /// Stable integer id passed to the composite shader (`u_blend_mode`).
@@ -90,6 +92,7 @@ impl BlendMode {
             BlendMode::Saturation => 17,
             BlendMode::Color => 18,
             BlendMode::Luminosity => 19,
+            BlendMode::SourceAtop => 20,
         }
     }
 }
@@ -144,6 +147,7 @@ fn blend_channel(mode: BlendMode, b: f32, s: f32) -> f32 {
         BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity => {
             unreachable!("Component modes combine complete colors")
         }
+        BlendMode::SourceAtop => unreachable!("Source Atop uses stage coverage"),
     }
 }
 
@@ -212,11 +216,10 @@ fn blend_rgb(mode: BlendMode, b: [f32; 3], s: [f32; 3]) -> [f32; 3] {
     }
 }
 
-/// Full pixel composite, reference implementation of the GLSL `main`:
-/// blend the colors, then alpha-composite (source-over) with the source
-/// alpha scaled by the layer opacity.
+/// Matches the shader's stage stack. The backdrop's RGB is already
+/// composited over black, and its alpha records coverage by lower cues.
 ///
-/// `backdrop`/`source` are straight (non-premultiplied) RGBA.
+/// The incoming layer supplies straight RGBA and its own opacity.
 #[cfg(test)]
 pub(crate) fn composite_pixel(
     mode: BlendMode,
@@ -227,21 +230,13 @@ pub(crate) fn composite_pixel(
     let sa = (source[3] * opacity).clamp(0.0, 1.0);
     let ba = backdrop[3];
     let rgb = |[r, g, b, _]: [f32; 4]| [r, g, b];
-    let blend = blend_rgb(mode, rgb(backdrop), rgb(source));
-    let mut out = [0.0f32; 4];
-    for c in 0..3 {
-        // W3C: result = (1−ba)·s + ba·B(b,s), then source-over with sa.
-        let blended = (1.0 - ba) * source[c] + ba * blend[c];
-        out[c] = sa * blended + (1.0 - sa) * backdrop[c] * ba;
-        // Un-premultiply against the output alpha below.
-    }
-    out[3] = sa + ba * (1.0 - sa);
-    if out[3] > 0.0 {
-        for c in 0..3 {
-            out[c] /= out[3];
-        }
-    }
-    out
+    let [r, g, b] = rgb(backdrop).map(|value| value * (1.0 - sa));
+    let (foreground, weight, coverage) = if mode == BlendMode::SourceAtop {
+        (rgb(source), sa * ba, ba)
+    } else {
+        (blend_rgb(mode, rgb(backdrop), rgb(source)), sa, sa + ba * (1.0 - sa))
+    };
+    [r + weight * foreground[0], g + weight * foreground[1], b + weight * foreground[2], coverage]
 }
 
 /// GLSL function bodies shared by the composite shader (`#version 150 core`).
@@ -318,6 +313,14 @@ vec3 blend_rgb(int mode, vec3 b, vec3 s) {
     return vec3(blend_channel(mode, b.r, s.r), blend_channel(mode, b.g, s.g),
                 blend_channel(mode, b.b, s.b));
 }
+vec4 composite_stage(int mode, vec4 b, vec3 source_rgb, float sa) {
+    vec3 retained = (1.0 - sa) * b.rgb;
+    // The backdrop's RGB already includes the black stage. Its alpha tracks
+    // only the lower layers' visible coverage, which keys the fill.
+    if (mode == 20) return vec4(sa * b.a * source_rgb + retained, b.a);
+    return vec4(sa * blend_rgb(mode, b.rgb, source_rgb) + retained,
+                sa + b.a * (1.0 - sa));
+}
 "#;
 
 // ---------------------------------------------------------------------------
@@ -393,8 +396,8 @@ mod tests {
         assert!(close(blend_channel(BlendMode::ColorBurn, 1.0, 0.5), 1.0));
         for mode in BlendMode::ALL {
             for &(b, s) in &[(0.0, 0.0), (1.0, 1.0), (0.0, 1.0), (1.0, 0.0)] {
-                let rgb = blend_rgb(mode, [b; 3], [s; 3]);
-                assert!(rgb.iter().all(|v| (0.0..=1.0).contains(v)), "{mode:?}({b},{s}) = {rgb:?}");
+                let rgba = composite_pixel(mode, [b, b, b, 1.0], [s, s, s, 1.0], 1.0);
+                assert!(rgba.iter().all(|v| (0.0..=1.0).contains(v)), "{mode:?}({b},{s}) = {rgba:?}");
             }
         }
     }
@@ -408,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn new_layer_modes_combine_color_and_honor_transparent_backdrops() {
+    fn layer_modes_combine_color_on_the_stage() {
         let backdrop = [0.6, 0.4, 0.2, 1.0];
         let source = [0.25, 0.75, 0.5, 1.0];
         for (mode, expected) in [
@@ -424,8 +427,6 @@ mod tests {
                 actual.into_iter().zip(expected).all(|(a, b)| close(a, b)),
                 "{mode:?}: {actual:?}"
             );
-            let clear = composite_pixel(mode, [0.0; 4], source, 0.5);
-            assert_eq!(clear, [0.25, 0.75, 0.5, 0.5]);
         }
         let clipped = blend_rgb(BlendMode::Color, [0.5; 3], [1.0, 0.0, 0.0]);
         assert!(clipped
@@ -459,10 +460,18 @@ mod tests {
     }
 
     #[test]
-    fn composite_over_transparent_backdrop_shows_source() {
-        // First layer over an empty stage: blend must not darken it.
-        let out = composite_pixel(BlendMode::Multiply, [0.0, 0.0, 0.0, 0.0], [0.6, 0.7, 0.8, 1.0], 1.0);
-        assert!(close(out[0], 0.6) && close(out[1], 0.7) && close(out[2], 0.8) && close(out[3], 1.0));
+    fn source_atop_keys_the_fill_without_extending_lower_coverage() {
+        let empty_stage = [0.0; 4];
+        let red = [1.0, 0.0, 0.0, 1.0];
+        let blue = [0.0, 0.0, 1.0, 1.0];
+        assert_eq!(composite_pixel(BlendMode::SourceAtop, empty_stage, red, 1.0), empty_stage);
+        let half_blue = composite_pixel(BlendMode::Normal, empty_stage, blue, 0.5);
+        assert_eq!(half_blue, [0.0, 0.0, 0.5, 0.5]);
+        assert_eq!(composite_pixel(BlendMode::SourceAtop, half_blue, red, 1.0), [0.5, 0.0, 0.0, 0.5]);
+        assert_eq!(composite_pixel(BlendMode::SourceAtop, half_blue, red, 0.5), [0.25, 0.0, 0.25, 0.5]);
+        assert_eq!(composite_pixel(BlendMode::SourceAtop, half_blue, red, 0.0), half_blue);
+        assert_eq!(composite_pixel(BlendMode::Normal, half_blue, red, 1.0), red);
+        assert_eq!(composite_pixel(BlendMode::Multiply, empty_stage, blue, 1.0), [0.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]
