@@ -101,6 +101,25 @@ impl WaitCue {
         self.clock_run = None;
     }
 
+    pub(crate) fn join_from_timecode(&mut self, elapsed: Duration, context: &CueContext) -> bool {
+        if elapsed >= self.pre_wait.saturating_add(self.wait_duration) {
+            return false;
+        }
+        self.start_with_elapsed(elapsed, context);
+        true
+    }
+
+    fn start_with_elapsed(&mut self, elapsed: Duration, context: &CueContext) {
+        self.detach_clock();
+        self.play_generation = self.play_generation.wrapping_add(1);
+        self.auto_continue_fired = false;
+        self.elapsed_before_pause = elapsed;
+        self.started_at = Some(Instant::now());
+        self.state = CueState::Running;
+        context.emit(CueEvent::ActionStarted { cue_id: self.id });
+        self.start_reported = elapsed >= self.pre_wait && context.mark_action_started(self.id);
+    }
+
     /// Return the actual transition so the desk can publish it.
     pub(crate) fn apply_clock_edge(
         &mut self,
@@ -193,14 +212,7 @@ impl Cue for WaitCue {
     }
 
     fn go(&mut self, context: &CueContext) -> Result<()> {
-        self.detach_clock();
-        self.play_generation = self.play_generation.wrapping_add(1);
-        self.auto_continue_fired = false;
-        self.elapsed_before_pause = Duration::ZERO;
-        self.started_at = Some(Instant::now());
-        self.state = CueState::Running;
-        context.emit(CueEvent::ActionStarted { cue_id: self.id });
-        self.start_reported = self.pre_wait.is_zero() && context.mark_action_started(self.id);
+        self.start_with_elapsed(Duration::ZERO, context);
         Ok(())
     }
 

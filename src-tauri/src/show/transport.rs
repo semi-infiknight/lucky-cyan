@@ -5,6 +5,7 @@
 //! [`CueList`] and a [`CueContext`] so it can drive cue lifecycle methods.
 
 use std::any::Any;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 
@@ -17,6 +18,7 @@ use crate::cue::{
     traits::Cue,
     types::{ContinueMode, CueId, CueState, CueType, GroupMode},
     video_cue::VideoCue,
+    wait_cue::WaitCue,
 };
 
 use super::{cue_list::{CueList, CueListMode}, timecode_loss::ClockCue};
@@ -526,6 +528,51 @@ impl Transport {
             .and_then(ClockCue::from_cue_mut))
         {
             cue.follow_clock(list_id, generation);
+        }
+        result
+    }
+
+    /// Enter an eligible cue partway through from a newly acquired clock,
+    /// without parking or advancing the operator's playhead.
+    pub(crate) fn join_from_timecode(&self, list: &mut CueList, id: CueId, elapsed: Duration) -> Result<GoResult> {
+        let skipped = GoResult::default();
+        let Some(cue) = list.get_mut(&id) else { return Ok(skipped) };
+        if cue.is_disabled() || cue.state() != CueState::Standby
+            || cue.continue_mode() != ContinueMode::DoNotContinue || elapsed.is_zero() {
+            return Ok(skipped);
+        }
+        let generation = cue.play_generation().wrapping_add(1);
+        let result = if let Some(wait) = WaitCue::from_cue_mut(cue) {
+            if !wait.join_from_timecode(elapsed, &self.context) {
+                return Ok(skipped);
+            }
+            list.cancel_enter_follow_for(id);
+            list.independent_runs.insert(id);
+            Ok(GoResult { triggered: vec![id], ..GoResult::default() })
+        } else if let Some(audio) = list.get_mut(&id)
+            .and_then(|cue| (cue as &mut dyn Any).downcast_mut::<AudioCue>()) {
+            // The clip-offset path checks the decoded clip window, play rate,
+            // slices and Pre-Wait before preparing the very first PCM frame.
+            if audio.loaded_time_ms().is_some() || audio.stage_timecode_offset(elapsed).is_err() {
+                return Ok(skipped);
+            }
+            let result = self.start_independent(list, id);
+            if !list.get(&id).is_some_and(|cue| cue.is_running()) {
+                // A held output must not leave an implicit offset for a later
+                // manual GO. Preserve only an operator's existing Load to Time.
+                if let Some(audio) = list.get_mut(&id).and_then(|cue| (cue as &mut dyn Any).downcast_mut::<AudioCue>()) {
+                    audio.clear_loaded_time(&self.context);
+                }
+            }
+            result
+        } else {
+            return Ok(skipped);
+        };
+        if list.tc_config.on_stop != TcOnStop::Continue {
+            let owner = list.id;
+            if let Some(cue) = list.get_mut(&id).and_then(ClockCue::from_cue_mut) {
+                cue.follow_clock(owner, generation);
+            }
         }
         result
     }

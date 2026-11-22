@@ -135,7 +135,15 @@ Send one UTF-8 command of up to 1,024 bytes per datagram. Inkue addresses for `s
 5. Return to `01:00:00:00` and roll forward. Expect 101 and 102 to fire again at their marks. Pause the clock for more than half a second before the first mark, relocate the source to `01:00:08:00` and roll through the second mark. 102 should fire, and the gap in signal should leave 101 idle.
 6. Change the Cue List’s expected rate to 30 fps while leaving the generator at 25 fps, clear the active cues and repeat the continuous pass. The clock still displays 25 fps and both cues stay idle. Restore 25 fps and repeat after disabling and re-enabling the receiver, without restarting the desk.
 
-Inkue starts cues at received marks during forward playback. A forward jump can fire a cue at the first received moving frame at its destination. Marks skipped by the jump stay idle. A stop or MTC locate cancels pending starts from before the clock change. A backward locate re-arms marks that the clock crosses again. Restart with pre-roll before the first required mark. QLab 5 lookback and offset playback require separate support. Record the starts and signal status with the generator and frame rate used in the show. [Figure 53 timecode settings](https://qlab.app/docs/v5/fundamentals/cue-lists/#the-timecode-tab) · [MIDI Association timecode specification](https://midi.org/midi-time-code)
+Inkue starts cues at received marks during forward playback. A forward jump can fire a cue at the first received moving frame at its destination. A stop or MTC locate cancels pending starts from before the clock change. A backward locate re-arms marks that the clock crosses again. Use pre-roll or enable lookback for eligible cues. Record the starts and signal status with the generator and frame rate used in the show. [Figure 53 timecode settings](https://qlab.app/docs/v5/fundamentals/cue-lists/#the-timecode-tab) · [MIDI Association timecode specification](https://midi.org/midi-time-code)
+
+### Join a cue already in progress
+
+1. Set a 20-second top-level Wait and a trimmed File Audio cue to **Do Not Continue**. Add marks and select **TC Sync → On Start → Join active Wait and Audio cues**. Give the Audio cue zero Pre-Wait and play once at normal speed with no slices. Let its file finish loading.
+2. Begin sending timecode several seconds after both marks, or send a locate followed by moving frames. The Wait starts partway through its countdown and Audio starts inside its saved trim at the corresponding offset. Keep another cue on standby to verify that joining the earlier marks leaves standby parked.
+3. Repeat from beyond the cue ends. Also try entering a running cue's range while it is already playing by hand. Those starts are skipped. Select **Start at incoming marks** to return to regular clock triggering.
+
+Once the source is rolling, ordinary jumps use the incoming marks. Restoring triggers from the session-wide override takes a fresh baseline. Video lookback and automatic continuation are separate workflows.
 
 ### Lose the clock during a Wait
 

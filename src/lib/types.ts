@@ -1149,11 +1149,13 @@ export interface TcTrigger {
 }
 
 export type TcOnStop = "continue" | "pause" | "stop";
+export type TcOnStart = "future_marks" | "join_active";
 
 export interface CueListTcConfig {
   enabled: boolean;
   rate: TcRate;
   freewheel_ms: number;
+  on_start: TcOnStart;
   on_stop: TcOnStop;
 }
 

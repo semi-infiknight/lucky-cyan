@@ -340,7 +340,17 @@ impl TcTriggerWindow {
 // On-Start / On-Stop policy (QLab)
 // ---------------------------------------------------------------------------
 
-/// What happens to running cues when TC starts or stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TcOnStart {
+    /// Dispatch marks crossed by new observations.
+    #[default]
+    FutureMarks,
+    /// Join still-active eligible cues whose marks precede the first frame.
+    JoinActive,
+}
+
+/// What happens to running cues when TC stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TcOnStop {
@@ -369,6 +379,9 @@ pub struct CueListTcConfig {
     /// Dropout tolerance before declaring TC stopped (ms, 0–2000).
     #[serde(default = "CueListTcConfig::default_freewheel_ms")]
     pub freewheel_ms: u32,
+    /// Behaviour on the first moving frame after a start or locate.
+    #[serde(default)]
+    pub on_start: TcOnStart,
     /// Behaviour when the TC stream stops.
     #[serde(default)]
     pub on_stop: TcOnStop,
@@ -384,6 +397,7 @@ impl Default for CueListTcConfig {
             enabled: false,
             rate: TcRate::default(),
             freewheel_ms: Self::default_freewheel_ms(),
+            on_start: TcOnStart::default(),
             on_stop: TcOnStop::default(),
         }
     }

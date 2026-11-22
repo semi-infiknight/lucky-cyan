@@ -360,11 +360,19 @@ impl AudioCue {
     /// Stage a clip-relative offset for the next admitted GO. Negative values
     /// count back from the exclusive end of the current saved clip window.
     pub fn load_to_time(&mut self, offset_ms: i64) -> Result<()> {
+        self.stage_clip_offset(Duration::from_millis(offset_ms.unsigned_abs()), offset_ms < 0)
+    }
+
+    pub(crate) fn stage_timecode_offset(&mut self, elapsed: Duration) -> Result<()> {
+        self.stage_clip_offset(elapsed, false)
+    }
+
+    fn stage_clip_offset(&mut self, elapsed: Duration, from_end: bool) -> Result<()> {
         anyhow::ensure!(self.state == CueState::Standby && !self.is_disabled,
             "Stop and arm the Audio cue before using Load to Time.");
         let (samples, clip_start, clip_end) = self.load_time_window()?;
-        let distance = self.source_frame(Duration::from_millis(offset_ms.unsigned_abs()));
-        let frame = if offset_ms < 0 {
+        let distance = self.source_frame(elapsed);
+        let frame = if from_end {
             clip_end.checked_sub(distance)
         } else {
             clip_start.checked_add(distance)

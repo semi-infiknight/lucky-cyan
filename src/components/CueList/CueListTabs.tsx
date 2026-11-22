@@ -6,7 +6,7 @@ import {
   addCueList, openCartWindow, removeCueList, renameCueList, setActiveCueList, setCueListMode,
   getCuelistTcConfig, setCuelistTcConfig,
 } from "../../lib/commands";
-import type { CueListTcConfig, TcRate, TcOnStop } from "../../lib/types";
+import type { CueListTcConfig, TcRate, TcOnStart, TcOnStop } from "../../lib/types";
 import { Select } from "../common/Select";
 import { DragNumber } from "../common/DragNumber";
 
@@ -388,6 +388,17 @@ function CueListTcSync({ workspaceId, listId }: { workspaceId: string; listId: s
               onChange={(e) => apply({ freewheel_ms: Math.max(0, Math.min(2000, Number(e.target.value) || 0)) })}
               style={{ ...tcInputStyle, fontFamily: "monospace" }}
             />
+          </div>
+
+          <div>
+            <div style={tcFieldLabel}>On Start</div>
+            <Select aria-label="Timecode On Start"
+              style={{ ...tcInputStyle, cursor: "pointer" }}
+              value={cfg.on_start ?? "future_marks"}
+              onChange={e => apply({ on_start: e.target.value as TcOnStart })}>
+              <option value="future_marks">Start at incoming marks</option>
+              <option value="join_active">Join active Wait and Audio cues</option>
+            </Select>
           </div>
 
           <div>

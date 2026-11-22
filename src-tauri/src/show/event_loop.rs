@@ -70,12 +70,14 @@ pub(crate) struct TimecodeDispatch {
 struct TimecodeBatch {
     status: Option<TcEvent>,
     fire: Vec<(uuid::Uuid, CueId)>,
+    join: Vec<(uuid::Uuid, CueId, Duration)>,
     edges: Vec<(uuid::Uuid, ClockEdge)>,
     detached: bool,
 }
 
 impl TimecodeBatch {
     fn lose_lock(&mut self, list: &CueList, edge: ClockEdge) {
+        self.join.retain(|(list_id, _, _)| *list_id != list.id);
         if list.tc_config.on_stop != TcOnStop::Continue {
             self.fire.retain(|(list_id, cue_id)| {
                 *list_id != list.id
@@ -177,9 +179,15 @@ impl TimecodeDispatch {
                     self.expire_locks(lists, observation.at, &mut batch);
                     // These starts were collected for an earlier clock run.
                     batch.fire.clear();
+                    batch.join.clear();
                 }
+                let mut reopened = Vec::new();
+                let mut first_position = None;
                 match event {
                     TcEvent::Position(pos, step) if pos.is_valid() => {
+                        if self.previous.is_none_or(|prior| !prior.rate.same_address_format(pos.rate)) {
+                            first_position = Some(pos);
+                        }
                         for list in lists.iter().filter(|list| {
                             list.tc_config.enabled && list.tc_config.rate.same_address_format(pos.rate)
                         }) {
@@ -189,6 +197,7 @@ impl TimecodeDispatch {
                                 batch.lose_lock(list, edge);
                             }
                             if let Some(edge) = lock.receive(observation.at, pos.rate, step) {
+                                reopened.push(list.id);
                                 batch.edges.push((list.id, edge));
                             }
                         }
@@ -210,8 +219,16 @@ impl TimecodeDispatch {
                         _ => {}
                     }
                     for list in lists {
-                        batch.fire.extend(list.tc_triggers_crossed(window).into_iter()
-                            .map(|id| (list.id, id)));
+                        let crossed = list.tc_triggers_crossed(window);
+                        if let Some(pos) = first_position.or_else(|| match event {
+                            TcEvent::Position(pos, _) if reopened.contains(&list.id) => Some(pos),
+                            _ => None,
+                        }) {
+                            batch.join.extend(list.tc_joins_at(pos).into_iter()
+                                .filter(|(cue_id, _)| !crossed.contains(cue_id))
+                                .map(|(cue_id, elapsed)| (list.id, cue_id, elapsed)));
+                        }
+                        batch.fire.extend(crossed.into_iter().map(|id| (list.id, id)));
                     }
                 }
             }
@@ -1062,6 +1079,19 @@ fn tick(
     }
 
     // 9b. Dispatch the new marks kept after the clock barriers.
+    let transport = Transport::new(tick_ctx.clone());
+    for &(list_id, cue_id, elapsed) in &timecode.join {
+        if let Some(list) = ws.cue_list_by_id_mut(list_id) {
+            match transport.join_from_timecode(list, cue_id, elapsed) {
+                Ok(result) => {
+                    cue_prepared |= result.prepared;
+                    all_go_triggered.extend(result.triggered);
+                    all_go_stopped.extend(result.stopped);
+                }
+                Err(error) => log::warn!("Could not enter cue {cue_id} at the new clock position: {error}"),
+            }
+        }
+    }
     for ((list_id, cue_id), clock_started) in timecode.fire.iter().map(|mark| (mark, true))
         .chain(midi_fire.iter().map(|mark| (mark, false)))
     {
@@ -2040,6 +2070,76 @@ mod tests {
         assert!(removed.detached);
         assert!(removed.fire.is_empty());
         assert!(removed.edges.is_empty());
+    }
+
+    #[test]
+    fn timecode_lookback_joins_at_real_offsets_and_keeps_standby_parked() {
+        use crate::cue::audio_cue::AudioCue;
+        use crate::engine::timecode_types::{TcOnStart, TcTrigger};
+
+        let (mut context, _, calls) = crate::test_support::recording_context();
+        let launched = crate::test_support::record_audio_launch_positions(&mut context, &calls);
+        let transport = Transport::new(context.clone());
+        let mut list = CueList::new("Rehearsal locate");
+        list.tc_config.enabled = true;
+        list.tc_config.rate = TcRate::Fps25;
+        list.tc_config.on_start = TcOnStart::JoinActive;
+        list.tc_config.on_stop = TcOnStop::Pause;
+        let at = |frame| TcPosition::from_frame_number(frame, TcRate::Fps25);
+        let mut put = |mut cue: Box<dyn Cue>, frame| {
+            cue.set_continue_mode(ContinueMode::DoNotContinue);
+            let id = cue.id();
+            list.tc_triggers.insert(id, TcTrigger { position: at(frame), real_time: false });
+            list.push(cue);
+            id
+        };
+        let expired = put(Box::new(WaitCue::new()), 0);
+        let ongoing = put(Box::new(WaitCue::new()), 75);
+        let mut audio = AudioCue::new();
+        audio.start_time = Some(Duration::from_secs(2));
+        audio.end_time = Some(Duration::from_secs(8));
+        audio.accept_preloaded_audio(Arc::new(vec![0.0; 480_000]), 1, 48_000, Duration::from_secs(10));
+        let audio_id = put(Box::new(audio), 50);
+        let exact = put(Box::new(WaitCue::new()), 150);
+        let mut short = AudioCue::new();
+        short.end_time = Some(Duration::from_micros(1_500));
+        short.accept_preloaded_audio(Arc::new(vec![0.0; 96]), 1, 48_000, Duration::from_millis(2));
+        let short_id = put(Box::new(short), 151);
+        assert!(transport.join_from_timecode(&mut list, short_id, Duration::from_micros(1_700))
+            .unwrap().triggered.is_empty());
+        list.set_playhead(Some(expired)).unwrap();
+        let list_id = list.id;
+        let (receiver, tx) = TimecodeReceiver::test_channel();
+        let mut dispatch = TimecodeDispatch::default();
+        for event in [TcEvent::Position(at(24), 2), TcEvent::Located(at(150))] {
+            tx.send(received(event)).unwrap();
+        }
+        let located = dispatch.collect(Some(&receiver), std::slice::from_ref(&list), Instant::now());
+        assert!(located.join.is_empty() && located.fire.is_empty());
+        tx.send(received(TcEvent::Position(at(150), 2))).unwrap();
+        let batch = dispatch.collect(Some(&receiver), std::slice::from_ref(&list), Instant::now());
+        assert_eq!(batch.fire, [(list_id, exact)]);
+        assert_eq!(batch.join, [
+            (list_id, expired, Duration::from_secs(6)),
+            (list_id, audio_id, Duration::from_secs(4)),
+            (list_id, ongoing, Duration::from_secs(3)),
+        ]);
+        for (_, cue, elapsed) in batch.join {
+            transport.join_from_timecode(&mut list, cue, elapsed).unwrap();
+        }
+        assert_eq!(list.playhead_cue_id, Some(expired));
+        assert_eq!(list.get(&expired).unwrap().state(), CueState::Standby);
+        assert_eq!(*launched.lock().unwrap(), [6 * 48_000]);
+        let elapsed = list.get(&ongoing).unwrap().elapsed();
+        assert!((Duration::from_secs(3)..Duration::from_secs(4)).contains(&elapsed));
+
+        tx.send(received(TcEvent::Position(at(152), 2))).unwrap();
+        assert!(dispatch.collect(Some(&receiver), std::slice::from_ref(&list), Instant::now()).join.is_empty());
+        let mut lost = TimecodeBatch {
+            edges: vec![(list_id, ClockEdge::Lost(Instant::now()))], ..Default::default()
+        };
+        assert_eq!(lost.apply_existing_runs(std::slice::from_mut(&mut list), &context, false, &mut Default::default()),
+            [(ongoing, CueState::Running, CueState::Paused), (audio_id, CueState::Running, CueState::Paused)]);
     }
 
     #[test]

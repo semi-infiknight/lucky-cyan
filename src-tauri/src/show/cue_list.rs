@@ -8,11 +8,11 @@ use uuid::Uuid;
 
 use super::cart_layout::{CartEdit, CartLayout};
 use super::wall_clock::{Observation, WallClockSession, WallClockTrigger};
-use crate::cue::{control_cue::ControlAction, registry::CueRegistry, traits::Cue, types::{ContinueMode, CueColor, CueId, GroupMode}};
+use crate::cue::{control_cue::ControlAction, registry::CueRegistry, traits::Cue, types::{ContinueMode, CueColor, CueId, CueType, GroupMode}};
 use crate::cue::group_cue::GroupCue;
 use super::timecode_loss::ClockCue;
 use crate::engine::midi_trigger::MidiTrigger;
-use crate::engine::timecode_types::{CueListTcConfig, TcTrigger, TcTriggerWindow};
+use crate::engine::timecode_types::{CueListTcConfig, TcOnStart, TcPosition, TcTrigger, TcTriggerWindow};
 
 // ---------------------------------------------------------------------------
 // CueListMode
@@ -399,6 +399,31 @@ impl CueList {
             .collect();
         crossed.sort_unstable();
         crossed.into_iter().map(|(_, id)| id).collect()
+    }
+
+    pub(crate) fn tc_joins_at(&self, position: TcPosition) -> Vec<(CueId, std::time::Duration)> {
+        let rate = self.tc_config.rate;
+        if !self.tc_config.enabled || self.tc_config.on_start != TcOnStart::JoinActive
+            || !rate.same_address_format(position.rate) || !position.is_valid() {
+            return Vec::new();
+        }
+        let frame = position.to_frame_number();
+        let mut candidates: Vec<_> = self.cues.iter().filter_map(|cue| {
+            if cue.is_disabled() || cue.continue_mode() != ContinueMode::DoNotContinue
+                || !matches!(cue.cue_type(), CueType::Wait | CueType::Audio) {
+                return None;
+            }
+            let mark = self.tc_triggers.get(&cue.id())?.position;
+            if !mark.is_valid() || !rate.same_address_format(mark.rate) {
+                return None;
+            }
+            let frames = frame.checked_sub(mark.to_frame_number()).filter(|&frames| frames > 0)?;
+            Some((cue.id(), std::time::Duration::from_micros(frames * rate.frame_us())))
+        }).collect();
+        // Join earlier marks first, with cue-list order breaking ties. The
+        // initial position has no day history to resolve marks across midnight.
+        candidates.sort_by_key(|&(_, elapsed)| std::cmp::Reverse(elapsed));
+        candidates
     }
 
     pub(crate) fn detach_timecode_runs(&mut self) {
