@@ -85,7 +85,7 @@ Start with the rows your show actually uses. The reference is QLab 5.6.5 with al
 | Send MIDI voice messages | Rehearse seven channel-voice commands and linear, preset or custom fades for Control Change, Key Pressure, Channel Pressure and Pitch Bend. Individual-device MSC GO, STOP and RESUME are available. Send one validated SysEx message per row. Review imported voice fades, other MSC commands and SysEx archive fields. [MIDI cues](../midi/README.md) |
 | Play a MIDI file | Select its port and compare the event timing and track routing with a known receiver. |
 | Generate timecode | Program MTC or LTC. Check the first and last address, frame rate and port on a second device. |
-| Trigger from incoming timecode | Rehearse forward starts and locates. On clock loss, a list can pause or stop its directly clock-started top-level Wait cues. Media holds, lookback, and offset playback remain open. [Clock-loss exercise](../workshops/README.md#lose-the-clock-during-a-wait) |
+| Trigger from incoming timecode | Rehearse forward starts and locates. On clock loss, a list can pause or stop top-level Wait, Audio, and Video cues directly started by timecode. Nested starts, lookback, and offset playback remain open. [Clock-loss exercise](../workshops/README.md#hold-media-when-the-clock-drops) |
 | Monitor an incoming clock without firing cues | Suspend timecode marks and clock-loss actions across the desk for the session. Restore from the transport bar with the clock rolling before the next required mark. [Timecode override exercise](../workshops/README.md#monitor-the-clock-without-firing-cues) |
 | Broadcast show calls over MSC and OSC | Check OSC feedback with the receiver. Matching the entire QLab OSC/MSC broadcast contract remains open. |
 

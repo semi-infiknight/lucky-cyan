@@ -280,8 +280,8 @@ const TC_RATE_LABELS: Record<TcRate, string> = {
 };
 const ON_STOP_LABELS: Record<TcOnStop, string> = {
   continue: "Keep cues running",
-  pause: "Pause clock-started Wait cues",
-  stop: "Stop clock-started Wait cues",
+  pause: "Pause clock-started cues",
+  stop: "Stop clock-started cues",
 };
 
 const tcFieldLabel: React.CSSProperties = { fontSize: 10, color: "var(--wc-text-muted)", marginBottom: 3 };
@@ -401,6 +401,9 @@ function CueListTcSync({ workspaceId, listId }: { workspaceId: string; listId: s
                 <option key={s} value={s}>{ON_STOP_LABELS[s]}</option>
               ))}
             </Select>
+            <p style={{ fontSize: 10, color: "var(--wc-text-faint)", lineHeight: 1.4, marginBottom: 0 }}>
+              Applies to top-level Wait, Audio and Video cues started directly by a timecode mark.
+            </p>
           </div>
 
           <div style={{ fontSize: 10, color: "var(--wc-text-faint)", lineHeight: 1.4 }}>

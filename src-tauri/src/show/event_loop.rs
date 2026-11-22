@@ -22,7 +22,6 @@ use crate::{
         group_cue::GroupCue,
         traits::Cue,
         types::{ContinueMode, CueId, CueState, CueType, GroupMode},
-        wait_cue::WaitCue,
     },
     engine::{
         output_engine::{OutputEngine, OutputStatus},
@@ -33,11 +32,13 @@ use crate::{
     },
     show::{
         cue_list::CueList,
-        timecode_loss::{ClockEdge, ClockLock},
+        timecode_loss::{transition_device_hold, ClockCue, ClockEdge, ClockLock},
         transport::Transport,
         workspace::Workspace,
     },
 };
+#[cfg(test)]
+use crate::cue::wait_cue::WaitCue;
 
 /// Target tick interval for the main event loop (~30 fps).
 /// Timer overlay refresh interval — fast enough for smooth millisecond display.
@@ -78,7 +79,7 @@ impl TimecodeBatch {
         if list.tc_config.on_stop != TcOnStop::Continue {
             self.fire.retain(|(list_id, cue_id)| {
                 *list_id != list.id
-                    || !list.get(cue_id).is_some_and(|cue| cue.cue_type() == CueType::Wait)
+                    || !list.get(cue_id).is_some_and(|cue| ClockCue::supports(cue.cue_type()))
             });
         }
         self.edges.push((list.id, edge));
@@ -90,6 +91,8 @@ impl TimecodeBatch {
         &mut self,
         lists: &mut [CueList],
         context: &CueContext,
+        device_frozen: bool,
+        device_holds: &mut std::collections::HashSet<CueId>,
     ) -> Vec<(CueId, CueState, CueState)> {
         if self.detached {
             for list in lists.iter_mut() {
@@ -100,10 +103,11 @@ impl TimecodeBatch {
         for (list_id, edge) in self.edges.drain(..) {
             let Some(list) = lists.iter_mut().find(|list| list.id == list_id) else { continue };
             let policy = list.tc_config.on_stop;
-            for wait in list.cues.iter_mut().filter_map(|cue| WaitCue::from_cue_mut(cue.as_mut())) {
-                let id = wait.id();
-                let old = wait.state();
-                match wait.apply_clock_edge(list_id, edge, policy, context) {
+            for cue in &mut list.cues {
+                let id = cue.id();
+                let old = cue.state();
+                let Some(cue) = ClockCue::from_cue_mut(cue.as_mut()) else { continue };
+                match cue.apply_edge(list_id, edge, policy, context, device_frozen, device_holds) {
                     Ok(Some(new)) => changes.push((id, old, new)),
                     Ok(None) => {}
                     Err(error) => log::warn!("Clock loss transition for cue {id}: {error}"),
@@ -758,6 +762,16 @@ fn tick(
     }
     let frozen_now = cb_last_advance.elapsed() >= Duration::from_millis(AUDIO_FREEZE_MS);
 
+    // Clock holds take precedence over automatic device resumes. Apply the
+    // observed edges before recovering a device that returned on this tick.
+    let mut timecode = tc_receiver.lock().ok()
+        .and_then(|slot| timecode_dispatch.lock().ok().map(|mut dispatch| {
+            dispatch.collect(slot.as_ref(), &ws.cue_lists, Instant::now())
+        }))
+        .unwrap_or_default();
+    let tc_status = timecode.status;
+    let clock_changes = timecode.apply_existing_runs(&mut ws.cue_lists, &tick_ctx, frozen_now, auto_paused);
+
     let mut just_paused:  Vec<CueId> = Vec::new();
     let mut just_resumed: Vec<CueId> = Vec::new();
     if frozen_now && !*audio_frozen {
@@ -765,7 +779,7 @@ fn tick(
             for cue in cl.cues.iter_mut() {
                 if cue.state() == CueState::Running && cue.playing_voice_id().is_some()
                     && !cue.uses_silent_speed_clock()
-                    && cue.pause(&tick_ctx).is_ok()
+                    && transition_device_hold(cue.as_mut(), true, &tick_ctx).is_ok_and(|changed| changed)
                 {
                     auto_paused.insert(cue.id());
                     just_paused.push(cue.id());
@@ -778,17 +792,7 @@ fn tick(
                 if !(auto_paused.contains(&cue.id()) && cue.state() == CueState::Paused) {
                     continue;
                 }
-                // Video: mpv (its own clock) kept playing during the ~250 ms
-                // detection window while the paired audio voice was frozen, so
-                // they desynced.  Re-anchor the audio voice to mpv's *actual*
-                // position (time-pos) — without moving the picture — so audio
-                // catches up precisely before playback resumes.
-                if cue.cue_type() == CueType::Video {
-                    if let Some(voice) = cue.playing_voice_id() {
-                        tick_ctx.output_engine.resync_audio_to_video(voice);
-                    }
-                }
-                if cue.resume(&tick_ctx).is_ok() {
+                if transition_device_hold(cue.as_mut(), false, &tick_ctx).is_ok_and(|changed| changed) {
                     just_resumed.push(cue.id());
                 }
             }
@@ -796,16 +800,6 @@ fn tick(
         auto_paused.clear();
     }
     *audio_frozen = frozen_now;
-
-    // Reconcile clock ownership while the workspace is locked, ahead of
-    // ticking and completing existing runs. Starts remain at the GO stage.
-    let mut timecode = tc_receiver.lock().ok()
-        .and_then(|slot| timecode_dispatch.lock().ok().map(|mut dispatch| {
-            dispatch.collect(slot.as_ref(), &ws.cue_lists, Instant::now())
-        }))
-        .unwrap_or_default();
-    let tc_status = timecode.status;
-    let clock_changes = timecode.apply_existing_runs(&mut ws.cue_lists, &tick_ctx);
 
     // ------------------------------------------------------------------
     // 4. Apply video duration updates — search every cue list.
@@ -2077,7 +2071,7 @@ mod tests {
 
         send(20, 0);
         let mut first = dispatch.collect(Some(&receiver), &lists, start);
-        first.apply_existing_runs(&mut lists, &context);
+        first.apply_existing_runs(&mut lists, &context, false, &mut Default::default());
         assert_eq!(first.fire, [marks[0]]);
         transport.go_from_timecode(&mut lists[0], &marks[0].1).unwrap();
         dispatch.set_suspended(true, &mut lists, at(10));
@@ -2097,7 +2091,7 @@ mod tests {
         assert!(resumed.edges.is_empty());
         transport.go_from_timecode(&mut lists[0], &marks[5].1).unwrap();
         let mut loss = dispatch.collect(Some(&receiver), &lists, at(1400));
-        assert_eq!(loss.apply_existing_runs(&mut lists, &context), [(marks[5].1, CueState::Running, CueState::Paused)]);
+        assert_eq!(loss.apply_existing_runs(&mut lists, &context, false, &mut Default::default()), [(marks[5].1, CueState::Running, CueState::Paused)]);
         assert!(lists[0].get(&marks[0].1).unwrap().is_running());
     }
 
@@ -2274,7 +2268,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            batch.apply_existing_runs(std::slice::from_mut(&mut list), &context),
+            batch.apply_existing_runs(std::slice::from_mut(&mut list), &context, false, &mut Default::default()),
             vec![
                 (id, CueState::Running, CueState::Paused),
                 (id, CueState::Paused, CueState::Running),
@@ -2285,6 +2279,70 @@ mod tests {
             .map(|cue| (cue.id(), cue.continue_mode(), cue.post_wait())).collect();
         assert!(!schedule_list_follows(&mut list, &completed, &mut HashMap::new(), now));
         assert_eq!(list.get(&id).unwrap().state(), CueState::Paused);
+    }
+
+    #[test]
+    fn clock_started_media_respects_manual_playback_and_audio_device_holds() {
+        use crate::cue::{audio_cue::AudioCue, video_cue::VideoCue};
+
+        let (context, _, _) = crate::test_support::recording_context_with_video_audio();
+        let mut transport = Transport::new(context.clone());
+        let mut list = CueList::new("Clocked media");
+        list.tc_config.on_stop = TcOnStop::Pause;
+        let audio = || {
+            let mut cue = AudioCue::new();
+            cue.accept_preloaded_audio(Arc::new(vec![0.0; 480_000]), 1, 48_000, Duration::from_secs(10));
+            cue.set_continue_mode(ContinueMode::DoNotContinue);
+            Box::new(cue)
+        };
+        let manual = audio();
+        let manual_id = manual.id();
+        let clock_audio = audio();
+        let audio_id = clock_audio.id();
+        let mut video = VideoCue::new();
+        video.file_path = Some("stage.mov".into());
+        video.set_continue_mode(ContinueMode::DoNotContinue);
+        let video_id = video.id();
+        list.push(manual);
+        list.push(clock_audio);
+        list.push(Box::new(video));
+
+        transport.go_by_id(&mut list, &manual_id).unwrap();
+        let generation = list.get(&manual_id).unwrap().play_generation();
+        assert!(transport.go_from_timecode(&mut list, &manual_id).unwrap().triggered.is_empty());
+        assert_eq!(list.get(&manual_id).unwrap().play_generation(), generation);
+        transport.go_from_timecode(&mut list, &audio_id).unwrap();
+        transport.go_from_timecode(&mut list, &video_id).unwrap();
+
+        let mut device_holds = std::collections::HashSet::from([audio_id]);
+        assert!(transition_device_hold(list.get_mut(&audio_id).unwrap(), true, &context).unwrap());
+        let now = Instant::now();
+        let list_id = list.id;
+        let mut loss = TimecodeBatch { edges: vec![(list_id, ClockEdge::Lost(now))], ..Default::default() };
+        assert_eq!(loss.apply_existing_runs(std::slice::from_mut(&mut list), &context, true, &mut device_holds),
+            [(video_id, CueState::Running, CueState::Paused)]);
+        assert!(list.get(&manual_id).unwrap().is_running());
+        assert!(!transition_device_hold(list.get_mut(&audio_id).unwrap(), false, &context).unwrap());
+
+        // The operator takes over the video hold. The audio device remains
+        // away on clock return, so it must still gate audio recovery.
+        list.get_mut(&video_id).unwrap().pause(&context).unwrap();
+        assert!(!transition_device_hold(list.get_mut(&video_id).unwrap(), false, &context).unwrap());
+        let mut returned = TimecodeBatch { edges: vec![(list_id, ClockEdge::Returned(now))], ..Default::default() };
+        assert!(returned.apply_existing_runs(std::slice::from_mut(&mut list), &context, true, &mut device_holds).is_empty());
+        assert!(list.get(&audio_id).unwrap().is_paused());
+        assert!(device_holds.contains(&audio_id));
+        assert!(transition_device_hold(list.get_mut(&audio_id).unwrap(), false, &context).unwrap());
+        assert!(list.get(&audio_id).unwrap().is_running());
+        assert!(list.get(&video_id).unwrap().is_paused());
+
+        list.tc_config.on_stop = TcOnStop::Stop;
+        let mut loss = TimecodeBatch { edges: vec![(list_id, ClockEdge::Lost(now))], ..Default::default() };
+        assert_eq!(loss.apply_existing_runs(std::slice::from_mut(&mut list), &context, false, &mut device_holds),
+            [(audio_id, CueState::Running, CueState::Standby)]);
+        assert!(device_holds.is_empty());
+        assert!(list.get(&manual_id).unwrap().is_running());
+        assert!(list.get(&video_id).unwrap().is_paused());
     }
 
     #[test]
@@ -2309,7 +2367,7 @@ mod tests {
             edges: vec![(list.id, ClockEdge::Lost(Instant::now()))],
             ..Default::default()
         };
-        assert!(batch.apply_existing_runs(std::slice::from_mut(&mut list), &context).is_empty());
+        assert!(batch.apply_existing_runs(std::slice::from_mut(&mut list), &context, false, &mut Default::default()).is_empty());
     }
 
     #[test]

@@ -9,7 +9,8 @@ use uuid::Uuid;
 use super::cart_layout::{CartEdit, CartLayout};
 use super::wall_clock::{Observation, WallClockSession, WallClockTrigger};
 use crate::cue::{control_cue::ControlAction, registry::CueRegistry, traits::Cue, types::{ContinueMode, CueColor, CueId, GroupMode}};
-use crate::cue::{group_cue::GroupCue, wait_cue::WaitCue};
+use crate::cue::group_cue::GroupCue;
+use super::timecode_loss::ClockCue;
 use crate::engine::midi_trigger::MidiTrigger;
 use crate::engine::timecode_types::{CueListTcConfig, TcTrigger, TcTriggerWindow};
 
@@ -401,8 +402,8 @@ impl CueList {
     }
 
     pub(crate) fn detach_timecode_runs(&mut self) {
-        for wait in self.cues.iter_mut().filter_map(|cue| WaitCue::from_cue_mut(cue.as_mut())) {
-            wait.detach_clock();
+        for cue in self.cues.iter_mut().filter_map(|cue| ClockCue::from_cue_mut(cue.as_mut())) {
+            cue.detach();
         }
     }
 

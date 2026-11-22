@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::engine::output_engine::{ContentRequest, LayerStyle, OutputId, VideoGeometry, VoiceId};
 use crate::engine::ring_command::FadeCurve as EngineFadeCurve;
 use crate::engine::voice::{FadeDirection, FadeState, Voice};
+use crate::show::timecode_loss::{ClockMediaCue, ClockRun};
 
 use super::{
     context::{CueContext, CueEvent},
@@ -104,6 +105,7 @@ pub struct VideoCue {
     in_pre_wait: bool,
     /// Incremented on every `go()` call.
     play_generation: u64,
+    clock_run: Option<(Uuid, ClockRun)>,
     /// Prevents double-firing of Auto-Continue.
     auto_continue_fired: bool,
     /// Elapsed time accumulated before the most recent pause.
@@ -171,6 +173,7 @@ impl VideoCue {
             cached_duration: None,
             in_pre_wait: false,
             play_generation: 0,
+            clock_run: None,
             auto_continue_fired: false,
             elapsed_before_pause: Duration::ZERO,
             action_elapsed_before_pause: Duration::ZERO,
@@ -491,10 +494,15 @@ impl Default for VideoCue {
     }
 }
 
+impl ClockMediaCue for VideoCue {
+    fn clock_run(&mut self) -> &mut Option<(Uuid, ClockRun)> { &mut self.clock_run }
+    fn has_prepared_media(&self) -> bool { self.preloaded }
+}
+
 impl Cue for VideoCue {
     inherit_playback_fields!(
         state, started_at, action_started_at, active_voice_id, in_pre_wait,
-        play_generation, auto_continue_fired, elapsed_before_pause,
+        play_generation, clock_run, auto_continue_fired, elapsed_before_pause,
         action_elapsed_before_pause, eof_fade_started, eof_audio_fade_started, preloading,
         preloaded,
         silent_speed_run,
@@ -560,6 +568,7 @@ impl Cue for VideoCue {
         if self.state == CueState::Running {
             return Ok(()); // Ignore duplicate GO.
         }
+        self.clock_run = None;
 
         let has_file = self.file_path.as_ref().is_some_and(|p| !p.as_os_str().is_empty());
         if !has_file {
@@ -613,6 +622,7 @@ impl Cue for VideoCue {
     }
 
     fn stop(&mut self, context: &CueContext) -> Result<()> {
+        self.clock_run = None;
         crate::media_usage::end(self, "stop_requested");
         self.in_pre_wait = false;
 
@@ -637,6 +647,9 @@ impl Cue for VideoCue {
 
     fn pause(&mut self, context: &CueContext) -> Result<()> {
         if self.state != CueState::Running {
+            if self.is_paused() {
+                ClockRun::leave_paused(&mut self.clock_run);
+            }
             return Ok(());
         }
         if !self.in_pre_wait {
@@ -645,6 +658,7 @@ impl Cue for VideoCue {
             }
             crate::media_usage::paused(self.id, true);
         }
+        ClockRun::leave_paused(&mut self.clock_run);
         if let Some(t) = self.started_at.take() {
             self.elapsed_before_pause = t.elapsed();
         }
@@ -657,10 +671,12 @@ impl Cue for VideoCue {
 
     fn resume(&mut self, context: &CueContext) -> Result<()> {
         if self.state != CueState::Paused {
+            self.clock_run = None;
             return Ok(());
         }
         if self.in_pre_wait {
             // Only the cue clock resumes. Its media stays held until the entrance.
+            self.clock_run = None;
             self.started_at = Some(Instant::now() - self.elapsed_before_pause);
             self.state = CueState::Running;
             return Ok(());
@@ -671,6 +687,7 @@ impl Cue for VideoCue {
         if let Some(vid) = self.active_voice_id {
             context.output_engine.resume_voice(vid)?;
         }
+        self.clock_run = None;
         self.started_at = Some(Instant::now() - self.elapsed_before_pause);
         self.action_started_at = Some(Instant::now() - self.action_elapsed_before_pause);
         self.state = CueState::Running;
@@ -700,6 +717,7 @@ impl Cue for VideoCue {
     }
 
     fn hard_stop(&mut self, context: &CueContext) -> Result<()> {
+        self.clock_run = None;
         crate::media_usage::end(self, "hard_stop_requested");
         self.in_pre_wait = false;
 
@@ -721,6 +739,7 @@ impl Cue for VideoCue {
     }
 
     fn reset(&mut self) -> Result<()> {
+        self.clock_run = None;
         crate::media_usage::end(self, "released");
         self.state = CueState::Standby;
         self.active_voice_id = None;

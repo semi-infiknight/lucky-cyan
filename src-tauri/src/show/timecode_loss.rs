@@ -2,7 +2,16 @@
 
 use std::time::{Duration, Instant};
 
-use crate::engine::timecode_types::TcRate;
+use anyhow::Result;
+use uuid::Uuid;
+
+use crate::{
+    cue::{
+        audio_cue::AudioCue, context::CueContext, traits::Cue, types::{CueState, CueType},
+        video_cue::VideoCue, wait_cue::WaitCue,
+    },
+    engine::timecode_types::{TcOnStop, TcRate},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClockEdge {
@@ -47,6 +56,164 @@ impl ClockLock {
 pub(crate) enum ClockRun {
     Controlled,
     PausedByClock { at: Instant },
+    /// The desk now owns a hold that had been controlled by the clock.
+    PausedByOperator,
+}
+
+impl ClockRun {
+    pub(crate) fn leave_paused(run: &mut Option<(Uuid, Self)>) {
+        if let Some((_, run)) = run {
+            *run = Self::PausedByOperator;
+        }
+    }
+}
+
+pub(crate) trait ClockMediaCue: Cue {
+    fn clock_run(&mut self) -> &mut Option<(Uuid, ClockRun)>;
+    fn has_prepared_media(&self) -> bool;
+}
+
+fn media_cue(cue: &mut dyn Cue) -> Option<&mut dyn ClockMediaCue> {
+    let kind = cue.cue_type();
+    let cue = cue as &mut dyn std::any::Any;
+    match kind {
+        CueType::Audio => cue.downcast_mut::<AudioCue>().map(|cue| cue as &mut dyn ClockMediaCue),
+        CueType::Video => cue.downcast_mut::<VideoCue>().map(|cue| cue as &mut dyn ClockMediaCue),
+        _ => None,
+    }
+}
+
+pub(crate) enum ClockCue<'a> {
+    Wait(&'a mut WaitCue),
+    Media(&'a mut dyn ClockMediaCue),
+}
+
+impl<'a> ClockCue<'a> {
+    pub(crate) fn supports(kind: CueType) -> bool {
+        matches!(kind, CueType::Wait | CueType::Audio | CueType::Video)
+    }
+
+    pub(crate) fn from_cue_mut(cue: &'a mut dyn Cue) -> Option<Self> {
+        if cue.cue_type() == CueType::Wait {
+            WaitCue::from_cue_mut(cue).map(Self::Wait)
+        } else {
+            media_cue(cue).map(Self::Media)
+        }
+    }
+
+    /// A marked start cannot take over an existing run. A prepared Load
+    /// voice has yet to start and is eligible for the normal marked GO.
+    pub(crate) fn next_generation(&self) -> Option<u64> {
+        let (cue, prepared): (&dyn Cue, bool) = match self {
+            Self::Wait(cue) => (&**cue, false),
+            Self::Media(cue) => (&**cue, cue.has_prepared_media()),
+        };
+        if cue.is_running() || (cue.is_paused() && !prepared) {
+            return None;
+        }
+        Some(cue.play_generation().wrapping_add(1))
+    }
+
+    pub(crate) fn follow_clock(self, list: Uuid, generation: u64) {
+        match self {
+            Self::Wait(cue) => cue.follow_clock(list, generation),
+            Self::Media(cue) if cue.is_running() && cue.play_generation() == generation => {
+                *cue.clock_run() = Some((list, ClockRun::Controlled));
+            }
+            Self::Media(_) => {}
+        }
+    }
+
+    pub(crate) fn detach(self) {
+        match self {
+            Self::Wait(cue) => cue.detach_clock(),
+            Self::Media(cue) => {
+                let run = cue.clock_run();
+                if matches!(run, Some((_, ClockRun::PausedByClock { .. } | ClockRun::PausedByOperator))) {
+                    ClockRun::leave_paused(run);
+                } else {
+                    *run = None;
+                }
+            }
+        }
+    }
+
+    /// The caller owns the audio-device hold set for this desk tick. A clock
+    /// return can release clock ownership of a pause while the device is lost.
+    pub(crate) fn apply_edge(
+        self, list: Uuid, edge: ClockEdge, policy: TcOnStop, context: &CueContext,
+        device_frozen: bool, device_holds: &mut std::collections::HashSet<Uuid>,
+    ) -> Result<Option<CueState>> {
+        let cue = match self {
+            Self::Wait(cue) => return cue.apply_clock_edge(list, edge, policy, context),
+            Self::Media(cue) => cue,
+        };
+        let Some((owner, run)) = *cue.clock_run() else { return Ok(None) };
+        let before = cue.state();
+        if owner != list {
+            return Ok(None);
+        }
+        match (edge, policy, run, before) {
+            (ClockEdge::Lost(at), TcOnStop::Pause, ClockRun::Controlled, CueState::Running | CueState::Paused) => {
+                if before == CueState::Running {
+                    cue.pause(context)?;
+                }
+                if cue.is_paused() {
+                    *cue.clock_run() = Some((list, ClockRun::PausedByClock { at }));
+                }
+            }
+            (ClockEdge::Lost(_), TcOnStop::Stop, ClockRun::Controlled, CueState::Running | CueState::Paused) => {
+                cue.stop(context)?;
+                device_holds.remove(&cue.id());
+            }
+            (ClockEdge::Returned(_), _, ClockRun::PausedByClock { .. }, CueState::Paused) => {
+                let generation = cue.play_generation();
+                if device_frozen && cue.playing_voice_id().is_some() && !cue.uses_silent_speed_clock() {
+                    device_holds.insert(cue.id());
+                } else {
+                    resume_synced_media(cue, context)?;
+                    device_holds.remove(&cue.id());
+                }
+                if cue.play_generation() == generation && (cue.is_running() || cue.is_paused()) {
+                    *cue.clock_run() = Some((list, ClockRun::Controlled));
+                }
+            }
+            _ => {}
+        }
+        Ok((cue.state() != before).then_some(cue.state()))
+    }
+}
+
+fn resume_synced_media(cue: &mut dyn Cue, context: &CueContext) -> Result<()> {
+    // The picture and audio clocks can diverge before an automatic hold
+    // takes effect. Resume the paired voice from the actual picture position.
+    if cue.cue_type() == CueType::Video {
+        if let Some(voice) = cue.playing_voice_id() {
+            context.output_engine.resync_audio_to_video(voice);
+        }
+    }
+    cue.resume(context)
+}
+
+/// Device pauses and resumes are automatic. Keep the run's clock owner, and
+/// leave clock-paused content held even if the audio device has recovered.
+pub(crate) fn transition_device_hold(cue: &mut dyn Cue, pause: bool, context: &CueContext) -> Result<bool> {
+    let transition = |cue: &mut dyn Cue| if pause { cue.pause(context) } else { resume_synced_media(cue, context) };
+    if let Some(media) = media_cue(cue) {
+        let owner = *media.clock_run();
+        if !pause && matches!(owner, Some((_, ClockRun::PausedByClock { .. } | ClockRun::PausedByOperator))) {
+            return Ok(false);
+        }
+        let generation = media.play_generation();
+        let result = transition(media);
+        if media.play_generation() == generation && (media.is_running() || media.is_paused()) {
+            *media.clock_run() = owner;
+        }
+        result?;
+    } else {
+        transition(cue)?;
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

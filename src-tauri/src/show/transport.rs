@@ -17,10 +17,9 @@ use crate::cue::{
     traits::Cue,
     types::{ContinueMode, CueId, CueState, CueType, GroupMode},
     video_cue::VideoCue,
-    wait_cue::WaitCue,
 };
 
-use super::cue_list::{CueList, CueListMode};
+use super::{cue_list::{CueList, CueListMode}, timecode_loss::ClockCue};
 use crate::engine::timecode_types::TcOnStop;
 
 /// Hard cap on how many cues a single GO call will chain through via
@@ -515,17 +514,18 @@ impl Transport {
         if cue_list.tc_config.on_stop == TcOnStop::Continue {
             return self.go_by_id(cue_list, cue_id);
         }
-        let wait = cue_list.get(cue_id).filter(|cue| cue.cue_type() == CueType::Wait);
-        if wait.is_some_and(|cue| cue.is_running() || cue.is_paused()) {
-            return Ok(GoResult::default());
-        }
-        let generation = wait.map(|cue| cue.play_generation().wrapping_add(1));
+        let generation = if let Some(cue) = cue_list.get_mut(cue_id).and_then(ClockCue::from_cue_mut) {
+            let Some(generation) = cue.next_generation() else { return Ok(GoResult::default()) };
+            Some(generation)
+        } else {
+            None
+        };
         let result = self.go_by_id(cue_list, cue_id);
         let list_id = cue_list.id;
-        if let Some((generation, wait)) = generation.zip(cue_list.get_mut(cue_id)
-            .and_then(WaitCue::from_cue_mut))
+        if let Some((generation, cue)) = generation.zip(cue_list.get_mut(cue_id)
+            .and_then(ClockCue::from_cue_mut))
         {
-            wait.follow_clock(list_id, generation);
+            cue.follow_clock(list_id, generation);
         }
         result
     }

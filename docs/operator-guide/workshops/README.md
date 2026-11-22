@@ -139,12 +139,17 @@ Inkue starts cues at received marks during forward playback. A forward jump can 
 
 ### Lose the clock during a Wait
 
-1. In a rehearsal list, program two 20-second top-level **Wait** cues and set both to **Do Not Continue**. Give the first an upcoming timecode mark, and start the second by hand just before you roll. Open the list’s timecode settings. Choose **Pause clock-started Wait cues** under **On Stop**, and set **Freewheel** to 800 ms.
+1. In a rehearsal list, program two 20-second top-level **Wait** cues and set both to **Do Not Continue**. Give the first an upcoming timecode mark, and start the second by hand just before you roll. Open the list’s timecode settings. Choose **Pause clock-started cues** under **On Stop**, and set **Freewheel** to 800 ms.
 2. Run the timecode source through the mark. Interrupt the input for half a second and confirm both waits keep running. Disconnect it for more than 800 ms. The first Wait should pause, and the manually started one should keep counting.
 3. Send an MTC Full Frame locate. The first Wait stays paused. Start sending moving frames again and check that it resumes from the held time. Repeat the loss, then GO a **Pause** cue that targets the clock-paused Wait. On clock return it stays paused until you use **Resume**.
-4. Try **Stop clock-started Wait cues** on a fresh run. After the same gap the first Wait returns to standby. Restoring reception leaves it there until a later trigger or GO.
+4. Try **Stop clock-started cues** on a fresh run. After the same gap the first Wait returns to standby. Restoring reception leaves it there until a later trigger or GO.
 
-Freewheel measures time since the last decoded frame observation, with a minimum of two normal observation intervals. At 25 fps that minimum is about 160 ms for MTC or 80 ms for LTC. A paused Wait excludes the time from the freewheel deadline until the next moving frame. The transport clock indicator has its own timeout, so it can change at a different moment. Only directly clock-started top-level Wait cues use this loss policy. Audio, Video, and cues reached through groups or continuation need separate support. Switching the receiver, disabling the list, or choosing **Keep cues running** relinquishes any clock-owned hold. Resume that Wait from the desk. [Figure 53 timecode settings](https://qlab.app/docs/v5/fundamentals/cue-lists/#the-timecode-tab)
+Freewheel measures time since the last decoded frame observation, with a minimum of two normal observation intervals. At 25 fps that minimum is about 160 ms for MTC or 80 ms for LTC. A paused Wait excludes the time from the freewheel deadline until the next moving frame. The transport clock indicator has its own timeout, so it can change at a different moment. The policy applies to top-level Wait, Audio, and Video cues that the clock started directly. Switching the receiver, disabling the list, or choosing **Keep cues running** relinquishes any clock-owned hold. Resume a held cue from the desk. [Figure 53 timecode settings](https://qlab.app/docs/v5/fundamentals/cue-lists/#the-timecode-tab)
+
+### Hold media when the clock drops
+
+1. Give a top-level Audio cue and a Video cue different marks. Set both to **Do Not Continue** so you can see their clock ownership clearly. Start a separate cue by hand, then run the clock past both marks. With **Pause clock-started cues** selected, stop the signal until Freewheel expires. The Audio cue and Video cue should hold while the manual cue continues.
+2. Restore moving timecode. Check the resumed audio and picture at their held positions. If the audio device also went away, check that a recovered device cannot release a clock hold and that the clock alone cannot resume media while the device remains unavailable. Repeat with **Stop clock-started cues** and check that returning timecode leaves the stopped cues on standby.
 
 ### Monitor the clock without firing cues
 
@@ -152,7 +157,7 @@ Freewheel measures time since the last decoded frame observation, with a minimum
 2. Roll MTC or LTC through the first mark. Check the moving address next to the suspension message in the transport bar. The first Wait stays idle. Manual GO still works.
 3. While the address is moving between the marks, select **Restore timecode triggers** in the transport bar. The desk takes the first fresh clock update as a starting position. Only the second Wait fires when its mark arrives.
 
-Suspension applies to all lists and workspaces until restored or Inkue quits. A Wait running when you suspend keeps running. A Wait already paused by clock loss stays paused for manual Resume. Clock-loss actions apply again to Waits subsequently started by timecode. Saved cue marks, receiver settings and outgoing Timecode cues keep their programming.
+Suspension applies to all lists and workspaces until restored or Inkue quits. A cue running when you suspend keeps running. A cue already paused by clock loss stays paused for manual Resume. Clock-loss actions apply again to eligible cues subsequently started by timecode.
 
 A **Timecode cue** generates outgoing MTC or LTC. To test that path, route its selected MIDI output or LTC audio patch to an independent monitor, pick a frame rate and set an end time. Keep outgoing timecode disconnected from this exercise’s receiving port until the routing is understood.
 
