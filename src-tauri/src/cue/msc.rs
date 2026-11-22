@@ -3,10 +3,29 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub enum MscCommand {
-    Go,
-    Stop,
-    Resume,
+    Go = 0x01,
+    Stop = 0x02,
+    Resume = 0x03,
+    Load = 0x05,
+    AllOff = 0x08,
+    Restore = 0x09,
+    Reset = 0x0a,
+    GoOff = 0x0b,
+    StandbyNext = 0x11,
+    StandbyPrevious = 0x12,
+    SequenceNext = 0x13,
+    SequencePrevious = 0x14,
+}
+
+impl MscCommand {
+    pub(crate) fn from_code(code: u64) -> Option<Self> {
+        use MscCommand::*;
+        [Go, Stop, Resume, Load, AllOff, Restore, Reset, GoOff,
+            StandbyNext, StandbyPrevious, SequenceNext, SequencePrevious]
+            .into_iter().find(|command| u64::from(*command as u8) == code)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -32,10 +51,26 @@ impl MscMessage {
         {
             return Err("Unrecognized MSC command format.".into());
         }
-        let command = match self.command {
-            MscCommand::Go => 1,
-            MscCommand::Stop => 2,
-            MscCommand::Resume => 3,
+        let cue_fields = [self.q_number.as_str(), &self.q_list, &self.q_path];
+        let list_field = [self.q_list.as_str()];
+        let fields: &[&str] = match self.command {
+            MscCommand::AllOff | MscCommand::Restore | MscCommand::Reset => {
+                if cue_fields.iter().any(|field| !field.is_empty()) {
+                    return Err("This MSC command has no cue, list or path operands.".into());
+                }
+                &[]
+            }
+            MscCommand::StandbyNext | MscCommand::StandbyPrevious |
+            MscCommand::SequenceNext | MscCommand::SequencePrevious => {
+                if !self.q_number.is_empty() || !self.q_path.is_empty() {
+                    return Err("This MSC command accepts only an optional Q list.".into());
+                }
+                &list_field
+            }
+            MscCommand::Load if self.q_number.is_empty() => {
+                return Err("MSC LOAD requires a Q number.".into());
+            }
+            _ => &cue_fields,
         };
         let mut bytes = vec![
             0xf0,
@@ -43,13 +78,10 @@ impl MscMessage {
             self.device_id,
             0x02,
             self.command_format,
-            command,
+            self.command as u8,
         ];
         let mut empty_field = false;
-        for (index, field) in [&self.q_number, &self.q_list, &self.q_path]
-            .into_iter()
-            .enumerate()
-        {
+        for (index, field) in fields.iter().enumerate() {
             if field.is_empty() {
                 empty_field = true;
                 continue;
@@ -90,6 +122,34 @@ mod tests {
             q_number: "235.6".into(),
             q_list: "36.6".into(),
             q_path: "59".into(),
+        }
+    }
+
+    #[test]
+    fn additional_msc_commands_use_their_specified_operand_layouts() {
+        let mut msg = example();
+        for (command, code) in [(MscCommand::Load, 5), (MscCommand::GoOff, 11)] {
+            msg.command = command;
+            let encoded = msg.to_bytes().unwrap();
+            assert_eq!(encoded[5], code);
+            assert_eq!(&encoded[6..encoded.len() - 1], b"235.6\x0036.6\x0059");
+        }
+
+        msg.q_number.clear();
+        msg.q_path.clear();
+        for code in 17..=20 {
+            msg.command = MscCommand::from_code(code.into()).unwrap();
+            assert_eq!(msg.to_bytes().unwrap(), [0xf0, 0x7f, 17, 2, 16, code, b'3', b'6', b'.', b'6', 0xf7]);
+        }
+
+        msg.command = MscCommand::Load;
+        assert!(msg.to_bytes().is_err());
+        for code in 8..=10 {
+            msg.command = MscCommand::from_code(code.into()).unwrap();
+            assert!(msg.to_bytes().is_err(), "device operations reject leftover operands");
+            msg.q_list.clear();
+            assert_eq!(msg.to_bytes().unwrap(), [0xf0, 0x7f, 17, 2, 16, code, 0xf7]);
+            msg.q_list = "36.6".into();
         }
     }
 

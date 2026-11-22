@@ -436,11 +436,8 @@ fn midi_for_review(cue: &Value, mut out: Map<String, Value>, reason: &str) -> Va
 
 fn msc(cue: &Value, patches: &Patches, mut out: Map<String, Value>) -> Value {
     use crate::cue::msc::{MscCommand, MscMessage};
-    let command = match cue["command"].as_u64() {
-        Some(1) => MscCommand::Go,
-        Some(2) => MscCommand::Stop,
-        Some(3) => MscCommand::Resume,
-        _ => return midi_for_review(cue, out, "Review unsupported MSC command."),
+    let Some(command) = cue["command"].as_u64().and_then(MscCommand::from_code) else {
+        return midi_for_review(cue, out, "Review unsupported MSC command.");
     };
     let byte = |key: &str| cue[key].as_u64().and_then(|v| u8::try_from(v).ok());
     let operand = |key: &str| match cue.get(key) {

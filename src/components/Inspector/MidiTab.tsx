@@ -51,12 +51,38 @@ const mscDefaults: MscMessage = {
   device_id: 0, command_format: 16, command: "go", q_number: "1", q_list: "", q_path: "",
 };
 
+const mscCommands = {
+  go: ["GO", "cue"],
+  stop: ["STOP", "cue"],
+  resume: ["RESUME", "cue"],
+  load: ["LOAD", "cue"],
+  all_off: ["ALL_OFF", "none"],
+  restore: ["RESTORE", "none"],
+  reset: ["RESET", "none"],
+  go_off: ["GO_OFF", "cue"],
+  standby_next: ["STANDBY_+", "list"],
+  standby_previous: ["STANDBY_−", "list"],
+  sequence_next: ["SEQUENCE_+", "list"],
+  sequence_previous: ["SEQUENCE_−", "list"],
+} as const satisfies Record<MscMessage["command"], [string, "cue" | "list" | "none"]>;
+
 const formatFamilies: [number, number, string][] = [
   [1, 6, "Lighting"], [16, 24, "Sound"], [32, 42, "Machinery"], [48, 56, "Video"],
   [64, 69, "Projection"], [80, 88, "Process control"], [96, 100, "Pyrotechnics"], [127, 127, "All types"],
 ];
 
 function MscFields({ settings, change }: { settings: MscMessage; change: (patch: Partial<MscMessage>) => void }) {
+  const [, layout] = mscCommands[settings.command];
+  const fields = [["q_number", "Q number"], ["q_list", "Q list"], ["q_path", "Q path"]] as const;
+
+  function changeCommand(command: MscMessage["command"]) {
+    const [, nextLayout] = mscCommands[command];
+    if (nextLayout === "none") change({ command, q_number: "", q_list: "", q_path: "" });
+    else if (nextLayout === "list") change({ command, q_number: "", q_path: "" });
+    else if (!settings.q_number && (command === "load" || settings.q_list)) change({ command, q_number: "1" });
+    else change({ command });
+  }
+
   return <div style={{ display: "grid", width: "100%", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 6 }}>
     <label>Device ID
       <select style={{ ...inputStyle, width: "100%" }} aria-label="MSC individual device ID" value={settings.device_id}
@@ -73,18 +99,19 @@ function MscFields({ settings, change }: { settings: MscMessage; change: (patch:
     </label>
     <label>Command
       <select style={{ ...inputStyle, width: "100%" }} aria-label="MSC command" value={settings.command}
-        onChange={e => change({ command: e.target.value as MscMessage["command"] })}>
-        {(["go","stop","resume"] as const).map(v => <option key={v} value={v}>{v.toUpperCase()}</option>)}
+        onChange={e => changeCommand(e.target.value as MscMessage["command"])}>
+        {Object.entries(mscCommands).map(([value, [label]]) => <option key={value} value={value}>{label}</option>)}
       </select>
     </label>
-    {([["q_number","Q number"],["q_list","Q list"],["q_path","Q path"]] as const).map(([key,label]) =>
+    {fields.filter(([key]) => layout === "cue" || (layout === "list" && key === "q_list")).map(([key, label]) =>
       <label key={key}>{label}
         <input style={{ ...inputStyle, width: "100%" }} aria-label={label} value={settings[key]}
           onChange={e => change({ [key]: e.target.value })} />
       </label>)}
-    {!settings.q_number && <small style={{ gridColumn: "1 / -1" }}>
-      {settings.command === "go" ? "An empty Q number starts the receiver’s next cue." :
-        "An empty Q number addresses every eligible transition on the receiver."}
+    {layout === "cue" && !settings.q_number && <small style={{ gridColumn: "1 / -1" }}>
+      {settings.command === "load" ? "Enter a Q number for LOAD."
+        : settings.command === "go" ? "An empty Q number starts the receiver’s next cue."
+          : "An empty Q number uses the receiver’s default scope."}
     </small>}
   </div>;
 }

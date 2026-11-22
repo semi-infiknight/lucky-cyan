@@ -589,7 +589,8 @@ export type MidiMessageType =
 export interface MscMessage {
   device_id: number;
   command_format: number;
-  command: "go" | "stop" | "resume";
+  command: "go" | "stop" | "resume" | "load" | "all_off" | "restore" | "reset" | "go_off"
+    | "standby_next" | "standby_previous" | "sequence_next" | "sequence_previous";
   q_number: string;
   q_list: string;
   q_path: string;

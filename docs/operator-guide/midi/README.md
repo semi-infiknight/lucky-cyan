@@ -44,7 +44,15 @@ A timed cue requires every row's output port to be present and uniquely named. I
 3. Change **Command** to **STOP**, then **RESUME**, and test each in the monitor. The command byte changes from `01` to `02` to `03`. Add Q path **5** and verify that `00 35` appears before the final `F7`. Save, reopen the workspace and confirm that GO sends the same bytes as Test.
 4. For rehearsal with a receiver, set its individual device ID and command format to match, choose its output port, and verify the named cue, list and path. Clearing Q number, list and path gives the receiver an unnumbered command. GO can advance its playback position. STOP and RESUME can affect all eligible transitions on that receiver.
 
-Inkue sends addressed GO, STOP and RESUME. Use digits and periods in the three optional fields. Include a cue number when sending a list and include both when sending a path. The complete message can use up to 128 bytes. Group and all-call destinations stay available for review in the original import notes. Supported imported MSC commands also start disabled so the operator can confirm the receiver.
+The complete message can use up to 128 bytes. For commands that take a cue address, use digits and periods, include a cue number before a list, and include both before a path. LOAD requires a cue number. Group and all-call destinations stay available for review in the original import notes. Supported imported MSC commands start disabled for receiver and port review.
+
+### Send standby or device commands
+
+1. Keep the destination on the virtual MIDI monitor. Change the command to **LOAD** and give it Q number **12.3**. Check that the command byte is `05` and the number is present.
+2. Choose **STANDBY_+**, set Q list to **4**, and press **Test**. Expect `F0 7F 07 02 10 11 34 F7`. The list occupies the first operand position for standby and sequence commands.
+3. Select **ALL_OFF**, **RESTORE** or **RESET** in the virtual exercise. The command codes are `08`, `09` and `0A`. Each is followed directly by `F7`. Check the receiver's command behavior before programming a live cue.
+
+**GO_OFF** can specify an exact cue address. The command list also includes previous standby and next and previous sequence. Device commands apply to the addressed receiver.
 
 Message framing and operand examples follow the MSC specification and QLab's command/format table. [MIDI Show Control 1.1 specification](https://www.richmondsounddesign.com/docs/midi-show-control-specification.pdf) · [QLab parameter reference](https://qlab.app/docs/v5/scripting/parameter-reference/) · [ETC Eos MSC formatting](https://www.etcconnect.com/WebDocs/Controls/EosFamilyOnlineHelp/en/Content/23_Show_Control/05_MIDI_Show_Control/Hexadecimal_MIDI.htm)
 
