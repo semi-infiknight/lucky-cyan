@@ -211,6 +211,12 @@ Movement updates one input row on the desk’s control clock. This workflow uses
 
 Clip audition uses the decoded source at its original speed with the cue’s volume and pan. Mono feeds both headphone channels. For multichannel files it monitors source channels 1 and 2. Rehearse groups, output maps, cue actions, slice loops and video from the cue list. [QLab 5 Auditioning Cues](https://qlab.app/docs/v5/tools/auditioning-cues/) · [QLab 4 Audition Window](https://qlab.app/docs/v4/tools/the-audition-window/)
 
+### Audition a cue from Show Mode
+
+1. Park a trimmed File Audio cue at standby in a second cue list. Return to the first list and open **Cue monitor → Audition**.
+2. Choose the cue by list and number, confirm the named headphone output, and select **Audition clip**. Check the clip in headphones and verify the main desk's playhead and the house output on the console.
+3. Choose **Stop audition** when finished. Selecting another cue or leaving the Audition view also ends the headphone pass.
+
 ### Compare source and cue effects in headphones
 
 1. Add an enabled **High-pass** at 600 Hz in an Audio cue’s **Audio FX** tab. Use a low-volume recording with both low and high notes, such as cue **2** of the Audio FX practice show.

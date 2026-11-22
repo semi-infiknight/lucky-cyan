@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import {
   auditionRunning, getMachineAudioConfig, getOutputPatches, listAudioDevices, previewCue, stopPreview,
 } from "../../lib/commands";
-import type { DeviceInfo } from "../../lib/types";
+import type { DeviceInfo, GroupTimelineOwner } from "../../lib/types";
 
 const outputKey = "inkue.audition.output";
 
-export function AudioAudition({ cueId }: { cueId: string }) {
+export function AudioAudition({ cueId, owner }: { cueId: string; owner?: GroupTimelineOwner }) {
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [device, setDevice] = useState(() => localStorage.getItem(outputKey) ?? "");
   const [gain, setGain] = useState(-18);
@@ -81,7 +81,7 @@ export function AudioAudition({ cueId }: { cueId: string }) {
       } else {
         const request = crypto.randomUUID();
         active.current = request;
-        const id = await previewCue(cueId, request, device, gain, undefined, undefined, audioFx);
+        const id = await previewCue(cueId, request, device, gain, undefined, undefined, audioFx, owner);
         if (!mounted.current) { await stopPreview(id); return; }
         active.current = id;
         setPlaying(id);

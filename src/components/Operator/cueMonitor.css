@@ -30,6 +30,7 @@
 .cue-monitor-heading p { margin: 3px 0 0; color: var(--desk-subtle); font-size: 12px; }
 .cue-monitor-heading button,
 .stage-confidence button,
+.monitor-audition button,
 .audio-map-confidence-controls button,
 .audio-map-confidence-controls select {
   padding: 5px 10px;
@@ -58,6 +59,7 @@
 }
 .stage-monitor-window h1 { font-size: 17px; margin: 0 0 12px; }
 .stage-monitor-window .stage-confidence-result :is(canvas, img) { width: 100%; height: auto; }
+.monitor-audition { display: grid; gap: 8px; }
 .cue-monitor-sheet { min-height: 0; overflow: auto; padding: 12px; }
 .cue-monitor-lists { display: grid; gap: 10px; }
 .cue-monitor-list {

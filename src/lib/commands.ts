@@ -41,6 +41,7 @@ import type {
   GeneralPreferences,
   CueListTcConfig,
   GroupMode,
+  GroupTimelineOwner,
   HealthAlert,
   ImportReport,
   InputPatch,
@@ -351,13 +352,14 @@ export const setMidiFile = (cueId: CueId, filePath: string) =>
 
 export const previewCue = (
   cueId: CueId, requestId: string, deviceId: string, monitorDb: number, startMs?: number, endMs?: number,
-  audioFx = false,
+  audioFx = false, owner?: GroupTimelineOwner,
 ) =>
   invoke<string>("preview_cue", {
     cueId, requestId, deviceId, monitorDb,
     startMs: startMs != null ? Math.round(startMs) : null,
     endMs: endMs != null ? Math.round(endMs) : null,
     ...(audioFx ? { audioFx } : {}),
+    ...(owner ? { owner } : {}),
   });
 
 export const auditionRunning = (voiceId: string) =>

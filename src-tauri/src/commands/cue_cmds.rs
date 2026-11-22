@@ -1822,11 +1822,25 @@ pub fn set_audio_file(
 // Waveform preview (plays a temporary voice without touching cue state)
 // ---------------------------------------------------------------------------
 
+fn scoped_audition_cue(
+    ws: &crate::show::Workspace, owner: GroupTimelineOwner, cue_id: Uuid,
+) -> Result<&dyn Cue, String> {
+    if ws.instance_id() != owner.workspace_id {
+        return Err("The workspace changed before audition started.".into());
+    }
+    let cue = ws.cue_list_by_id(owner.list_id).and_then(|list| list.get_recursive(&cue_id))
+        .ok_or("The cue is no longer in the selected list.")?;
+    if cue.cue_type() != CueType::Audio {
+        return Err("Choose an Audio cue for clip audition.".into());
+    }
+    Ok(cue)
+}
+
 /// Monitor a trimmed audio clip independently of cue execution and the live mixer.
 #[tauri::command]
 pub async fn preview_cue(
     cue_id: String, request_id: Uuid, device_id: String, monitor_db: f32,
-    start_ms: Option<u64>, end_ms: Option<u64>, audio_fx: Option<bool>,
+    start_ms: Option<u64>, end_ms: Option<u64>, audio_fx: Option<bool>, owner: Option<GroupTimelineOwner>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     if !cfg!(target_os = "linux") {
@@ -1836,6 +1850,12 @@ pub async fn preview_cue(
         return Err("Choose a headphone level between −60 and 0 dB.".into());
     }
     let id: Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
+    let owner = {
+        let ws = state.workspace.lock().map_err(|e| e.to_string())?;
+        let owner = owner.unwrap_or(GroupTimelineOwner { workspace_id: ws.instance_id(), list_id: ws.active_cue_list_id });
+        scoped_audition_cue(&ws, owner, id)?;
+        owner
+    };
     state.audio_engine.reserve_audition(request_id)?;
     let target = device_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -1845,7 +1865,7 @@ pub async fn preview_cue(
     }).await.map_err(|e| e.to_string())??;
 
     let ws = state.workspace.lock().map_err(|e| e.to_string())?;
-    let cue = ws.active_cue_list().and_then(|list| list.get_recursive(&id)).ok_or("Cue not found")?;
+    let cue = scoped_audition_cue(&ws, owner, id)?;
     let audio = (cue as &dyn std::any::Any).downcast_ref::<AudioCue>()
         .ok_or("Choose an Audio cue for clip audition.")?;
     let (samples, channels, sample_rate, _) = cue.extract_decoded_audio().ok_or("The audio file has not finished loading.")?;
@@ -2533,6 +2553,27 @@ pub fn remove_cue_from_group(
 #[cfg(test)]
 mod tests {
     use super::{compute_waveform_bins, set_file_path_resetting_clip};
+
+    #[test]
+    fn scoped_audition_uses_the_requested_list_and_open_workspace() {
+        use super::{scoped_audition_cue, GroupTimelineOwner};
+        use crate::{cue::{audio_cue::AudioCue, traits::Cue}, show::{cue_list::CueList, Workspace}};
+
+        let mut ws = Workspace::new("Rehearsal");
+        let active = ws.active_cue_list_id;
+        let mut list = CueList::new("Standby checks");
+        let cue = AudioCue::new();
+        let id = cue.id();
+        list.push(Box::new(cue));
+        let owner = GroupTimelineOwner { workspace_id: ws.instance_id(), list_id: list.id };
+        ws.cue_lists.push(list);
+        assert_eq!(scoped_audition_cue(&ws, owner, id).unwrap().id(), id);
+        assert_eq!(ws.active_cue_list_id, active);
+        assert!(scoped_audition_cue(&ws, GroupTimelineOwner { list_id: active, ..owner }, id).is_err());
+        let mut reopened = Workspace::new("Reopened");
+        reopened.cue_lists.push(ws.cue_lists.pop().unwrap());
+        assert!(scoped_audition_cue(&reopened, owner, id).is_err());
+    }
 
     #[test]
     fn playlist_second_trigger_is_owner_checked_and_has_field_only_history() {
