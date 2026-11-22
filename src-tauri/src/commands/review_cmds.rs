@@ -1,4 +1,4 @@
-//! Cue note and flag collaboration. The HTTP listener checks the review credential.
+//! Cue note, flag and name collaboration. The HTTP listener checks the credential and scope.
 
 use crate::{
     cue::traits::Cue,
@@ -11,6 +11,7 @@ use tauri::{Emitter, State};
 use uuid::Uuid;
 
 const MAX_NOTE_BYTES: usize = 2_000;
+const MAX_NAME_BYTES: usize = 2_000;
 const MAX_ROWS: usize = 4_096;
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -27,6 +28,7 @@ pub(super) enum ReviewChange {
     Note,
     FlagSet,
     FlagCleared,
+    Name,
 }
 
 fn record_review(ws: &mut Workspace, list_id: Uuid, cue_id: Uuid, change: ReviewChange) {
@@ -149,6 +151,13 @@ pub(super) enum ReviewRequest {
         expected_flagged: bool,
         flagged: bool,
     },
+    SetName {
+        workspace_id: Uuid,
+        list_id: Uuid,
+        cue_id: Uuid,
+        expected_name: String,
+        name: String,
+    },
 }
 
 impl ReviewRequest {
@@ -159,12 +168,17 @@ impl ReviewRequest {
             | Self::Note { workspace_id, .. }
             | Self::SetNote { workspace_id, .. }
             | Self::Flag { workspace_id, .. }
-            | Self::SetFlag { workspace_id, .. } => Some(*workspace_id),
+            | Self::SetFlag { workspace_id, .. }
+            | Self::SetName { workspace_id, .. } => Some(*workspace_id),
         }
     }
 
     pub(super) fn is_write(&self) -> bool {
-        matches!(self, Self::SetNote { .. } | Self::SetFlag { .. })
+        matches!(self, Self::SetNote { .. } | Self::SetFlag { .. } | Self::SetName { .. })
+    }
+
+    pub(super) fn requires_rename_access(&self) -> bool {
+        matches!(self, Self::SetName { .. })
     }
 }
 
@@ -264,6 +278,25 @@ pub(super) fn apply_review(
                 record_review(ws, list_id, cue_id, change);
             }
             Ok((json!({ "changed": changed, "flagged": flagged }), changed))
+        }
+        ReviewRequest::SetName { list_id, cue_id, expected_name, name, .. } => {
+            if name.len() > MAX_NAME_BYTES || expected_name.len() > MAX_NAME_BYTES {
+                return Err("The current and replacement cue names must each fit in 2,000 UTF-8 bytes".into());
+            }
+            let list = ws.cue_list_by_id_mut(list_id).ok_or("Unknown cue list")?;
+            let cue = list.get_mut_recursive(&cue_id).ok_or("Unknown cue in this list")?;
+            if cue.name() != expected_name {
+                return Err("The cue name changed. Read the cue list again before renaming it.".into());
+            }
+            let changed = name != expected_name;
+            if changed {
+                let history = history.ok_or("The desk undo history is unavailable")?;
+                history.push_name_edit(list_id, cue_id, expected_name);
+                cue.set_name(name.clone());
+                record_review(ws, list_id, cue_id, ReviewChange::Name);
+                ws.mark_modified();
+            }
+            Ok((json!({ "changed": changed, "name": name }), changed))
         }
     }
 }
@@ -396,6 +429,42 @@ mod tests {
         let cue = workspace.active_cue_list().unwrap().get_recursive(&cue_id).unwrap();
         assert_eq!(cue.notes(), "Keep the cue note");
         assert!(!cue.is_disabled());
+    }
+
+    #[test]
+    fn review_names_compare_exact_labels_and_undo_without_rebuilding_the_list() {
+        let mut workspace = Workspace::new("Rehearsal");
+        let owner = workspace.instance_id();
+        let list = workspace.active_cue_list_mut().unwrap();
+        let list_id = list.id;
+        let mut cue = MemoCue::new();
+        cue.set_name("Before ".into());
+        cue.set_notes("Keep notes".into());
+        let id = cue.id();
+        list.push(Box::new(cue));
+        list.playhead_cue_id = Some(id);
+        let revision = workspace.revision;
+        let mut history = UndoHistory::new();
+        let rename = |expected: &str, name: &str| ReviewRequest::SetName {
+            workspace_id: owner, list_id, cue_id: id,
+            expected_name: expected.into(), name: name.into(),
+        };
+        assert!(apply_review(&mut workspace, rename("Before", "After"), Some(&mut history)).is_err());
+        assert!(!apply_review(&mut workspace, rename("Before ", "Before "), None).unwrap().1);
+        assert_eq!(workspace.revision, revision);
+        assert!(!history.can_undo(list_id));
+        assert!(apply_review(&mut workspace, rename("Before ", "After"), Some(&mut history)).unwrap().1);
+        assert_eq!(workspace.programming_history[0]["cue_review"]["change"], "name");
+        assert!(apply_review(&mut workspace, rename("Before ", "Stale"), Some(&mut history)).is_err());
+        let registry = CueRegistry::new();
+        for (direction, expected) in [(HistoryDirection::Undo, "Before "), (HistoryDirection::Redo, "After")] {
+            assert!(super::super::undo_cmds::apply_history(&mut workspace, &mut history, &registry, direction).unwrap());
+            let list = workspace.active_cue_list().unwrap();
+            let cue = list.get_recursive(&id).unwrap();
+            assert_eq!(cue.name(), expected);
+            assert_eq!(cue.notes(), "Keep notes");
+            assert_eq!(list.playhead_cue_id, Some(id));
+        }
     }
 
     #[test]

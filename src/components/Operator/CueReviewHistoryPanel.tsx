@@ -5,7 +5,7 @@ import { useWorkspaceStore } from "../../stores/workspaceStore";
 import "./cueReviewHistory.css";
 
 const timeFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
-const reviewChanges = { note: "Note edited", flag_set: "Flag set", flag_cleared: "Flag cleared" };
+const reviewChanges = { note: "Note edited", flag_set: "Flag set", flag_cleared: "Flag cleared", name: "Cue renamed" };
 
 function localTime(value: string) {
   const time = new Date(value);

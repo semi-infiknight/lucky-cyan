@@ -25,7 +25,7 @@ function WorkspaceAgentPanel({ workspaceId, performanceLocked }: {
   useLayoutEffect(() => {
     ++statusRead.current;
     if (performanceLocked) {
-      setState(previous => previous?.review_file ? { ...previous, review_file: null } : previous);
+      setState(previous => previous?.review_file ? { ...previous, review_file: null, review_allow_rename: false } : previous);
     }
   }, [performanceLocked]);
 
@@ -102,9 +102,9 @@ function WorkspaceAgentPanel({ workspaceId, performanceLocked }: {
       </>}
       <CueReviewAccess
         connected={Boolean(state?.session_file)} locked={locked} workspaceId={workspaceId}
-        reviewFile={state?.review_file ?? null} busy={busy}
-        onEnable={() => {
-          if (workspaceId && state?.session_file && !locked) void act(() => agentReviewConnect(workspaceId));
+        reviewFile={state?.review_file ?? null} allowRename={state?.review_allow_rename ?? false} busy={busy}
+        onEnable={allowRename => {
+          if (workspaceId && state?.session_file && !locked) void act(() => agentReviewConnect(workspaceId, allowRename));
         }}
         onRevoke={() => {
           if (workspaceId && state?.review_file && !locked) void act(() => agentReviewDisconnect(workspaceId));
@@ -119,15 +119,17 @@ function ownsWorkspace(workspaceId?: string) {
   return useWorkspaceStore.getState().workspaceInfo?.instance_id === workspaceId;
 }
 
-export function CueReviewAccess({ connected, locked, workspaceId, reviewFile, busy, onEnable, onRevoke }: {
+export function CueReviewAccess({ connected, locked, workspaceId, reviewFile, allowRename, busy, onEnable, onRevoke }: {
   connected: boolean;
   locked: boolean;
   workspaceId?: string;
   reviewFile: string | null;
+  allowRename: boolean;
   busy: boolean;
-  onEnable: () => void;
+  onEnable: (allowRename: boolean) => void;
   onRevoke: () => void;
 }) {
+  const [grantRename, setGrantRename] = useState(false);
   return <section className="agent-review" aria-label="Cue review">
     <h4>Cue review</h4>
     {locked ? <p>Cue review is unavailable in Show Mode.</p>
@@ -135,9 +137,17 @@ export function CueReviewAccess({ connected, locked, workspaceId, reviewFile, bu
       : !workspaceId ? <p>Open a workspace to enable Cue review.</p>
       : <>
         <p>A reviewer can see cue labels and notes, edit a note if it still matches their starting text, and set or clear review flags. Accepted changes enter the desk’s undo history.</p>
-        {reviewFile
-          ? <ReviewCredential key={reviewFile} path={reviewFile} busy={busy} onRevoke={onRevoke} />
-          : <button type="button" disabled={busy} onClick={onEnable}>Enable cue review</button>}
+        {reviewFile ? <>
+          {allowRename && <p>This reviewer can also rename cues.</p>}
+          <ReviewCredential key={reviewFile} path={reviewFile} busy={busy} onRevoke={onRevoke} />
+        </> : <>
+          <label className="agent-review-permission"><input type="checkbox" checked={grantRename} disabled={busy}
+            onChange={event => setGrantRename(event.currentTarget.checked)} /> Allow cue renaming</label>
+          <button type="button" disabled={busy} onClick={() => {
+            onEnable(grantRename);
+            setGrantRename(false);
+          }}>Enable cue review</button>
+        </>}
       </>}
   </section>;
 }

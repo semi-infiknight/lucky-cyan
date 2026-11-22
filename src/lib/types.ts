@@ -854,7 +854,7 @@ export interface CueReviewHistoryRow {
   list_name: string | null;
   cue_number: string | null;
   cue_name: string | null;
-  change?: "note" | "flag_set" | "flag_cleared";
+  change?: "note" | "flag_set" | "flag_cleared" | "name";
 }
 
 export interface CueReviewHistory {

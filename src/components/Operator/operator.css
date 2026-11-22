@@ -79,6 +79,8 @@
 .agent-review h4 { margin: 0; font-size: 13px; }
 .agent-review p { color: var(--wc-text-secondary); line-height: 1.45; }
 .agent-review input { box-sizing: border-box; }
+.agent-review .agent-review-permission { display: flex; align-items: center; gap: 6px; }
+.agent-review .agent-review-permission input { width: auto; margin: 0; }
 .agent-review-actions { display: flex; flex-wrap: wrap; }
 .agent-review button:disabled { opacity: .55; cursor: default; }
 .agent-review :focus-visible { outline: 2px solid var(--wc-accent); outline-offset: 2px; }

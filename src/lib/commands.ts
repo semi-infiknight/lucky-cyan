@@ -730,6 +730,7 @@ export interface AgentStatus {
   session_file: string | null;
   monitor_file: string | null;
   review_file: string | null;
+  review_allow_rename: boolean;
   armed: boolean;
   performance_locked: boolean;
   pending: { id: string; label: string } | null;
@@ -742,8 +743,8 @@ export const getCueMonitorSnapshot = (workspaceId: string) =>
   invoke<CueMonitorSnapshot | null>("get_cue_monitor_snapshot", { workspaceId });
 export const agentConnect = () => invoke<AgentStatus>("agent_connect");
 export const agentDisconnect = () => invoke<void>("agent_disconnect");
-export const agentReviewConnect = (workspaceId: string) =>
-  invoke<AgentStatus>("agent_review_connect", { workspaceId });
+export const agentReviewConnect = (workspaceId: string, allowRename = false) =>
+  invoke<AgentStatus>("agent_review_connect", { workspaceId, ...(allowRename ? { allowRename } : {}) });
 export const agentReviewDisconnect = (workspaceId: string) =>
   invoke<AgentStatus>("agent_review_disconnect", { workspaceId });
 export const getCueReviewHistory = (workspaceId: string) =>

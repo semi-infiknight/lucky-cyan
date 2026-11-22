@@ -205,6 +205,23 @@ fn review_uses_workspace_ids_and_preserves_note_files_exactly() {
 }
 
 #[test]
+fn review_name_sends_an_exact_compare_and_replace() {
+    let files = Files::new();
+    let (session, server) = serve(&files, vec![
+        (json!({"command": "lists"}), "200 OK", lists()),
+        (json!({
+            "command": "set_name", "workspace_id": WORKSPACE, "list_id": LIST, "cue_id": CUE,
+            "expected_name": "Old label ", "name": "New label",
+        }), "200 OK", json!({"changed": true, "name": "New label"})),
+    ]);
+    let result = successful_json(inspector(&session)
+        .args(["review-set-name", LIST, CUE, "--expected", "Old label ", "--name", "New label"])
+        .output().unwrap());
+    assert_eq!(result, json!({"changed": true, "name": "New label"}));
+    server.join().unwrap();
+}
+
+#[test]
 fn conflicts_are_readable_and_credentials_stay_out_of_output() {
     let files = Files::new();
     let expected_file = files.write("old.txt", "old");

@@ -14,6 +14,7 @@ const props: ComponentProps<typeof CueReviewAccess> = {
   locked: false,
   workspaceId: "displayed-workspace",
   reviewFile: null,
+  allowRename: false,
   busy: false,
   onEnable: () => {},
   onRevoke: () => {},
@@ -36,6 +37,7 @@ describe("cue review access", () => {
   it("renders explicit opt-in and a private, labeled path only after enablement", () => {
     invoke.mockClear();
     const inactive = markup({ busy: true });
+    expect(inactive).toContain("Allow cue renaming");
     expect(inactive).toContain('<button type="button" disabled="">Enable cue review</button>');
     expect(inactive).not.toContain("Private cue review file");
     const active = markup({ reviewFile });
@@ -46,15 +48,19 @@ describe("cue review access", () => {
     expect(active).toContain(reviewFile);
     expect(active).toContain("Copy path");
     expect(active).toContain("Revoke cue review");
+    expect(active).not.toContain("This reviewer can also rename cues.");
+    expect(markup({ reviewFile, allowRename: true })).toContain("This reviewer can also rename cues.");
     expect(invoke).not.toHaveBeenCalled();
   });
 
   it("sends the displayed workspace owner on both explicit review commands", async () => {
     invoke.mockClear();
     await agentReviewConnect("displayed-workspace");
+    await agentReviewConnect("displayed-workspace", true);
     await agentReviewDisconnect("displayed-workspace");
     expect(invoke.mock.calls).toEqual([
       ["agent_review_connect", { workspaceId: "displayed-workspace" }],
+      ["agent_review_connect", { workspaceId: "displayed-workspace", allowRename: true }],
       ["agent_review_disconnect", { workspaceId: "displayed-workspace" }],
     ]);
   });

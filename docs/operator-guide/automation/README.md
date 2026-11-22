@@ -78,6 +78,18 @@ inkue-inspect --live "$REVIEW_FILE" review-set-flag "$LIST_ID" "$CUE_ID" \
 
 Check the flag beside the cue and the new **Flag set** entry in **File → Cue review history…**. Repeat the write with `--expected clear` to see a conflict. When you finish reviewing, read the flag again and use `--expected set --flag clear` to clear it. With playback stopped, Undo or Redo only changes the flag in that cue list. Standby and armed wall-clock triggers stay in place.
 
+### Rename a cue from the review terminal
+
+In **Agent access → Cue review**, check **Allow cue renaming** before enabling the session. Use the newly issued review file. Run `review-cues` to look up the cue's exact current name, including any spaces, then use that name with `--expected`.
+
+```sh
+inkue-inspect --live "$REVIEW_FILE" review-cues "$LIST_ID"
+inkue-inspect --live "$REVIEW_FILE" review-set-name "$LIST_ID" "$CUE_ID" \
+  --expected 'Opening call' --name 'Opening call after blackout'
+```
+
+Check the updated name and the **Cue renamed** row in **File → Cue review history…**. If the expected name has changed, read the cue again and reconcile your edit. On the primary desk, Undo and Redo restore the name in place. To change a reviewer's permission, revoke the session and enable a new one with the desired setting.
+
 ## Check review edits at the primary desk
 
 1. In a practice show, apply a review note edit from the terminal exercise above. In programming mode on the primary desk, choose **File → Cue review history…**. Find the new entry by its cue list, cue number and time.

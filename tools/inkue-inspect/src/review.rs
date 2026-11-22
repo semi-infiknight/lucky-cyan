@@ -53,6 +53,16 @@ pub(crate) enum ReviewCommand {
         #[arg(long, value_enum)]
         flag: FlagValue,
     },
+    /// Change a cue name if it still exactly matches the expected name.
+    #[command(name = "review-set-name")]
+    SetName {
+        list_id: String,
+        cue_id: String,
+        #[arg(long, allow_hyphen_values = true)]
+        expected: String,
+        #[arg(long, allow_hyphen_values = true)]
+        name: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -86,6 +96,13 @@ enum Request<'a> {
         cue_id: &'a str,
         expected_flagged: bool,
         flagged: bool,
+    },
+    SetName {
+        workspace_id: &'a str,
+        list_id: &'a str,
+        cue_id: &'a str,
+        expected_name: &'a str,
+        name: &'a str,
     },
 }
 
@@ -135,6 +152,12 @@ struct Flag {
 struct FlagChange {
     changed: bool,
     flagged: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+struct NameChange {
+    changed: bool,
+    name: String,
 }
 
 pub(crate) fn run(desk: &LiveDesk, command: ReviewCommand) -> Result<Value> {
@@ -188,6 +211,16 @@ pub(crate) fn run(desk: &LiveDesk, command: ReviewCommand) -> Result<Value> {
                 cue_id: &cue_id,
                 expected_flagged: matches!(expected, FlagValue::Set),
                 flagged: matches!(flag, FlagValue::Set),
+            })?)
+        }
+        ReviewCommand::SetName { list_id, cue_id, expected, name } => {
+            let workspace_id = workspace_id(desk)?;
+            serde_json::to_value(desk.review::<NameChange>(&Request::SetName {
+                workspace_id: &workspace_id,
+                list_id: &list_id,
+                cue_id: &cue_id,
+                expected_name: &expected,
+                name: &name,
             })?)
         }
     }?;

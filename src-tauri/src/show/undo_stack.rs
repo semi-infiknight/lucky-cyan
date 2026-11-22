@@ -61,6 +61,11 @@ pub enum HistoryEntry {
         cue_id: uuid::Uuid,
         note: String,
     },
+    /// Restore this cue's name without rebuilding the list.
+    CueName {
+        cue_id: uuid::Uuid,
+        name: String,
+    },
     /// Restore a Timeline entrance without rebuilding the cue or its group.
     CuePreWait {
         cue_id: uuid::Uuid,
@@ -167,6 +172,10 @@ impl UndoHistory {
     pub fn push_note_edit(&mut self, cue_list_id: uuid::Uuid, cue_id: uuid::Uuid, note: String) {
         self.stack_mut(cue_list_id)
             .push_action(HistoryEntry::CueNote { cue_id, note });
+    }
+
+    pub fn push_name_edit(&mut self, cue_list_id: uuid::Uuid, cue_id: uuid::Uuid, name: String) {
+        self.stack_mut(cue_list_id).push_action(HistoryEntry::CueName { cue_id, name });
     }
 
     pub fn push_pre_wait_edit(&mut self, cue_list_id: uuid::Uuid, cue_id: uuid::Uuid, pre_wait: Duration) {

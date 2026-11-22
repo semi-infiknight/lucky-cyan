@@ -169,6 +169,12 @@ pub fn apply_history(
             };
             HistoryEntry::CueNote { cue_id: *cue_id, note: previous }
         }
+        HistoryEntry::CueName { cue_id, name } => {
+            let cue = list.get_mut_recursive(cue_id).ok_or("The renamed cue no longer exists.")?;
+            let previous = cue.name().to_owned();
+            cue.set_name(name.clone());
+            HistoryEntry::CueName { cue_id: *cue_id, name: previous }
+        }
         HistoryEntry::CuePreWait { cue_id, pre_wait } => {
             let cue = list.get_mut_recursive(cue_id).ok_or("The Timeline cue no longer exists.")?;
             if cue.loaded_time_ms().is_some() && !pre_wait.is_zero() {

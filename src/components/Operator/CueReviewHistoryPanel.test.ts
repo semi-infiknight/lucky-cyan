@@ -13,9 +13,9 @@ describe("cue review history", () => {
     const time = "2026-11-22T10:23:49Z";
     const html = renderToStaticMarkup(createElement(CueReviewHistoryTable, { rows: [
       { event_index: 2, time, list_name: "Calls", cue_number: "Q4.1", cue_name: "Opening call" },
-      { event_index: 1, time, list_name: null, cue_number: null, cue_name: null },
+      { event_index: 1, time, list_name: null, cue_number: null, cue_name: null, change: "name" },
     ] }));
-    for (const expected of ["Recorded cue review edits", time, "Calls", "Q4.1", "Opening call", "Removed cue list", "Removed cue"]) {
+    for (const expected of ["Recorded cue review edits", time, "Calls", "Q4.1", "Opening call", "Removed cue list", "Removed cue", "Cue renamed"]) {
       expect(html).toContain(expected);
     }
     expect(html).not.toContain("<button");

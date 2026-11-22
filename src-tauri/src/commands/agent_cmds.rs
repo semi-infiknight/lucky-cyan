@@ -72,6 +72,13 @@ struct ReviewAccess {
     workspace_id: Uuid,
     file: PathBuf,
     open: Arc<AtomicBool>,
+    allow_rename: bool,
+}
+
+impl ReviewAccess {
+    fn permits(&self, command: &ReviewRequest) -> bool {
+        !command.requires_rename_access() || self.allow_rename
+    }
 }
 
 impl AgentDesk {
@@ -138,6 +145,7 @@ impl AgentDesk {
         json!({"session_file":self.session.as_ref().map(|s| &s.file), "armed":self.armed(),
             "monitor_file":self.session.as_ref().map(|s| &s.monitor_file),
             "review_file":self.review.as_ref().map(|review| &review.file),
+            "review_allow_rename":self.review.as_ref().is_some_and(|review| review.allow_rename),
             "performance_locked":self.performance_locked, "pending":self.pending.as_ref().filter(|_| self.armed()), "last_result":self.last_result})
     }
 
@@ -170,6 +178,7 @@ pub fn agent_disconnect(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub fn agent_review_connect(
     workspace_id: Uuid,
+    allow_rename: Option<bool>,
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<Value, String> {
@@ -207,6 +216,7 @@ pub fn agent_review_connect(
         workspace_id,
         file,
         open: Arc::clone(&open),
+        allow_rename: allow_rename.unwrap_or(false),
     });
     if let Err(error) = std::thread::Builder::new()
         .name("inkue-review-http".into())
@@ -541,6 +551,9 @@ fn apply_review_body(
         desk.revoke_review();
         return Err((410, "The workspace changed. Reconnect from the desk.".into()));
     }
+    if !desk.review.as_ref().is_some_and(|review| review.permits(&command)) {
+        return Err((403, "This cue review session does not have permission to rename cues.".into()));
+    }
     let mut history = command.is_write().then(|| state.undo_stack.try_lock())
         .transpose().map_err(|_| (409, "Desk busy, retry the request".into()))?;
     let (response, changed) = apply_review(&mut workspace, command, history.as_deref_mut())
@@ -852,10 +865,21 @@ mod tests {
                 workspace_id: Uuid::new_v4(),
                 file: review_file.clone(),
                 open: Arc::clone(&review_open),
+                allow_rename: false,
             }),
             ..Default::default()
         };
         assert!(desk.review_authorized(session, review_id));
+        let rename = ReviewRequest::SetName {
+            workspace_id: Uuid::nil(), list_id: Uuid::nil(), cue_id: Uuid::nil(),
+            expected_name: "Before".into(), name: "After".into(),
+        };
+        let grant = desk.review.as_mut().unwrap();
+        assert!(grant.permits(&ReviewRequest::Lists {}));
+        assert!(!grant.permits(&rename));
+        grant.allow_rename = true;
+        assert!(grant.permits(&rename));
+        assert_eq!(desk.status()["review_allow_rename"], true);
         assert!(!desk.review_authorized(Uuid::new_v4(), review_id));
         let stale_review = Uuid::new_v4();
         assert!(!desk.review_authorized(session, stale_review));
@@ -867,6 +891,7 @@ mod tests {
             Header::from_bytes("Origin", "http://localhost").unwrap()]).is_none());
         desk.set_performance_lock(true);
         assert!(desk.status()["review_file"].is_null());
+        assert_eq!(desk.status()["review_allow_rename"], false);
         assert!(!review_file.exists() && agent_file.exists() && monitor_file.exists());
         assert!(!review_open.load(Ordering::Acquire));
         desk.set_performance_lock(false);
