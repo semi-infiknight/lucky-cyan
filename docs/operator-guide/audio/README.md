@@ -66,6 +66,8 @@ Cue Output FX support up to 32 logical outputs on a processed patch, with up to 
 3. Start the Mic cue and play a reference File Audio cue on a different cue output assigned to the same hardware channel. Compare the two signals. Adjust a live crosspoint and check that its saved value is recalled after stopping and restarting the cue.
 4. Stop the cues on the patch before editing the chain or reassigning the hardware. Rehearse the Mic cue with the named device unavailable and confirm that its GO stays held until the device is restored and you give it a fresh GO. The Mic inspector supports one or two captured input channels. [QLab Mic cue workflow](https://qlab.app/docs/v5/audio/mic-cues/)
 
+Imported QLab Mic cues keep the saved static crosspoints when the archive includes them. Select a local Input Patch and use the **Source 1** and **Source 2** selectors to match the original inputs. Mic cues with wider or unsupported input assignments open disarmed for review.
+
 To compare two chains on one device, give a music patch a low-pass filter and a dialogue patch a high-pass filter. Select the same named hardware output for both patches and route a File Audio cue through each. Play them together, then pause and resume the music while the dialogue stays live. Change patch effects after stopping the cues on that patch.
 
 ## Start two stems from the same sample boundary

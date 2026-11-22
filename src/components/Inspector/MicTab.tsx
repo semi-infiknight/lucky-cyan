@@ -43,7 +43,9 @@ export function MicTab({ cue, onSave }: Props) {
   }, []);
 
   const selectedInput = inputPatches.find((p) => p.id === cue.input_patch_id) ?? null;
-  const inputChannelCount = cue.input_channels.length || (selectedInput?.channels.length ?? 0);
+  const patchChannels = [...new Set(selectedInput?.channels ?? [])];
+  const sourceChannels = cue.input_channels.length ? cue.input_channels.slice(0, 2) : patchChannels.slice(0, 2);
+  const inputChannelCount = sourceChannels.length;
   const outputPatch = outputPatches.find(patch => patch.id === (cue.output_patch_id ?? table?.default_patch_id));
 
   return (
@@ -78,15 +80,31 @@ export function MicTab({ cue, onSave }: Props) {
           style={selectStyle}
           value={String(inputChannelCount === 1 ? 1 : 2)}
           onChange={(e) => {
-            const n = parseInt(e.target.value, 10);
-            const patchChans = selectedInput?.channels ?? [0, 1];
-            const chans = n === 1 ? patchChans.slice(0, 1) : patchChans.slice(0, 2);
-            onSave({ input_channels: chans });
+            const left = sourceChannels[0] ?? patchChannels[0] ?? 0;
+            const right = sourceChannels[1] ?? patchChannels.find(channel => channel !== left) ?? 1;
+            onSave({ input_channels: e.target.value === "1" ? [left] : [left, right] });
           }}
         >
           <option value="1">Mono (1 ch)</option>
-          <option value="2">Stereo (2 ch)</option>
+          <option value="2" disabled={!!selectedInput && patchChannels.length < 2}>Stereo (2 ch)</option>
         </Select>
+        {selectedInput && sourceChannels.map((selected, index) => (
+          <label key={index} style={{ display: "grid", gap: 2, marginTop: 6, ...labelStyle }}>
+            Source {index + 1}
+            <Select style={selectStyle} value={String(selected)}
+              onChange={event => onSave({ input_channels: sourceChannels.map((channel, row) =>
+                row === index ? Number(event.target.value) : channel) })}>
+              {!patchChannels.includes(selected) &&
+                <option value={selected}>Hardware input {selected + 1} · outside this patch</option>}
+              {patchChannels.map(channel => (
+                <option key={channel} value={channel} disabled={sourceChannels.some((source, row) =>
+                  row !== index && source === channel)}>
+                  Hardware input {channel + 1}
+                </option>
+              ))}
+            </Select>
+          </label>
+        ))}
       </div>
 
       {/* Output Patch */}

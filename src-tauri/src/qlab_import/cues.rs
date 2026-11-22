@@ -549,13 +549,27 @@ pub fn titles(cue: &Value) -> Value {
 
 pub fn mic(cue: &Value) -> Value {
     let mut out = common(cue, "mic");
-    let count = cue.get("channels").and_then(Value::as_i64).unwrap_or(1).max(1);
+    let count = cue.get("channels").and_then(Value::as_i64).unwrap_or(1);
     let offset = cue.get("channelOffset").and_then(Value::as_i64).unwrap_or(0);
-    let channels: Vec<i64> = (offset..offset + count).collect();
+    let supported_count = count.clamp(1, 2);
+    let channels: Vec<u16> = (0..supported_count)
+        .filter_map(|index| offset.checked_add(index).and_then(|channel| u16::try_from(channel).ok()))
+        .collect();
     out.insert("input_patch_id".into(), Value::Null);
     out.insert("input_channels".into(), json!(channels));
     out.insert("output_patch_id".into(), Value::Null);
-    out.insert("volume_db".into(), json!(master_db(cue)));
+    apply_audio_levels(&mut out, cue, false);
+    let has_later_input_routes = out.get("level_matrix").and_then(Value::as_array).is_some_and(|rows| {
+        rows.iter().skip(supported_count as usize).any(|row| {
+            row.as_array().is_some_and(|levels| levels.iter().any(|level| level.as_f64().is_some_and(|level| level > -60.0)))
+        })
+    });
+    if !(1..=2).contains(&count) || channels.len() != supported_count as usize || has_later_input_routes {
+        out.insert("is_disabled".into(), json!(true));
+        add_note(&mut out, &format!(
+            "[Review the source Mic routing before arming. The archive specifies {count} inputs at offset {offset}. Inkue captures one or two input channels per Mic cue.]"
+        ));
+    }
     out.insert("pan".into(), json!(0.0));
     out.insert("fade_in_ms".into(), Value::Null);
     out.insert("fade_in_curve".into(), Value::Null);
@@ -563,8 +577,7 @@ pub fn mic(cue: &Value) -> Value {
     out.insert("fade_out_curve".into(), Value::Null);
     add_note(
         &mut out,
-        "[Input Patch not set — QLab's audio input patch has no Inkue equivalent \
-         to import; pick one in the Mic tab]",
+        "[Input Patch needs local assignment. Choose and verify it in the Mic tab before running this cue.]",
     );
     Value::Object(out)
 }
@@ -809,6 +822,24 @@ pub fn unconvertible(cue: &Value, label: &str, detail: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qlab_mic_import_keeps_static_matrix_and_requires_review_for_wider_input() {
+        use crate::cue::{mic_cue::MicCueFactory, traits::CueFactory};
+        let mut source = json!({"channels": 2, "channelOffset": 4, "levels": {"entries": [
+            {"row": 1, "column": 3, "initialLevel": 1.0},
+            {"row": 2, "column": 1, "initialLevel": 1.0}
+        ]}});
+        let imported = mic(&source);
+        let loaded = MicCueFactory.from_json(imported).unwrap().serialize();
+        assert_eq!(loaded["input_channels"], json!([4, 5]));
+        assert_eq!(loaded["level_matrix"], json!([[-60.0, -60.0, 0.0], [0.0]]));
+        assert!(loaded["input_patch_id"].is_null());
+        source["channels"] = json!(4);
+        let imported = mic(&source);
+        assert_eq!(imported["is_disabled"], true);
+        assert!(imported["_conversion_note"].as_str().unwrap().contains("4 inputs at offset 4"));
+    }
 
     #[test]
     fn continue_mode_maps_qlabs_integers() {
