@@ -562,6 +562,7 @@ fn picture_color_fade_can_revert_parameters_independently_after_live_edits() {
     let voice = list.get(&target_id).unwrap().playing_voice_id().unwrap();
     go(&mut transport, &mut list, fade_id);
     run_for(&mut list, &ctx, Duration::from_millis(20));
+    list.get_mut(&fade_id).unwrap().reset().unwrap();
 
     let style = LayerStyle { picture_brightness: 0.375, ..LayerStyle::default() };
     ctx.output_engine.set_layer_props(voice, &style, [false, true, false, false]);

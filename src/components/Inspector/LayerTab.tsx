@@ -2,9 +2,11 @@
 // plays on and how it composites with the other layers there — stacking
 // order, opacity, blend mode and per-source color.
 
+import { useState } from "react";
 import type { BlendMode, CameraCueData, ImageCueData, LayerStyle, VideoCueData } from "../../lib/types";
 import type { CueProperties } from "../../lib/commands";
 import { DEFAULT_LAYER_STYLE } from "../../lib/types";
+import { parseQlabColorControls } from "../../lib/qlabColorControls";
 import { NumberInput, Section, SliderRow, ToggleRow, inputStyle } from "./Field";
 import { Select } from "../common/Select";
 import { OutputPicker } from "./OutputPicker";
@@ -156,7 +158,36 @@ export function LayerTab({
             Reset color controls
           </button>
         </div>
+        <QlabColorControlsPaste key={cue.id} onApply={patch} />
       </Section>
     </>
+  );
+}
+
+function QlabColorControlsPaste({ onApply }: { onApply: (patch: Partial<LayerStyle>) => void }) {
+  const [input, setInput] = useState("");
+  const [error, setError] = useState("");
+
+  function apply() {
+    try {
+      onApply(parseQlabColorControls(input));
+      setInput("");
+      setError("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  return (
+    <details style={{ marginTop: 8, fontSize: 12 }}>
+      <summary>Paste QLab Color Controls</summary>
+      <label style={{ display: "grid", gap: 6, margin: "8px 0" }}>
+        Paste the JSON reply for the original cue’s Color Controls parameters.
+        <textarea value={input} onChange={event => { setInput(event.target.value); setError(""); }}
+          rows={3} maxLength={4097} spellCheck={false} style={{ ...inputStyle, width: "100%", resize: "vertical" }} />
+      </label>
+      <button type="button" style={colorButtonStyle} disabled={!input.trim()} onClick={apply}>Apply settings</button>
+      {error && <p role="alert">{error}</p>}
+    </details>
   );
 }

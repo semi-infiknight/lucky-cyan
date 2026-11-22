@@ -147,6 +147,13 @@ Inkue applies saturation to the selected Video, Image, or Camera cue before blen
 
 When moving a show from QLab, copy the Color Controls settings into the corresponding Inkue controls. Rehearse the look on the target display. Inkue rotates the source in HSV and applies the controls before the blend mode. Set the Fade destinations separately in the Fade inspector. [QLab Color Controls parameter ranges](https://qlab.app/docs/v5/scripting/parameter-reference/#video-effects)
 
+### Transfer QLab Color Controls values
+
+1. Ask QLab for the original cue's settings with `/cue/21/videoEffect/ColorControls/parameters` using the cue's actual number. Use your OSC controller's reply display to copy the JSON argument. You can also copy the four-parameter JSON object on its own.
+2. Select the migrated cue in Inkue. Open **Layer → Color Controls → Paste QLab Color Controls**, paste the JSON and choose **Apply settings**. Check the four sliders and rehearse the cue on the stage. Transfer Fade destinations separately.
+
+Transfer a Color Controls effect that you want applied to the cue. Inkue's controls apply together at one point in the source layer. Compare any show that used multiple or differently ordered effects. [QLab OSC effect parameters](https://qlab.app/docs/v5/scripting/osc-dictionary-v5/)
+
 ### Animate the picture's color controls
 
 1. Start a colored still or movie. Target it with a two-second Fade and leave **Crossfade** set to **None**. Under **Visual**, turn off **Fade brightness** to keep opacity steady. Turn off **Fade volume** to keep the soundtrack steady.
