@@ -12,6 +12,7 @@ use crate::{show::{cue_list::{CueList, CueListMode}, workspace::Workspace}, stat
 pub struct CueListInfo {
     pub id: String,
     pub name: String,
+    pub number: Option<String>,
     pub mode: CueListMode,
     pub chain_cart_cues: bool,
     pub cart_layout: Option<CartLayout>,
@@ -101,6 +102,40 @@ pub fn rename_cue_list(
     Ok(())
 }
 
+/// Update a saved list address only if the tab still belongs to the open show.
+#[tauri::command]
+pub fn set_cue_list_number(
+    state: State<'_, AppState>,
+    handle: tauri::AppHandle,
+    workspace_id: Uuid,
+    list_id: Uuid,
+    expected: Option<String>,
+    number: Option<String>,
+) -> Result<(), String> {
+    let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    if ws.instance_id() != workspace_id {
+        return Err("The workspace changed. Reopen the cue list number field.".into());
+    }
+    let index = ws.cue_lists.iter().position(|list| list.id == list_id).ok_or("Cue list not found")?;
+    let number = number.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
+    if ws.cue_lists[index].number != expected {
+        return Err("The cue list number changed. Reopen the field to edit it.".into());
+    }
+    if ws.cue_lists[index].number == number {
+        return Ok(());
+    }
+    if let Some(number) = &number {
+        if ws.cue_lists.iter().any(|list| list.number.as_ref() == Some(number)) {
+            return Err(format!("Cue list number {number} is already in use."));
+        }
+    }
+    ws.cue_lists[index].number = number;
+    ws.mark_modified();
+    emit_cue_lists_changed(&handle, &ws);
+    let _ = handle.emit("workspace-modified", ());
+    Ok(())
+}
+
 /// Switches the active cue list. Emits `cue-lists-changed` and `playhead-moved`.
 #[tauri::command]
 pub fn set_active_cue_list(
@@ -130,6 +165,7 @@ fn cue_list_infos(ws: &Workspace) -> Vec<CueListInfo> {
         .map(|cl| CueListInfo {
             id: cl.id.to_string(),
             name: cl.name.clone(),
+            number: cl.number.clone(),
             mode: cl.mode,
             chain_cart_cues: cl.chain_cart_cues,
             cart_layout: cl.cart_layout.clone(),

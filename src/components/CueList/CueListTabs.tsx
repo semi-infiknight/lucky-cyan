@@ -3,29 +3,39 @@
 import { useState, useRef, useEffect } from "react";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import {
-  addCueList, openCartWindow, removeCueList, renameCueList, setActiveCueList, setCueListMode,
+  addCueList, openCartWindow, removeCueList, renameCueList, setActiveCueList, setCueListMode, setCueListNumber,
   getCuelistTcConfig, setCuelistTcConfig,
 } from "../../lib/commands";
-import type { CueListTcConfig, TcRate, TcOnStart, TcOnStop } from "../../lib/types";
+import type { CueListSummary, CueListTcConfig, TcRate, TcOnStart, TcOnStop } from "../../lib/types";
 import { Select } from "../common/Select";
 import { DragNumber } from "../common/DragNumber";
+
+interface TabEdit {
+  listId: string;
+  field: "name" | "number";
+  previous: string | null;
+  workspaceId?: string;
+}
 
 export function CueListTabs({ onRefresh }: { onRefresh: () => void }) {
   const { cueLists, activeCueListId, refreshCueLists, workspaceInfo } = useWorkspaceStore();
   const workspaceId = workspaceInfo?.instance_id;
 
-  const [renamingId, setRenamingId]   = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState("");
+  const [editing, setEditing] = useState<TabEdit | null>(null);
+  const [editValue, setEditValue] = useState("");
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [addBtnHovered, setAddBtnHovered] = useState(false);
-  const renameInputRef = useRef<HTMLInputElement>(null);
-  const renameClosed = useRef(false);
+  const editInput = useRef<HTMLInputElement>(null);
+  const editClosed = useRef(false);
   const [windowError, setWindowError] = useState("");
   const menuList = cueLists.find(list => list.id === contextMenu?.id);
 
   useEffect(() => {
-    if (renamingId) renameInputRef.current?.focus();
-  }, [renamingId]);
+    if (editing) {
+      editInput.current?.focus();
+      editInput.current?.select();
+    }
+  }, [editing]);
 
   // Close context menu on outside click.
   useEffect(() => {
@@ -71,28 +81,36 @@ export function CueListTabs({ onRefresh }: { onRefresh: () => void }) {
     setContextMenu(null);
   };
 
-  const startRename = (id: string, currentName: string) => {
-    renameClosed.current = false;
-    setRenamingId(id);
-    setRenameValue(currentName);
+  const startEdit = (list: CueListSummary, field: TabEdit["field"]) => {
+    editClosed.current = false;
+    const previous = list[field] ?? null;
+    setEditing({ listId: list.id, workspaceId, field, previous });
+    setEditValue(previous ?? "");
+    setWindowError("");
     setContextMenu(null);
   };
 
-  const commitRename = async () => {
-    if (!renamingId || renameClosed.current) return;
-    renameClosed.current = true;
-    const trimmed = renameValue.trim();
-    setRenamingId(null);
-    if (trimmed && trimmed !== cueLists.find(list => list.id === renamingId)?.name) {
-      await renameCueList(renamingId, trimmed).catch(console.error);
+  const commitEdit = async () => {
+    if (!editing || editClosed.current) return;
+    editClosed.current = true;
+    const next = editValue.trim() || null;
+    setEditing(null);
+    if (editValue === (editing.previous ?? "") || next === editing.previous) return;
+    try {
+      if (editing.field === "name" && next) await renameCueList(editing.listId, next);
+      if (editing.field === "number" && editing.workspaceId) {
+        await setCueListNumber(editing.workspaceId, editing.listId, editing.previous, next);
+      }
       await refreshCueLists();
+    } catch (error) {
+      setWindowError(String(error));
     }
   };
 
-  const handleRenameKey = (e: React.KeyboardEvent) => {
+  const handleEditKey = (e: React.KeyboardEvent) => {
     e.stopPropagation();
-    if (e.key === "Enter") { e.preventDefault(); void commitRename(); }
-    if (e.key === "Escape") { e.preventDefault(); renameClosed.current = true; setRenamingId(null); }
+    if (e.key === "Enter") { e.preventDefault(); void commitEdit(); }
+    if (e.key === "Escape") { e.preventDefault(); editClosed.current = true; setEditing(null); }
   };
 
   return (
@@ -108,12 +126,13 @@ export function CueListTabs({ onRefresh }: { onRefresh: () => void }) {
       <div role="tablist" aria-label="Cue lists and carts" className="cue-list-tabstrip">
       {cueLists.map((list, index) => {
         const isActive = list.id === activeCueListId;
-        const isRenaming = list.id === renamingId;
+        const isEditing = list.id === editing?.listId;
+        const tabLabel = list.number ? `${list.number} ${list.name}` : list.name;
 
         return (
           <div
             key={list.id}
-            role="tab" aria-selected={isActive} aria-label={`${list.name}, ${list.mode === "cart" ? "cue cart" : "cue list"}`}
+            role="tab" aria-selected={isActive} aria-label={`${tabLabel}, ${list.mode === "cart" ? "cue cart" : "cue list"}`}
             tabIndex={isActive || (!activeCueListId && index === 0) ? 0 : -1}
             onKeyDown={e => {
               if (e.target !== e.currentTarget || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -127,7 +146,7 @@ export function CueListTabs({ onRefresh }: { onRefresh: () => void }) {
                 case "Enter":
                 case " ": break;
                 case "F2":
-                  e.preventDefault(); e.stopPropagation(); startRename(list.id, list.name); return;
+                  e.preventDefault(); e.stopPropagation(); startEdit(list, "name"); return;
                 default: return;
               }
               e.preventDefault();
@@ -141,8 +160,8 @@ export function CueListTabs({ onRefresh }: { onRefresh: () => void }) {
               e.stopPropagation();
               setContextMenu({ x: e.clientX, y: e.clientY, id: list.id });
             }}
-            onClick={() => !isRenaming && void handleSwitchList(list.id)}
-            onDoubleClick={() => startRename(list.id, list.name)}
+            onClick={() => !isEditing && void handleSwitchList(list.id)}
+            onDoubleClick={() => startEdit(list, "name")}
             style={{
               display: "flex", alignItems: "center",
               padding: "0 10px", height: 26, borderRadius: 4,
@@ -154,13 +173,15 @@ export function CueListTabs({ onRefresh }: { onRefresh: () => void }) {
               minWidth: 80,
             }}
           >
-            {isRenaming ? (
+            {isEditing ? (
               <input
-                ref={renameInputRef}
-                value={renameValue}
-                onChange={(e) => setRenameValue(e.target.value)}
-                onBlur={() => void commitRename()}
-                onKeyDown={handleRenameKey}
+                ref={editInput}
+                aria-label={editing.field === "number" ? "Cue list number" : "Cue list name"}
+                placeholder={editing.field === "number" ? "Cue list number" : undefined}
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                onBlur={() => void commitEdit()}
+                onKeyDown={handleEditKey}
                 onClick={(e) => e.stopPropagation()}
                 style={{
                   background: "transparent", border: "none", outline: "none",
@@ -171,7 +192,7 @@ export function CueListTabs({ onRefresh }: { onRefresh: () => void }) {
             ) : (
               <span style={{ display: "flex", alignItems: "center", gap: 4, overflow: "hidden" }}>
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 120 }}>
-                  {list.name}
+                  {tabLabel}
                 </span>
                 {list.mode === "cart" && (
                   <span style={{
@@ -233,9 +254,13 @@ export function CueListTabs({ onRefresh }: { onRefresh: () => void }) {
             label="Rename…"
             onClick={() => {
               const list = cueLists.find((l) => l.id === contextMenu.id);
-              if (list) startRename(list.id, list.name);
+              if (list) startEdit(list, "name");
             }}
           />
+          {menuList && workspaceId && <ContextMenuItem
+            label="Cue list number…"
+            onClick={() => startEdit(menuList, "number")}
+          />}
           <ContextMenuItem
             label={menuList?.mode === "cart"
               ? "Switch to Sequential Mode"

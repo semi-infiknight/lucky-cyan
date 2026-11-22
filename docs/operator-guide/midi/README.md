@@ -63,7 +63,15 @@ Message framing and operand examples follow the MSC specification and QLab's com
 3. Stop the rehearsal. Send **STANDBY_+** or **STANDBY_-** and confirm that standby moves one armed row without starting a cue. Send an unnumbered **GO** to start the current standby. Send **ALL_OFF** to stop playback across lists.
 4. Suspend incoming MIDI in Preferences. Send a rehearsal command and confirm the desk stays idle. Choose **Restore MIDI input** in the transport bar and send a fresh command.
 
-Inkue accepts Lighting (General), Sound (General) and Video (General) at the configured device ID and the standard all-call ID 127. Numbered GO, STOP, RESUME and LOAD use an exact, unique top-level number in the active list. LOAD prepares supported media for a separate start. Unnumbered RESUME resumes paused playback across lists while held Load media awaits Start. Unnumbered STOP and LOAD, Q list and path operands, sequence steps and RESET remain open. [QLab MIDI and MSC](https://reference.qlab.app/docs/v5/networking/using-midi-and-msc/)
+Inkue accepts Lighting (General), Sound (General) and Video (General) at the configured device ID and the standard all-call ID 127. Numbered GO, STOP, RESUME and LOAD use an exact, unique top-level cue number in the addressed list. With no Q list, they use the active list. LOAD prepares supported media for a separate start. Unnumbered RESUME resumes paused playback across lists while held Load media awaits Start. Unnumbered STOP and LOAD, Q path and RESET remain open. [QLab MIDI and MSC](https://reference.qlab.app/docs/v5/networking/using-midi-and-msc/)
+
+### Address another cue list
+
+1. Right-click a second list's tab and choose **Cue list number…**. Enter `04` and press **Enter**. The number appears on the tab. Imported QLab list numbers are shown here, too. Use digits and periods for MIDI Show Control.
+2. Put a silent top-level Wait numbered `42` in both lists. Keep the first list selected. Send **GO** with Q number `42` and Q list `04`. Check **Cue monitor** for the second list's Wait and confirm that the first list still has its original standby. Send **STOP** with the same two operands.
+3. In list `04`, make two short sequences using **Auto-Continue** or **Auto-Follow** links. Send **SEQUENCE_+** and **SEQUENCE_-** with Q list `04` to move between sequence starts. Use **STANDBY_+** and **STANDBY_-** to move by one armed row. Check the resulting standby in Cue monitor.
+
+Cue list numbers are literal. A command for `4` cannot resolve list `04`. Imports with an ambiguous list number need that number corrected before receiving scoped commands. [QLab cue list numbering](https://reference.qlab.app/docs/v5/fundamentals/cue-lists/)
 
 ## Rehearse one SysEx message
 

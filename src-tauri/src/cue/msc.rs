@@ -28,16 +28,20 @@ impl MscCommand {
     }
 }
 
-/// Incoming transport operations in the active list, or across the desk for
-/// an unnumbered Resume and ALL_OFF.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum MscTransport {
+pub(crate) enum MscAction {
     Go(Option<String>),
     Pause(String),
     Resume(Option<String>),
     Load(String),
     AllOff,
-    Standby(bool),
+    Step { forward: bool, sequence: bool },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct MscTransport {
+    pub action: MscAction,
+    pub list: Option<String>,
 }
 
 impl MscTransport {
@@ -48,42 +52,59 @@ impl MscTransport {
         let [0xf0, 0x7f, device, 0x02, 0x01 | 0x10 | 0x30, command, payload @ .., 0xf7] = bytes else {
             return None;
         };
-        if destination > 126 || !matches!(*device, 127) && *device != destination {
+        if destination > 126 || (*device != 127 && *device != destination) {
             return None;
         }
         let command = MscCommand::from_code(u64::from(*command))?;
-        if payload.is_empty() {
-            return match command {
-                MscCommand::Go => Some(Self::Go(None)),
-                MscCommand::Resume => Some(Self::Resume(None)),
-                MscCommand::AllOff => Some(Self::AllOff),
-                MscCommand::StandbyNext => Some(Self::Standby(true)),
-                MscCommand::StandbyPrevious => Some(Self::Standby(false)),
-                _ => None,
+        if matches!(command, MscCommand::StandbyNext | MscCommand::StandbyPrevious
+            | MscCommand::SequenceNext | MscCommand::SequencePrevious)
+        {
+            let list = if payload.is_empty() {
+                None
+            } else {
+                Some(decode_address(payload.strip_suffix(&[0]).unwrap_or(payload))?)
             };
+            let action = MscAction::Step {
+                forward: matches!(command, MscCommand::StandbyNext | MscCommand::SequenceNext),
+                sequence: matches!(command, MscCommand::SequenceNext | MscCommand::SequencePrevious),
+            };
+            return Some(Self { action, list });
         }
-        // Trailing separators can stand for omitted list and path operands.
-        // A frame containing a real list or path never resolves in the desk.
+        if payload.is_empty() {
+            let action = match command {
+                MscCommand::Go => MscAction::Go(None),
+                MscCommand::Resume => MscAction::Resume(None),
+                MscCommand::AllOff => MscAction::AllOff,
+                _ => return None,
+            };
+            return Some(Self { action, list: None });
+        }
+
         let mut fields = payload.split(|&byte| byte == 0);
-        let number = std::str::from_utf8(fields.next()?).ok()?;
-        let mut omitted = 0;
-        for field in fields {
-            omitted += 1;
-            if !field.is_empty() || omitted > 2 {
-                return None;
-            }
-        }
-        if !valid_cue_number(number) {
+        let number = decode_address(fields.next()?)?;
+        let list = match fields.next() {
+            Some(list) if !list.is_empty() => Some(decode_address(list)?),
+            _ => None,
+        };
+        // A trailing delimiter may omit the path. Hierarchical paths have
+        // their own addressing rules and cannot fall through to a list match.
+        if fields.next().is_some_and(|path| !path.is_empty()) || fields.next().is_some() {
             return None;
         }
-        match command {
-            MscCommand::Go => Some(Self::Go(Some(number.into()))),
-            MscCommand::Stop => Some(Self::Pause(number.into())),
-            MscCommand::Resume => Some(Self::Resume(Some(number.into()))),
-            MscCommand::Load => Some(Self::Load(number.into())),
-            _ => None,
-        }
+        let action = match command {
+            MscCommand::Go => MscAction::Go(Some(number)),
+            MscCommand::Stop => MscAction::Pause(number),
+            MscCommand::Resume => MscAction::Resume(Some(number)),
+            MscCommand::Load => MscAction::Load(number),
+            _ => return None,
+        };
+        Some(Self { action, list })
     }
+}
+
+fn decode_address(bytes: &[u8]) -> Option<String> {
+    let number = std::str::from_utf8(bytes).ok()?;
+    valid_cue_number(number).then(|| number.to_owned())
 }
 
 fn valid_cue_number(number: &str) -> bool {
@@ -192,17 +213,23 @@ mod tests {
             bytes.push(0xf7);
             bytes
         };
+        let unscoped = |action| Some(MscTransport { action, list: None });
         assert_eq!(MscTransport::decode(&frame(7, 16, 1, b"01.2"), 7),
-            Some(MscTransport::Go(Some("01.2".into()))));
+            unscoped(MscAction::Go(Some("01.2".into()))));
         assert_eq!(MscTransport::decode(&frame(127, 48, 2, b"01.2\0"), 7),
-            Some(MscTransport::Pause("01.2".into())));
-        assert_eq!(MscTransport::decode(&frame(7, 1, 3, b""), 7), Some(MscTransport::Resume(None)));
-        assert_eq!(MscTransport::decode(&frame(7, 16, 8, b""), 7), Some(MscTransport::AllOff));
+            unscoped(MscAction::Pause("01.2".into())));
+        assert_eq!(MscTransport::decode(&frame(7, 1, 3, b""), 7), unscoped(MscAction::Resume(None)));
+        assert_eq!(MscTransport::decode(&frame(7, 16, 8, b""), 7), unscoped(MscAction::AllOff));
+        assert_eq!(MscTransport::decode(&frame(7, 16, 1, b"1\x0004\x00"), 7),
+            Some(MscTransport { action: MscAction::Go(Some("1".into())), list: Some("04".into()) }));
+        assert_eq!(MscTransport::decode(&frame(7, 16, 20, b"04"), 7),
+            Some(MscTransport { action: MscAction::Step { forward: false, sequence: true }, list: Some("04".into()) }));
         for rejected in [
             frame(8, 16, 1, b"1"),
             frame(7, 17, 1, b"1"),
-            frame(7, 16, 1, b"1\x004"),
             frame(7, 16, 1, b"1\x00\x004"),
+            frame(7, 16, 1, b"1\x004\x005"),
+            frame(7, 16, 17, b"1\x004"),
             frame(7, 16, 1, b"1..2"),
             frame(7, 16, 2, b""),
             frame(7, 16, 8, b"1"),

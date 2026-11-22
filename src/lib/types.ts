@@ -805,6 +805,7 @@ export interface CartWindowSnapshot {
 export interface CueListSummary {
   id: string;
   name: string;
+  number?: string | null;
   mode: CueListMode;
   chain_cart_cues?: boolean;
   cart_layout?: CartLayout | null;

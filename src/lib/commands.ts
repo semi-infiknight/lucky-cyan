@@ -452,6 +452,8 @@ export const removeCueList = (id: string) =>
   invoke<void>("remove_cue_list", { id });
 export const renameCueList = (id: string, name: string) =>
   invoke<void>("rename_cue_list", { id, name });
+export const setCueListNumber = (workspaceId: string, listId: string, expected: string | null, number: string | null) =>
+  invoke<void>("set_cue_list_number", { workspaceId, listId, expected, number });
 export const setActiveCueList = (id: string) =>
   invoke<void>("set_active_cue_list", { id });
 export const openCartWindow = (listId: string) => invoke<void>("open_cart_window", { listId });

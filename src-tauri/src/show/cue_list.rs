@@ -204,6 +204,8 @@ fn valid_hotkey(key: &str) -> bool {
 pub struct CueList {
     pub id: Uuid,
     pub name: String,
+    /// Optional literal cue list address, carried over from QLab.
+    pub number: Option<String>,
     /// Sequential (playhead-driven) or Cart (each tile fires independently).
     pub mode: CueListMode,
     /// Older Inkue carts ran list GO and followed their cue chains.
@@ -264,6 +266,7 @@ impl CueList {
         Self {
             id: Uuid::new_v4(),
             name: name.into(),
+            number: None,
             mode: CueListMode::default(),
             chain_cart_cues: false,
             cart_layout: None,
@@ -1322,6 +1325,7 @@ impl CueList {
         serde_json::json!({
             "id": self.id,
             "name": self.name,
+            "number": self.number,
             "mode": self.mode,
             "chain_cart_cues": self.chain_cart_cues,
             "cart_layout": self.cart_layout,
@@ -1464,6 +1468,7 @@ impl CueList {
         let mut list = Self {
             id,
             name,
+            number: value["number"].as_str().filter(|number| !number.trim().is_empty()).map(str::to_owned),
             mode,
             cart_layout,
             chain_cart_cues,

@@ -241,6 +241,7 @@ fn map_cue_list(list: &Value, ctx: &mut MapContext, report: &mut Vec<ImportedCue
             .and_then(|s| uuid::Uuid::parse_str(s).ok())
             .unwrap_or_else(uuid::Uuid::new_v4).to_string(),
         "name": list.get("name").and_then(Value::as_str).unwrap_or("Cue List"),
+        "number": list["number"].as_str().filter(|number| !number.trim().is_empty()),
         "mode": if is_cart { "cart" } else { "sequential" },
         "chain_cart_cues": false,
         "cart_layout": is_cart.then(|| cart::import_layout(list, &cues)).flatten(),
@@ -1021,6 +1022,19 @@ mod tests {
         assert_eq!(colors[group["id"].as_str().unwrap()], "midnight");
         assert_eq!(colors[group["children"][0]["id"].as_str().unwrap()], "none");
         assert!(report.iter().all(|cue| cue.note.as_deref().is_none_or(|note| !note.contains("QLab second color"))));
+    }
+
+    #[test]
+    fn msc_list_number_survives_qlab_import_and_native_save() {
+        let patches = Patches::default();
+        let outputs = VideoOutputs::default();
+        let pan_starts = std::collections::HashMap::new();
+        let mut ctx = MapContext { legacy_v3: false, modern_group_modes: true, patches: &patches, outputs: &outputs, pan_starts: &pan_starts };
+        let mapped = map_cue_list(&json!({"name":"Lighting", "number":"07", "cues":[]}), &mut ctx, &mut Vec::new());
+        let registry = crate::cue::registry::CueRegistry::new();
+        let list = crate::show::cue_list::CueList::from_json(mapped, &registry).unwrap();
+        assert_eq!(list.number.as_deref(), Some("07"));
+        assert_eq!(list.to_json()["number"], "07");
     }
 
     #[test]

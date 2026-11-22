@@ -375,8 +375,9 @@ mod tests {
             shutdown: Arc::default(),
         };
         let before = gate.capture().unwrap();
+        let msc_go = || MidiDeskInput::ShowControl(MscTransport::decode(&[0xf0, 0x7f, 7, 2, 16, 1, 0xf7], 7).unwrap());
         sender.send((before, MidiDeskInput::Voice(vec![0x90, 60, 100]))).unwrap();
-        sender.send((before, MidiDeskInput::ShowControl(MscTransport::Go(None)))).unwrap();
+        sender.send((before, msc_go())).unwrap();
         gate.set_suspended(true);
         assert!(gate.suspended());
         assert_eq!(gate.capture(), None);
@@ -385,7 +386,7 @@ mod tests {
         gate.set_suspended(false);
         let after = gate.capture().unwrap();
         assert_ne!(before, after);
-        sender.send((before, MidiDeskInput::ShowControl(MscTransport::Go(None)))).unwrap();
+        sender.send((before, msc_go())).unwrap();
         sender.send((after, MidiDeskInput::Voice(vec![0x90, 61, 100]))).unwrap();
         gate.set_suspended(false);
         assert_eq!(listener.drain(), [MidiDeskInput::Voice(vec![0x90, 61, 100])]);

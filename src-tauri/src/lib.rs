@@ -45,7 +45,7 @@ use commands::{
     cart_window_cmds::{cart_window_pad, open_cart_window, read_cart_window},
     cue_list_cmds::{
         add_cue_list, get_cue_lists, remove_cue_list, rename_cue_list,
-        set_active_cue_list, set_cue_list_mode, edit_cart_layout,
+        set_active_cue_list, set_cue_list_mode, set_cue_list_number, edit_cart_layout,
     },
     device_cmds::{
         get_output_patches, list_input_devices, list_output_devices, refresh_devices,
@@ -676,6 +676,7 @@ pub fn run() {
             rename_cue_list,
             set_active_cue_list,
             set_cue_list_mode,
+            set_cue_list_number,
             edit_cart_layout,
             // Timecode
             get_tc_config,
