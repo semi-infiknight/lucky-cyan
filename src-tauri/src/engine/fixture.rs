@@ -569,6 +569,48 @@ pub fn builtin_fixture_types() -> Vec<FixtureType> {
                 param(Blue, "Blue", 7, Bit8, 0.0),
             ],
         },
+        FixtureType {
+            manufacturer: String::new(),
+            mode: String::new(),
+            name: "Moving Head 8-bit (6ch)".to_string(),
+            parameters: vec![
+                param(Pan, "Pan", 0, Bit8, 0.5),
+                param(Tilt, "Tilt", 1, Bit8, 0.5),
+                param(Intensity, "Dimmer", 2, Bit8, 0.0),
+                param(Red, "Red", 3, Bit8, 0.0),
+                param(Green, "Green", 4, Bit8, 0.0),
+                param(Blue, "Blue", 5, Bit8, 0.0),
+            ],
+        },
+        FixtureType {
+            manufacturer: String::new(),
+            mode: String::new(),
+            name: "RGBAW+UV (6ch)".to_string(),
+            parameters: vec![
+                param(Red, "Red", 0, Bit8, 0.0),
+                param(Green, "Green", 1, Bit8, 0.0),
+                param(Blue, "Blue", 2, Bit8, 0.0),
+                param(Amber, "Amber", 3, Bit8, 0.0),
+                param(White, "White", 4, Bit8, 0.0),
+                param(Uv, "UV", 5, Bit8, 0.0),
+            ],
+        },
+        FixtureType {
+            manufacturer: String::new(),
+            mode: String::new(),
+            name: "Strobe (1ch)".to_string(),
+            parameters: vec![
+                param(Intensity, "Strobe rate", 0, Bit8, 0.0),
+            ],
+        },
+        FixtureType {
+            manufacturer: String::new(),
+            mode: String::new(),
+            name: "Fog / hazer (1ch)".to_string(),
+            parameters: vec![
+                param(Generic, "Output", 0, Bit8, 0.0),
+            ],
+        },
     ]
 }
 
@@ -578,6 +620,31 @@ mod tests {
 
     fn rgb() -> FixtureType {
         builtin_fixture_types().into_iter().find(|t| t.name.starts_with("RGB ")).unwrap()
+    }
+
+    #[test]
+    fn builtin_templates_cover_common_archetypes_with_unique_names_and_valid_footprints() {
+        let types = builtin_fixture_types();
+        let names: std::collections::HashSet<&str> = types.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names.len(), types.len(), "built-in template names must be unique");
+        for expected in [
+            "Dimmer (1ch)", "RGB (3ch)", "RGBW (4ch)", "CMY (3ch)", "HSI (3ch)", "HSV (3ch)",
+            "RGBA (4ch)", "PAR Dimmer+RGB (4ch)", "Moving Head 16-bit (8ch)",
+            "Moving Head 8-bit (6ch)", "RGBAW+UV (6ch)", "Strobe (1ch)", "Fog / hazer (1ch)",
+        ] {
+            assert!(names.contains(expected), "missing built-in template {expected}");
+        }
+        for t in &types {
+            assert!(t.footprint() > 0, "{} has an empty footprint", t.name);
+        }
+        let mh8 = types.iter().find(|t| t.name == "Moving Head 8-bit (6ch)").unwrap();
+        assert_eq!(mh8.footprint(), 6);
+        let pan = mh8.parameters.iter().find(|p| p.kind == ParamKind::Pan).unwrap();
+        assert_eq!(pan.width, ChannelWidth::Bit8);
+        assert_eq!(pan.default, 0.5, "moving heads default to centre");
+        let rgbaw = types.iter().find(|t| t.name == "RGBAW+UV (6ch)").unwrap();
+        assert_eq!(rgbaw.footprint(), 6);
+        assert!(rgbaw.parameters.iter().any(|p| p.kind == ParamKind::Uv));
     }
 
     #[test]

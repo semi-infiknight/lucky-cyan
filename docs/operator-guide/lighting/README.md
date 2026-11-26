@@ -4,6 +4,8 @@ You can program Light cues with fixture names and levels, review the result at y
 
 ## Build and review a look offline
 
+The patch picker offers built-in templates for common archetypes: **Dimmer (1ch)**, **RGB (3ch)**, **RGBW (4ch)**, **RGBA (4ch)**, **RGBAW+UV (6ch)**, **CMY (3ch)**, **HSI (3ch)**, **HSV (3ch)**, **PAR Dimmer+RGB (4ch)**, **Moving Head 16-bit (8ch)**, **Moving Head 8-bit (6ch)**, **Strobe (1ch)** and **Fog / hazer (1ch)**. Pick the closest template, then adjust roles and slots in **Profile** to match the manufacturer's chart.
+
 1. Open **DMX** on the transport bar in programming mode. Select **Patch**. Start with an empty **Universe outputs** list or disable the outputs on your rehearsal copy.
 2. Under **Fixtures (patch)** choose a dimmer, name it `1`, set its logical universe and start address, and add it. Add two more dimmers named `2` and `3` at free addresses. Resolve patch conflicts.
 3. Under **Groups**, select all three fixtures and create a group called `Front`.
