@@ -292,6 +292,14 @@ impl Transport {
         // Auto-Follow below is not timing-sensitive.
         let devamp_spec = cue_list.get(&cue_id).and_then(|c| c.devamp_specification());
         if let Some((stop_at_end, target_ids)) = devamp_spec {
+            // A boundary successor waits for the first target's voice to stop
+            // at the released slice end before the next cue fires.
+            let boundary_voice = cue_list.get(&cue_id)
+                .and_then(|c| (c as &dyn Any).downcast_ref::<DevampCue>())
+                .filter(|d| d.start_next_at_boundary && d.continue_mode() == ContinueMode::AutoFollow)
+                .and_then(|_| target_ids.first().copied())
+                .and_then(|tid| cue_list.get_recursive(&tid))
+                .and_then(|t| t.playing_voice_id());
             for target_id in &target_ids {
                 let Some(target) = cue_list.get_recursive(target_id) else { continue };
                 if target.is_visual() {
@@ -307,6 +315,13 @@ impl Transport {
                     for vid in target.all_voice_ids() {
                         let _ = self.context.audio_engine.devamp_voice(vid, stop_at_end);
                     }
+                }
+            }
+            if let Some(voice) = boundary_voice {
+                if let Some(devamp) = cue_list.get_mut(&cue_id)
+                    .and_then(|c| (c as &mut dyn Any).downcast_mut::<DevampCue>())
+                {
+                    devamp.set_boundary_voice(voice);
                 }
             }
         }

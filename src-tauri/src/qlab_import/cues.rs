@@ -341,15 +341,23 @@ pub fn devamp(cue: &Value) -> Value {
     // next cue at the boundary (Auto-Follow). devampType 1 is the current
     // slice (the default scope).
     let boundary_next = next_flag == Some(true);
+    let stop_flag = stop.and_then(Value::as_bool);
     let whole_cue = mode == Some(2) && target_ids(cue).len() == 1 && !stop_unconfirmed && !next_unconfirmed
         && (boundary_next || out["continue_mode"] == "do_not_continue");
+    // devampType 1 with startNextCueWhenSliceEnds + stopTargetWhenSliceEnds:
+    // release the current slice, stop the target at the slice end, and fire
+    // the next cue exactly there.
+    let slice_boundary = mode == Some(1) && boundary_next && stop_flag == Some(true);
     if whole_cue {
         out.insert("scope".into(), json!("whole_cue"));
         if boundary_next {
             out.insert("start_next_at_boundary".into(), json!(true));
             out.insert("continue_mode".into(), json!("auto_follow"));
         }
-    } else if mode != Some(1) || next_unconfirmed || next_flag == Some(true) || stop_unconfirmed {
+    } else if slice_boundary {
+        out.insert("start_next_at_boundary".into(), json!(true));
+        out.insert("continue_mode".into(), json!("auto_follow"));
+    } else if mode != Some(1) || next_unconfirmed || boundary_next || stop_unconfirmed {
         out.insert("is_disabled".into(), json!(true));
         let scope = match mode {
             Some(2) => "whole looping cue".into(),
@@ -1006,6 +1014,30 @@ mod tests {
         assert_eq!(out["is_disabled"], json!(true));
         assert!(out.get("scope").is_none());
         assert!(out["_conversion_note"].as_str().unwrap().contains("whole looping cue"));
+    }
+
+    #[test]
+    fn slice_devamp_with_slice_end_successor_imports_armed() {
+        let source = json!({
+            "devampType": 1,
+            "cueTargetUniqueID": "68A9990A-7835-46AE-B9B8-2E231407D2FE",
+            "stopTargetWhenSliceEnds": true,
+            "startNextCueWhenSliceEnds": true,
+            "armed": true
+        });
+        let out = devamp(&source);
+        assert_eq!(out["is_disabled"], json!(false));
+        assert!(out.get("scope").is_none(), "current slice stays the default scope");
+        assert_eq!(out["stop_at_end"], json!(true));
+        assert_eq!(out["start_next_at_boundary"], json!(true));
+        assert_eq!(out["continue_mode"], json!("auto_follow"));
+
+        // Same successor without stopping the target at the slice end: review.
+        let mut no_stop = source.clone();
+        no_stop["stopTargetWhenSliceEnds"] = json!(false);
+        let out = devamp(&no_stop);
+        assert_eq!(out["is_disabled"], json!(true));
+        assert!(out.get("start_next_at_boundary").is_none());
     }
 
     #[test]

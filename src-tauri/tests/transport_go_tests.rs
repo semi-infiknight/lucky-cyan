@@ -2716,6 +2716,46 @@ fn whole_cue_devamp_with_boundary_successor_waits_for_the_pass_end() {
 }
 
 #[test]
+fn slice_devamp_with_boundary_successor_waits_for_the_slice_end() {
+    use inkue_lib::cue::{audio_cue::AudioCue, types::{SliceList, PLAY_COUNT_INFINITE}};
+
+    let registry = full_registry();
+    let (context, _, calls) = recording_context();
+    let mut transport = Transport::new(context);
+    let mut audio = AudioCue::new();
+    audio.accept_preloaded_audio(Arc::new(vec![0.5; 48_000]), 1, 48_000, Duration::from_secs(1));
+    audio.slices = SliceList { markers: vec![500], play_counts: vec![PLAY_COUNT_INFINITE, 1] };
+    let audio_id = audio.id();
+    let mut devamp = DevampCue::new();
+    devamp.target_cue_ids = vec![audio_id];
+    devamp.stop_at_end = true;
+    devamp.start_next_at_boundary = true;
+    devamp.set_continue_mode(ContinueMode::AutoFollow);
+    let devamp_id = devamp.id();
+    let next = registry.create(&CueType::Wait).unwrap();
+    let next_id = next.id();
+    let mut list = list_of(vec![Box::new(audio), Box::new(devamp), next]);
+
+    list.playhead_cue_id = Some(audio_id);
+    transport.go(&mut list).unwrap();
+    assert!(list.get(&audio_id).unwrap().is_running());
+    calls.lock().unwrap().clear();
+
+    list.playhead_cue_id = Some(devamp_id);
+    let result = transport.go(&mut list).unwrap();
+    assert_eq!(result.triggered, [devamp_id]);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [EngineCall::AudioDevamp { stop_at_end: true }],
+        "the vamp slice is released with stop-at-end"
+    );
+    // The Devamp stays Running until the target voice stops at the slice
+    // boundary; the successor does not fire at GO time.
+    assert!(list.get(&devamp_id).unwrap().is_running());
+    assert_eq!(list.get(&next_id).unwrap().state(), CueState::Standby);
+}
+
+#[test]
 fn moving_an_active_source_preserves_the_finished_fade_and_does_not_fire_the_next_cue() {
     use inkue_lib::commands::cue_cmds::{apply_cue_properties, MergePolicy};
     use inkue_lib::show::{event_loop::schedule_list_follows, Workspace};

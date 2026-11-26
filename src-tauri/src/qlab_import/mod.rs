@@ -629,15 +629,26 @@ mod tests {
         assert_eq!(saved["start_next_at_boundary"], json!(true));
         assert_eq!(saved["continue_mode"], json!("auto_follow"));
 
-        for (scope, start_next) in [(1,true)] {
-            let mut unsupported = release.clone();
-            unsupported["devampType"] = json!(scope);
-            unsupported["fireNextCueAtMomentLoopEnds"] = json!(start_next);
-            let mapped = map_cue(&unsupported, &mut ctx, &mut report, &mut CueMetadata::default(), true);
-            let saved = DevampCueFactory.from_json(mapped).unwrap().serialize();
-            assert_eq!(saved["is_disabled"], true);
-            assert!(report.last().unwrap().note.as_deref().unwrap().contains("boundary"));
-        }
+        // Slice-boundary successor with stop-at-slice-end imports armed.
+        let mut slice_next = release.clone();
+        slice_next["devampType"] = json!(1);
+        slice_next["fireNextCueAtMomentLoopEnds"] = json!(true);
+        let mapped = map_cue(&slice_next, &mut ctx, &mut report, &mut CueMetadata::default(), true);
+        let saved = DevampCueFactory.from_json(mapped).unwrap().serialize();
+        assert_eq!(saved["is_disabled"], false);
+        assert_eq!(saved["start_next_at_boundary"], json!(true));
+        assert_eq!(saved["continue_mode"], json!("auto_follow"));
+        assert_eq!(saved["stop_at_end"], json!(true));
+
+        // Without stop-at-slice-end the boundary successor stays disarmed.
+        let mut unsupported = release.clone();
+        unsupported["devampType"] = json!(1);
+        unsupported["fireNextCueAtMomentLoopEnds"] = json!(true);
+        unsupported["stopTargetWhenDone"] = json!(false);
+        let mapped = map_cue(&unsupported, &mut ctx, &mut report, &mut CueMetadata::default(), true);
+        let saved = DevampCueFactory.from_json(mapped).unwrap().serialize();
+        assert_eq!(saved["is_disabled"], true);
+        assert!(report.last().unwrap().note.as_deref().unwrap().contains("boundary"));
     }
 
     #[test]

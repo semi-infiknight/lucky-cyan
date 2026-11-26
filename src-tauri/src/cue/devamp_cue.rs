@@ -118,6 +118,11 @@ impl DevampCue {
         self.started_at = Some(Instant::now());
         self.waiting_for_voice = Some(voice);
     }
+
+    /// Attach the target voice whose completion ends the boundary wait.
+    pub(crate) fn set_boundary_voice(&mut self, voice: Uuid) {
+        self.waiting_for_voice = Some(voice);
+    }
 }
 
 impl Default for DevampCue {
@@ -147,8 +152,16 @@ impl Cue for DevampCue {
 
     fn go(&mut self, context: &CueContext) -> Result<()> {
         anyhow::ensure!(self.scope == DevampScope::CurrentSlice,
-            "Use GO on a top-level Devamp cue to release a whole Audio or silent Video loop.");
-        self.complete(context);
+            "Use GO on a top-level Devamp cue to release a whole Audio or Video loop.");
+        if self.start_next_at_boundary && self.continue_mode == ContinueMode::AutoFollow {
+            // Wait for the released slice to end: transport attaches the
+            // target voice after forwarding the devamp, and the event loop
+            // completes this cue when that voice stops at the boundary.
+            self.state = CueState::Running;
+            self.started_at = Some(Instant::now());
+        } else {
+            self.complete(context);
+        }
         Ok(())
     }
 
