@@ -333,15 +333,23 @@ pub fn devamp(cue: &Value) -> Value {
     let mode = cue.get("devampType").and_then(Value::as_i64);
     let next = cue.get("fireNextCueAtMomentLoopEnds").or_else(|| cue.get("startNextCueWhenSliceEnds"));
     let next_flag = next.and_then(Value::as_bool);
-    let next_unconfirmed = next.is_some() && next_flag != Some(false);
+    let next_unconfirmed = next.is_some() && next_flag.is_none();
     let stop_unconfirmed = stop.is_some() && stop.and_then(Value::as_bool).is_none();
     // devampType 2 releases the whole looping cue: import it armed as a
-    // Whole-cue Devamp when it targets exactly one cue. devampType 1 is the
-    // current slice (the default scope).
-    let whole_cue = mode == Some(2) && target_ids(cue).len() == 1 && !next_unconfirmed && !stop_unconfirmed;
+    // Whole-cue Devamp when it targets exactly one cue. With
+    // fireNextCueAtMomentLoopEnds it also waits for the pass end and fires the
+    // next cue at the boundary (Auto-Follow). devampType 1 is the current
+    // slice (the default scope).
+    let boundary_next = next_flag == Some(true);
+    let whole_cue = mode == Some(2) && target_ids(cue).len() == 1 && !stop_unconfirmed && !next_unconfirmed
+        && (boundary_next || out["continue_mode"] == "do_not_continue");
     if whole_cue {
         out.insert("scope".into(), json!("whole_cue"));
-    } else if mode != Some(1) || next_unconfirmed || stop_unconfirmed {
+        if boundary_next {
+            out.insert("start_next_at_boundary".into(), json!(true));
+            out.insert("continue_mode".into(), json!("auto_follow"));
+        }
+    } else if mode != Some(1) || next_unconfirmed || next_flag == Some(true) || stop_unconfirmed {
         out.insert("is_disabled".into(), json!(true));
         let scope = match mode {
             Some(2) => "whole looping cue".into(),
@@ -979,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn whole_cue_devamp_with_boundary_successor_stays_disarmed_for_review() {
+    fn whole_cue_devamp_with_boundary_successor_imports_as_auto_follow_at_boundary() {
         let source = json!({
             "devampType": 2,
             "cueTargetUniqueID": "68A9990A-7835-46AE-B9B8-2E231407D2FE",
@@ -987,15 +995,17 @@ mod tests {
             "armed": true
         });
         let out = devamp(&source);
-        assert_eq!(out["is_disabled"], json!(true));
-        assert!(out.get("scope").is_none());
-        assert!(out["_conversion_note"].as_str().unwrap().contains("whole looping cue"));
+        assert_eq!(out["is_disabled"], json!(false));
+        assert_eq!(out["scope"], json!("whole_cue"));
+        assert_eq!(out["start_next_at_boundary"], json!(true));
+        assert_eq!(out["continue_mode"], json!("auto_follow"));
 
-        // No single target (multi-target or none) also stays disarmed.
+        // No single target (multi-target or none) stays disarmed for review.
         let no_target = json!({ "devampType": 2, "armed": true });
         let out = devamp(&no_target);
         assert_eq!(out["is_disabled"], json!(true));
         assert!(out.get("scope").is_none());
+        assert!(out["_conversion_note"].as_str().unwrap().contains("whole looping cue"));
     }
 
     #[test]

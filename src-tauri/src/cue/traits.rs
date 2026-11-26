@@ -491,6 +491,13 @@ pub trait Cue: Send + std::any::Any {
         None
     }
 
+    /// Devamp Cue only: a Whole-cue release waiting for this voice to reach its
+    /// natural pass end before the cue completes and fires its successor
+    /// (QLab "start next cue when the loop ends").
+    fn devamp_boundary_voice(&self) -> Option<uuid::Uuid> {
+        None
+    }
+
     /// Prepare for a later Start without executing any part of the cue action.
     /// Cue types opt in when they can warm resources without producing output.
     fn preload(&mut self, _context: &CueContext) -> Result<()> {

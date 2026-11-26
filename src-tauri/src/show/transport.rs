@@ -473,7 +473,13 @@ impl Transport {
                 let _ = self.context.audio_engine.release_whole_audio_loop(audio_voice);
             }
         }
-        devamp.complete(&self.context);
+        if devamp.start_next_at_boundary && devamp.continue_mode() == ContinueMode::AutoFollow {
+            // QLab "start next cue when the loop ends": stay Running until the
+            // released voice finishes its pass, then fire the successor.
+            devamp.begin_boundary_wait(voice);
+        } else {
+            devamp.complete(&self.context);
+        }
         Ok(true)
     }
 

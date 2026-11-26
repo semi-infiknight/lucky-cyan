@@ -55,7 +55,12 @@ pub struct DevampCue {
     /// `true` = the target stops at the end of its current slice instead of
     /// continuing into the next one.
     pub stop_at_end: bool,
+    /// `true` = Whole-cue release waits for the target's current pass to end,
+    /// then fires the next cue (QLab "start next cue when the loop ends").
+    pub start_next_at_boundary: bool,
     is_disabled: bool,
+    /// Runtime: the released voice whose pass end completes this Devamp.
+    waiting_for_voice: Option<Uuid>,
 }
 
 impl DevampCue {
@@ -77,13 +82,19 @@ impl DevampCue {
             target_cue_numbers: Vec::new(),
             scope: DevampScope::CurrentSlice,
             stop_at_end: false,
+            start_next_at_boundary: false,
             is_disabled: false,
+            waiting_for_voice: None,
         }
     }
 
     pub(crate) fn whole_release_target(&self) -> Result<CueId> {
-        anyhow::ensure!(self.pre_wait.is_zero() && self.continue_mode == ContinueMode::DoNotContinue,
-            "Whole cue release requires zero Pre-Wait and Do Not Continue.");
+        anyhow::ensure!(self.pre_wait.is_zero(), "Whole cue release requires zero Pre-Wait.");
+        anyhow::ensure!(
+            self.continue_mode == ContinueMode::DoNotContinue
+                || (self.scope == DevampScope::WholeCue && self.start_next_at_boundary),
+            "Whole cue release requires Do Not Continue, or Auto-Follow with Start next cue at the boundary."
+        );
         if let Some(id) = self.temporary_target {
             return Ok(id);
         }
@@ -98,6 +109,15 @@ impl DevampCue {
         self.started_at = Some(Instant::now());
         context.mark_action_started(self.id);
     }
+
+    /// Stay Running until `voice` finishes its released pass; the event loop
+    /// completes this cue when that voice reports completion, which fires the
+    /// Auto-Follow successor exactly at the boundary.
+    pub(crate) fn begin_boundary_wait(&mut self, voice: Uuid) {
+        self.state = CueState::Running;
+        self.started_at = Some(Instant::now());
+        self.waiting_for_voice = Some(voice);
+    }
 }
 
 impl Default for DevampCue {
@@ -107,7 +127,7 @@ impl Default for DevampCue {
 }
 
 impl Cue for DevampCue {
-    inherit_playback_fields!(state, started_at, temporary_target);
+    inherit_playback_fields!(state, started_at, temporary_target, waiting_for_voice);
 
     fn id(&self) -> CueId { self.id }
     fn cue_type(&self) -> CueType { CueType::Devamp }
@@ -135,6 +155,7 @@ impl Cue for DevampCue {
     fn stop(&mut self, _context: &CueContext) -> Result<()> {
         self.state = CueState::Standby;
         self.started_at = None;
+        self.waiting_for_voice = None;
         Ok(())
     }
 
@@ -148,6 +169,7 @@ impl Cue for DevampCue {
     fn reset(&mut self) -> Result<()> {
         self.state = CueState::Standby;
         self.started_at = None;
+        self.waiting_for_voice = None;
         Ok(())
     }
 
@@ -174,6 +196,10 @@ impl Cue for DevampCue {
         (self.scope == DevampScope::CurrentSlice).then(|| {
             (self.stop_at_end, self.temporary_target.map(|id| vec![id]).unwrap_or_else(|| self.target_cue_ids.clone()))
         })
+    }
+
+    fn devamp_boundary_voice(&self) -> Option<uuid::Uuid> {
+        self.waiting_for_voice
     }
 
     fn validate_programming(
@@ -226,6 +252,7 @@ impl Cue for DevampCue {
             "target_cue_numbers": self.target_cue_numbers,
             "scope": self.scope,
             "stop_at_end": self.stop_at_end,
+            "start_next_at_boundary": self.start_next_at_boundary,
             "is_disabled": self.is_disabled,
         })
     }
@@ -291,6 +318,9 @@ impl CueFactory for DevampCueFactory {
         }
         if let Some(scope) = value.get("scope") {
             cue.scope = serde_json::from_value(scope.clone())?;
+        }
+        if let Some(b) = value.get("start_next_at_boundary").and_then(|v| v.as_bool()) {
+            cue.start_next_at_boundary = b;
         }
         if let Some(b) = value.get("is_disabled").and_then(|v| v.as_bool()) {
             cue.is_disabled = b;

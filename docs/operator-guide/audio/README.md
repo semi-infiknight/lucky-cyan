@@ -148,7 +148,7 @@ The Cookbook examples use loops to hold a conductor’s mix and to trigger indep
 3. Start the Audio cue and let it repeat. Give the Devamp a GO midway through a pass. Listen for the rest of the pass through the saved End Time, followed by silence. Try the request earlier in another pass. A fresh GO of the Audio cue uses its saved looping again.
 4. Try the Devamp with the target stopped, paused, or still in Pre-Wait. Return it to running playback before calling the release. For the first rehearsal, use manual continuation on the Audio cue as well.
 
-The release applies to the playing File Audio voice and stops further repeats. It preserves the saved loop count and the fade envelope of the pass already in progress. A QLab whole-cue Devamp imports armed with **Whole cue** scope, and whole Video release — soundtrack included — finishes the same pass. Automatic start of another cue at the exact release boundary remains open. [QLab 5 Devamp settings](https://qlab.app/docs/v5/other-cues/devamp-cues/#slice-or-cue)
+The release applies to the playing File Audio voice and stops further repeats. It preserves the saved loop count and the fade envelope of the pass already in progress. A QLab whole-cue Devamp imports armed with **Whole cue** scope, and whole Video release — soundtrack included — finishes the same pass; with **Start next cue when the loop ends** the successor fires exactly at the pass end. A successor at a slice boundary remains open. [QLab 5 Devamp settings](https://qlab.app/docs/v5/other-cues/devamp-cues/#slice-or-cue)
 
 ## Place a stationary source between speakers
 

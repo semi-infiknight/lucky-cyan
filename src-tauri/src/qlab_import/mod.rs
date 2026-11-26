@@ -608,7 +608,8 @@ mod tests {
         assert!(saved["notes"].as_str().unwrap().contains("zero-play segment"));
         assert_eq!(report.last().unwrap().cue_number.as_deref(), Some("M1"));
         assert!(report.last().unwrap().note.as_deref().unwrap().contains("2.5"));
-        // Whole-cue release (devampType 2, no boundary successor) imports armed.
+        // Whole-cue release (devampType 2) imports armed; with a boundary
+        // successor it also waits for the pass end and fires the next cue.
         let mut whole = release.clone();
         whole["devampType"] = json!(2);
         whole["fireNextCueAtMomentLoopEnds"] = json!(false);
@@ -616,8 +617,19 @@ mod tests {
         let saved = DevampCueFactory.from_json(mapped).unwrap().serialize();
         assert_eq!(saved["is_disabled"], false);
         assert_eq!(saved["scope"], json!("whole_cue"));
+        assert_eq!(saved["start_next_at_boundary"], json!(false));
 
-        for (scope, start_next) in [(2,true), (1,true)] {
+        let mut boundary = release.clone();
+        boundary["devampType"] = json!(2);
+        boundary["fireNextCueAtMomentLoopEnds"] = json!(true);
+        let mapped = map_cue(&boundary, &mut ctx, &mut report, &mut CueMetadata::default(), true);
+        let saved = DevampCueFactory.from_json(mapped).unwrap().serialize();
+        assert_eq!(saved["is_disabled"], false);
+        assert_eq!(saved["scope"], json!("whole_cue"));
+        assert_eq!(saved["start_next_at_boundary"], json!(true));
+        assert_eq!(saved["continue_mode"], json!("auto_follow"));
+
+        for (scope, start_next) in [(1,true)] {
             let mut unsupported = release.clone();
             unsupported["devampType"] = json!(scope);
             unsupported["fireNextCueAtMomentLoopEnds"] = json!(start_next);

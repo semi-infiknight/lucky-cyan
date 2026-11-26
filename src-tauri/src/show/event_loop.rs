@@ -946,12 +946,18 @@ fn tick(
                     .playing_voice_id()
                     .map(|vid| completed_voice_ids.contains(&vid))
                     .unwrap_or(false);
+                // A Whole-cue Devamp waiting on a released voice completes when
+                // that voice reaches its natural pass end.
+                let devamp_boundary_done = cue
+                    .devamp_boundary_voice()
+                    .map(|vid| completed_voice_ids.contains(&vid))
+                    .unwrap_or(false);
                 let time_done = cue.is_time_complete();
                 let group_done = cue.is_complete();
                 let independent_run = cl.independent_runs.contains(&cue.id());
                 // Leave an action-clock cue available to the normal Auto-Continue
                 // scheduler even when Post-Wait lands on or after its final output.
-                if (voice_done || time_done || group_done) && pending_group != Some(cue.id())
+                if (voice_done || time_done || group_done || devamp_boundary_done) && pending_group != Some(cue.id())
                     && !(chains_enabled && !independent_run && waits_for_auto_continue(cue.as_ref()))
                 {
                     let id = cue.id();
