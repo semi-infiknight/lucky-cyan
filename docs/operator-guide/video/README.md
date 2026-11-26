@@ -257,11 +257,11 @@ Add a **Load** cue, target the Video cue and run Load during standby. The desk o
 
 If the video layers are all occupied, the live pictures continue and Show Health reports that Load could not prepare the target. Run Load again after a layer becomes free. Hard Stop clears prepared content. Rehearse the entrance on the intended output and record its measured latency.
 
-## Finish a silent movie loop at its natural end
+## Finish a movie loop at its natural end
 
-1. Choose a local silent MP4 or MOV with a recognisable ending. Add it to a Video cue on a rehearsal output and turn on **Loop** in **Time** and choose **Loop infinitely**. Keep continuation manual and leave the trim, slices, visual end fade and **Hold last frame** clear.
+1. Choose a local MP4 or MOV with a recognisable ending — a soundtrack is fine; it is released with the picture. Add it to a Video cue on a rehearsal output and turn on **Loop** in **Time** and choose **Loop infinitely**. Keep continuation manual and leave the trim, slices, visual end fade and **Hold last frame** clear.
 2. Add a top-level Devamp cue. Choose **Whole cue** in **Release scope** and select the Video under **Targets**. Leave the Devamp’s Pre-Wait at zero and its Continue mode at **Do Not Continue**.
 3. Start the Video and watch it repeat. GO the Devamp during the middle of the next pass. Watch the picture play to its natural end and clear its own layer while any other picture stays in place. A request right at the loop boundary can reach the decoder after the next pass has begun.
-4. Start the same Video again and watch it repeat. Each GO uses the saved Loop setting. Try the Devamp when the target is stopped, paused or disarmed, and with an MP4 that contains a soundtrack. Inkue refuses those requests and keeps the target in its current state.
+4. Start the same Video again and watch it repeat. Each GO uses the saved Loop setting. Try the Devamp when the target is stopped, paused or disarmed — Inkue refuses those requests and keeps the target in its current state. With an MP4 that contains a soundtrack, watch the sound finish the same pass as the picture instead of looping on.
 
-This exercise covers one already-running silent Video on Linux with libmpv 0.39 or later. Inkue verifies the file’s tracks even when its audio would otherwise be muted. The Devamp ends the current pass and leaves the next cue for a manual GO. When migrating a Devamp that releases a soundtrack loop or starts a successor at the boundary, rehearse those timings in the reference show. [QLab Devamp cue manual](https://qlab.app/docs/v5/other-cues/devamp-cues/#slice-or-cue)
+This exercise covers one already-running looping Video — silent or with a soundtrack — on Linux with libmpv 0.39 or later. The Devamp ends the current pass, picture and soundtrack together, and leaves the next cue for a manual GO. When migrating a Devamp that starts a successor at the exact release boundary, rehearse that timing in the reference show. [QLab Devamp cue manual](https://qlab.app/docs/v5/other-cues/devamp-cues/#slice-or-cue)

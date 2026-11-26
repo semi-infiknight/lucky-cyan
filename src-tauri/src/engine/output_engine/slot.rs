@@ -1997,11 +1997,12 @@ fn service_silent_speed(slot: &Arc<VideoSlot>) {
         SilentWork::Check(path) => super::silent_local_movie(&slot.lib, slot.mpv_ctx.0, path),
         SilentWork::CheckWholeLoop(path) => {
             let path_on_disk = std::path::Path::new(path);
-            let eligible = path_on_disk.extension().and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4")
-                    || extension.eq_ignore_ascii_case("mov"))
+            // A movie with a soundtrack releases the same way: the loop-file
+            // counter is picture-side only (slots load with audio=no), and the
+            // paired soundtrack voice is released with the picture by the
+            // transport, so silence is not required here.
+            let eligible = whole_loop_container_supported(path_on_disk)
                 && path_on_disk.is_file()
-                && super::silent_local_movie(&slot.lib, slot.mpv_ctx.0, path)
                 && unsafe { super::get_prop_i64(&slot.lib, slot.mpv_ctx.0, "remaining-file-loops") } == Some(-1);
             let entry = if eligible { movie_entry_id(slot) } else { None };
             if let Ok(mut state) = slot.state.lock() {
@@ -2055,6 +2056,13 @@ fn service_silent_speed(slot: &Arc<VideoSlot>) {
             ));
         }
     }
+}
+
+/// Whole-cue loop release drives mpv's `loop-file` counter on a named playlist
+/// entry, which only exists for real file containers we support.
+fn whole_loop_container_supported(path: &std::path::Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4") || extension.eq_ignore_ascii_case("mov"))
 }
 
 fn movie_entry_id(slot: &VideoSlot) -> Option<i64> {
@@ -2404,6 +2412,17 @@ mod tests {
         assert!(state.defer_silent_stop());
         assert!(state.jpeg_admission.is_none());
         assert!(!state.silent_worker_drained());
+    }
+
+    #[test]
+    fn whole_loop_container_names_mp4_and_mov_case_insensitively() {
+        use std::path::Path;
+        assert!(whole_loop_container_supported(Path::new("rehearsal.mp4")));
+        assert!(whole_loop_container_supported(Path::new("Rehearsal.MOV")));
+        assert!(whole_loop_container_supported(Path::new("a/b/c.Mp4")));
+        assert!(!whole_loop_container_supported(Path::new("clip.mkv")));
+        assert!(!whole_loop_container_supported(Path::new("no_extension")));
+        assert!(!whole_loop_container_supported(Path::new("archive.mp4.bak")));
     }
 
     #[test]

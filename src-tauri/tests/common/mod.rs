@@ -316,6 +316,7 @@ pub enum EngineCall {
     OutputSilentSpeed { voice: VoiceId, rate: f64 },
     AudioDevamp { stop_at_end: bool },
     AudioWholeDevamp { voice: VoiceId },
+    OutputWholeDevamp { voice: VoiceId },
     OutputDevamp { stop_at_end: bool },
     DmxSubmitFadeBatch { channels: Vec<DmxChannelLevel>, duration: Duration, curve: FadeCurve },
 }
@@ -632,6 +633,10 @@ impl OutputEngineApi for RecOutput {
     }
     fn devamp_voice(&self, _v: VoiceId, stop_at_end: bool) {
         record(&self.log, EngineCall::OutputDevamp { stop_at_end });
+    }
+    fn release_whole_video_loop(&self, voice: VoiceId) -> bool {
+        record(&self.log, EngineCall::OutputWholeDevamp { voice });
+        true
     }
     fn start_preloaded(&self, _v: VoiceId) -> Result<bool> {
         record(&self.log, EngineCall::OutputStartPreloaded);

@@ -9,7 +9,8 @@
 //!
 //! The cue completes when the transport requests the release. Slice release
 //! can target video and its soundtrack. Whole-cue release is available for
-//! one running, unsliced File Audio voice.
+//! one running, unsliced File Audio voice or one looping Video cue — a movie's
+//! soundtrack is released with its picture.
 
 use std::time::{Duration, Instant};
 
@@ -87,7 +88,7 @@ impl DevampCue {
             return Ok(id);
         }
         let [target] = self.target_cue_ids.as_slice() else {
-            anyhow::bail!("Select one File Audio or silent Video cue for Whole cue release.");
+            anyhow::bail!("Select one File Audio or Video cue for Whole cue release.");
         };
         Ok(*target)
     }

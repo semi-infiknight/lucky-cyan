@@ -316,6 +316,12 @@ impl VideoCue {
             .loops_remaining
             .store(self.loop_count, std::sync::atomic::Ordering::Relaxed);
 
+        if self.slices.is_empty() && self.loop_count > 0 {
+            // A looping movie's soundtrack is a File Audio voice; a Whole-cue
+            // Devamp releases it at its current pass end together with the picture.
+            voice.whole_loop_release = Some(std::sync::atomic::AtomicBool::new(false));
+        }
+
         // Rate defaults to 1.0; SR mismatch is corrected in fill_buffer.
 
         if let Some(end) = self.end_time {

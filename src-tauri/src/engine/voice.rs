@@ -574,8 +574,9 @@ pub struct Voice {
     pub(crate) playlist_cut: Option<Arc<PlaylistCut>>,
     /// A stop requested before a stream swap must survive the discarded ring.
     pub(crate) stop_requested: AtomicBool,
-    /// Present only on an unsliced, looping File Audio voice. Its owner can
-    /// request a stop at the next whole-clip boundary without changing its loop count.
+    /// Present only on an unsliced, looping File Audio voice (a movie's
+    /// soundtrack included). Its owner can request a stop at the next
+    /// whole-clip boundary without changing its loop count.
     pub(crate) whole_loop_release: Option<AtomicBool>,
 
     /// Interior-mutable fields modified from the RT callback.

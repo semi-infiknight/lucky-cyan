@@ -2623,6 +2623,46 @@ fn whole_audio_devamp_requires_a_running_target_and_arms_only_its_voice() {
 }
 
 #[test]
+fn whole_cue_devamp_on_a_soundtracked_movie_releases_picture_and_sound_together() {
+    use inkue_lib::cue::{devamp_cue::DevampScope, video_cue::VideoCue};
+
+    // The output double reports a paired audio voice for every visual voice,
+    // i.e. a Video cue whose MP4 carries a soundtrack.
+    let (context, _, calls) = common::recording_context_with_video_audio();
+    let mut transport = Transport::new(context);
+    let mut video = VideoCue::new();
+    video.file_path = Some("rehearsal.mp4".into());
+    video.loop_count = u32::MAX;
+    video.accept_preloaded_audio(Arc::new(vec![0.5; 48_000]), 1, 48_000, Duration::from_secs(1));
+    video.set_runtime_duration(Duration::from_secs(1));
+    let video_id = video.id();
+    let mut devamp = DevampCue::new();
+    devamp.scope = DevampScope::WholeCue;
+    devamp.target_cue_ids = vec![video_id];
+    let devamp_id = devamp.id();
+    let mut list = list_of(vec![Box::new(video), Box::new(devamp)]);
+
+    list.playhead_cue_id = Some(video_id);
+    transport.go(&mut list).unwrap();
+    let voice = list.get(&video_id).unwrap().playing_voice_id().unwrap();
+    assert!(list.get(&video_id).unwrap().is_running());
+    calls.lock().unwrap().clear();
+
+    list.playhead_cue_id = Some(devamp_id);
+    let result = transport.go(&mut list).unwrap();
+    assert_eq!(result.triggered, [devamp_id]);
+    let log = calls.lock().unwrap();
+    assert!(
+        log.iter().any(|c| matches!(c, EngineCall::OutputWholeDevamp { voice: v } if *v == voice)),
+        "picture loop released: {log:?}"
+    );
+    assert!(
+        log.iter().any(|c| matches!(c, EngineCall::AudioWholeDevamp { .. })),
+        "paired soundtrack voice released with the picture: {log:?}"
+    );
+}
+
+#[test]
 fn moving_an_active_source_preserves_the_finished_fade_and_does_not_fire_the_next_cue() {
     use inkue_lib::commands::cue_cmds::{apply_cue_properties, MergePolicy};
     use inkue_lib::show::{event_loop::schedule_list_follows, Workspace};

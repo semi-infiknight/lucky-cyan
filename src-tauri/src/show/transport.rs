@@ -432,9 +432,9 @@ impl Transport {
     }
 
     fn fire_whole_cue_devamp(&self, cue_list: &mut CueList, cue_id: CueId) -> Result<bool> {
-        const TARGET_REQUIRED: &str = "Start an armed File Audio or silent Video loop before using Whole cue release.";
+        const TARGET_REQUIRED: &str = "Start an armed File Audio or looping Video cue before using Whole cue release.";
         const AUDIO_REQUIRED: &str = "Start an armed, unsliced File Audio loop before using Whole cue release.";
-        const VIDEO_REQUIRED: &str = "Start an armed silent MP4 or MOV looping indefinitely, with no trim, slices, end fade, held frame or automatic continuation. Wait for the picture before using Whole cue release.";
+        const VIDEO_REQUIRED: &str = "Start an armed MP4 or MOV looping indefinitely, with no trim, slices, end fade, held frame or automatic continuation. Wait for the picture before using Whole cue release.";
         let Some(devamp) = cue_list.get(&cue_id)
             .and_then(|cue| (cue as &dyn Any).downcast_ref::<DevampCue>())
             .filter(|devamp| devamp.scope == DevampScope::WholeCue)
@@ -467,6 +467,11 @@ impl Transport {
             anyhow::ensure!(self.context.audio_engine.release_whole_audio_loop(voice), "{AUDIO_REQUIRED}");
         } else {
             anyhow::ensure!(self.context.output_engine.release_whole_video_loop(voice), "{VIDEO_REQUIRED}");
+            // A movie with a soundtrack carries its audio on a paired voice:
+            // release that loop too, so sound and picture finish the same pass.
+            if let Some(audio_voice) = self.context.output_engine.video_audio_voice(voice) {
+                let _ = self.context.audio_engine.release_whole_audio_loop(audio_voice);
+            }
         }
         devamp.complete(&self.context);
         Ok(true)
