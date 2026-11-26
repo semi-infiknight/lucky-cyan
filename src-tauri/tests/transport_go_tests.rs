@@ -2076,6 +2076,11 @@ fn start_first_and_enter_holds_unsupported_continuation_at_the_group_boundary() 
     let (ctx, _) = test_context();
     let mut transport = Transport::new(ctx);
     let mut tail = reg.create(&CueType::Wait).unwrap();
+    // A zero-duration final Wait cannot Auto-Follow at the group boundary, so
+    // this continuation is genuinely unsupported and must be held.
+    let mut tail_json = tail.serialize();
+    tail_json["wait_duration_ms"] = serde_json::json!(0);
+    let mut tail = reg.from_json(tail_json).unwrap();
     let tail_id = tail.id();
     tail.set_continue_mode(ContinueMode::AutoFollow);
     tail.set_post_wait(Duration::from_secs(1));

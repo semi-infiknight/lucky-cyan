@@ -461,7 +461,7 @@ fn saved_native_color_mix_runs_through_the_light_cue_at_its_patched_channels() {
         let [EngineCall::DmxSubmitFadeBatch { channels, .. }] = log.as_slice() else {
             panic!("one complete {template} look must reach the engine");
         };
-        let colors: Vec<_> = channels.iter().map(|&(universe, channel, _, level)| (universe, channel, level)).collect();
+        let colors: Vec<_> = channels.iter().map(|&(ch, level)| (ch.universe, ch.channel, level)).collect();
         assert_eq!(colors, [(4, 200, levels[0]), (4, 201, levels[1]), (4, 202, levels[2])]);
     }
 }

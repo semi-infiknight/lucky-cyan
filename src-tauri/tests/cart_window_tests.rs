@@ -4,11 +4,15 @@ mod common;
 use inkue_lib::cue::{traits::Cue, types::ContinueMode, wait_cue::WaitCue};
 use inkue_lib::show::{
     cart_layout::{CartCell, CartEdit},
-    cart_window::CartWindowTarget,
     cue_list::{CueList, CueListMode},
+    cue_list_window::{CueListWindowKind, CueListWindowTarget},
     transport::Transport,
     Workspace,
 };
+
+fn bind_cart(ws: &Workspace, list_id: uuid::Uuid) -> CueListWindowTarget {
+    CueListWindowTarget::bind(ws, list_id, CueListWindowKind::Cart).unwrap()
+}
 
 fn wait_pad(number: &str) -> Box<dyn Cue> {
     let mut pad = WaitCue::new();
@@ -43,13 +47,13 @@ fn a_bound_pad_fires_exactly_one_uuid_and_preserves_main_standby() {
     let second_id = second.id;
     ws.cue_lists.push(second);
 
-    let target = CartWindowTarget::bind(&ws, list_id).unwrap();
-    let other_window = CartWindowTarget::bind(&ws, second_id).unwrap();
+    let target = bind_cart(&ws, list_id);
+    let other_window = bind_cart(&ws, second_id);
     assert_ne!(target.label(), other_window.label());
     assert!(target.pad_list(&mut ws, other_id, true).is_err());
     assert!(other_window.pad_list(&mut ws, selected_id, true).is_err());
     assert_eq!(
-        CartWindowTarget::from_label(&target.label()).unwrap(),
+        CueListWindowTarget::from_label(&target.label(), CueListWindowKind::Cart).unwrap(),
         target
     );
     assert!(target.pad_list(&mut ws, standby_id, true).is_err());
@@ -103,7 +107,7 @@ fn stale_hidden_disarmed_and_legacy_targets_are_rejected() {
         })
         .unwrap();
     let list_id = cart.id;
-    let target = CartWindowTarget::bind(&ws, list_id).unwrap();
+    let target = bind_cart(&ws, list_id);
 
     let cart = ws.active_cue_list_mut().unwrap();
     cart.cart_layout = cart
@@ -121,7 +125,7 @@ fn stale_hidden_disarmed_and_legacy_targets_are_rejected() {
         .unwrap()
         .set_mode(CueListMode::Cart, Some(true));
     assert!(target.list(&ws).is_err());
-    assert!(CartWindowTarget::bind(&ws, list_id).is_err());
+    assert!(CueListWindowTarget::bind(&ws, list_id, CueListWindowKind::Cart).is_err());
 
     let mut replacement = Workspace::new("Same persisted IDs, fresh document instance");
     let replacement_list = replacement.active_cue_list_mut().unwrap();
@@ -130,5 +134,5 @@ fn stale_hidden_disarmed_and_legacy_targets_are_rejected() {
     assert!(target.list(&replacement).is_err());
     ws.cue_lists.clear();
     assert!(target.list(&ws).is_err());
-    assert!(CartWindowTarget::from_label("main").is_err());
+    assert!(CueListWindowTarget::from_label("main", CueListWindowKind::Cart).is_err());
 }

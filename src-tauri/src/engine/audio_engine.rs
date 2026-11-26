@@ -3012,16 +3012,24 @@ mod tests {
 
     #[test]
     fn only_the_active_processed_patch_can_share_its_filter_history() {
+        use super::super::cue_effects::CueEffect;
         let engine = AudioEngine::new_silent(&MachineAudioConfig::default());
         let first = high_pass_stage_bus();
-        let other = high_pass_stage_bus();
+        // Same patch, changed effects: a different route for one patch id.
+        let mut other_route = first.route.clone();
+        other_route.audio_effects.push(CueEffect::HighPass {
+            id: Uuid::new_v4(), enabled: true, frequency_hz: 900.0,
+        });
         let voice = filtered_stage_voice(0.4, first.clone(), 32);
         assert!(engine.voices.push(voice.clone()).is_ok());
         let shared = engine.available_patch_bus(&first.route).unwrap().unwrap();
         assert!(Arc::ptr_eq(&first, &shared));
-        assert!(engine.available_patch_bus(&other.route).is_err());
+        assert!(
+            engine.available_patch_bus(&other_route).is_err(),
+            "a changed route on the active patch must be refused until its audio stops"
+        );
         voice.set_stopped();
-        assert!(engine.available_patch_bus(&other.route).unwrap().is_none());
+        assert!(engine.available_patch_bus(&other_route).unwrap().is_none());
     }
 
     #[test]
