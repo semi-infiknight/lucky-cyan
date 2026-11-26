@@ -332,8 +332,16 @@ pub fn devamp(cue: &Value) -> Value {
     out.insert("stop_at_end".into(), json!(stop.and_then(Value::as_bool).unwrap_or(false)));
     let mode = cue.get("devampType").and_then(Value::as_i64);
     let next = cue.get("fireNextCueAtMomentLoopEnds").or_else(|| cue.get("startNextCueWhenSliceEnds"));
-    if mode != Some(1) || next.is_some_and(|v| v.as_bool() != Some(false)) ||
-        stop.is_some_and(|v| v.as_bool().is_none()) {
+    let next_flag = next.and_then(Value::as_bool);
+    let next_unconfirmed = next.is_some() && next_flag != Some(false);
+    let stop_unconfirmed = stop.is_some() && stop.and_then(Value::as_bool).is_none();
+    // devampType 2 releases the whole looping cue: import it armed as a
+    // Whole-cue Devamp when it targets exactly one cue. devampType 1 is the
+    // current slice (the default scope).
+    let whole_cue = mode == Some(2) && target_ids(cue).len() == 1 && !next_unconfirmed && !stop_unconfirmed;
+    if whole_cue {
+        out.insert("scope".into(), json!("whole_cue"));
+    } else if mode != Some(1) || next_unconfirmed || stop_unconfirmed {
         out.insert("is_disabled".into(), json!(true));
         let scope = match mode {
             Some(2) => "whole looping cue".into(),
@@ -949,6 +957,45 @@ mod tests {
         assert_eq!(out["is_disabled"], json!(true));
         assert_eq!(out["command"], json!(""));
         assert!(out["notes"].as_str().unwrap().contains("tell application"));
+    }
+
+    #[test]
+    fn qlab_whole_cue_devamp_imports_armed_with_whole_scope() {
+        use crate::cue::{devamp_cue::DevampCueFactory, traits::CueFactory};
+        let source = json!({
+            "devampType": 2,
+            "cueTargetUniqueID": "68A9990A-7835-46AE-B9B8-2E231407D2FE",
+            "stopTargetWhenDone": true,
+            "armed": true
+        });
+        let out = devamp(&source);
+        assert_eq!(out["scope"], json!("whole_cue"));
+        assert_eq!(out["stop_at_end"], json!(true));
+        assert_eq!(out["is_disabled"], json!(false));
+        assert_eq!(out["target_cue_ids"], json!(["68a9990a-7835-46ae-b9b8-2e231407d2fe"]));
+        let loaded = DevampCueFactory.from_json(out).unwrap().serialize();
+        assert_eq!(loaded["scope"], json!("whole_cue"));
+        assert_eq!(loaded["stop_at_end"], json!(true));
+    }
+
+    #[test]
+    fn whole_cue_devamp_with_boundary_successor_stays_disarmed_for_review() {
+        let source = json!({
+            "devampType": 2,
+            "cueTargetUniqueID": "68A9990A-7835-46AE-B9B8-2E231407D2FE",
+            "fireNextCueAtMomentLoopEnds": true,
+            "armed": true
+        });
+        let out = devamp(&source);
+        assert_eq!(out["is_disabled"], json!(true));
+        assert!(out.get("scope").is_none());
+        assert!(out["_conversion_note"].as_str().unwrap().contains("whole looping cue"));
+
+        // No single target (multi-target or none) also stays disarmed.
+        let no_target = json!({ "devampType": 2, "armed": true });
+        let out = devamp(&no_target);
+        assert_eq!(out["is_disabled"], json!(true));
+        assert!(out.get("scope").is_none());
     }
 
     #[test]
