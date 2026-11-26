@@ -427,9 +427,11 @@ enum OscAction<'a> {
     Command(serde_json::Value),
     /// Resolve the target and run it under the workspace lock.
     AddressedCue { workspace: Option<WorkspaceSelector<'a>>, number: &'a str, action: NetworkCueAction },
-    WorkspaceTransport { workspace: Option<WorkspaceSelector<'a>>, action: NetworkWorkspaceAction },
+    WorkspaceTransport { workspace: Option<WorkspaceSelector<'a>>, action: NetworkWorkspaceAction<'a> },
     /// Use the current native states in the active list under the workspace lock.
     ListPause(NetworkPauseAction),
+    /// QLab `/thump` keepalive: acknowledged but performs no action.
+    Heartbeat,
     /// Trigger a full cue-list feedback dump.
     CueListRequest,
     /// Trigger a playhead feedback dump.
@@ -486,6 +488,7 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, app_handle: 
             }
             (true, true)
         }
+        OscAction::Heartbeat => (true, false),
         OscAction::Command(payload) => {
             let _ = app_handle.emit("osc-command", &payload);
             (true, true)
@@ -626,6 +629,17 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         return OscAction::Unmatched;
     };
     use NetworkWorkspaceAction as Transport;
+    if addr == "/thump" {
+        return OscAction::Heartbeat;
+    }
+    // QLab `/go/{cue_number}`: park the playhead on the numbered cue, then GO.
+    if let Some(number) = addr.strip_prefix("/go/") {
+        return if literal_cue_number(number) {
+            OscAction::WorkspaceTransport { workspace, action: Transport::GoToCue(number) }
+        } else {
+            OscAction::Unmatched
+        };
+    }
     let transport = match addr {
         "/go" => Some(Transport::Go),
         "/stop" | "/panic" => Some(Transport::Stop),
@@ -655,6 +669,19 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             return OscAction::Unmatched;
         }
         (number, NetworkCueAction::Select)
+    } else if let Some((id, action)) = addr.strip_prefix("/cue_id/").and_then(|rest| rest.split_once('/')) {
+        // QLab `/cue_id/{uniqueID}/...`: the address segment is a cue UUID.
+        if hyphenated_query_id(id).is_none() {
+            return OscAction::Unmatched;
+        }
+        match action {
+            "start" => (id, NetworkCueAction::Start),
+            "stop" => (id, NetworkCueAction::Stop),
+            "reset" => (id, NetworkCueAction::Reset),
+            "pause" => (id, NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
+            "resume" => (id, NetworkCueAction::SetPause(NetworkPauseAction::Resume)),
+            _ => return OscAction::Unmatched,
+        }
     } else if let Some((number, action)) = addr.strip_prefix("/cue/").and_then(|cue| cue.split_once('/')) {
         match action {
             "start" => (number, NetworkCueAction::Start),
@@ -667,7 +694,12 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
     } else {
         return OscAction::Unmatched;
     };
-    if !qlab_literal_cue_number(number) || (workspace.is_some() && number.len() > MAX_CUE_ADDRESS_NUMBER_BYTES) {
+    // `playhead` and `selected` are reserved QLab identifiers (Inkue's single
+    // selection is the playhead); a UUID-shaped segment addresses a cue by ID.
+    let reserved = matches!(number, "playhead" | "selected");
+    if (!reserved && !qlab_literal_cue_number(number))
+        || (workspace.is_some() && number.len() > MAX_CUE_ADDRESS_NUMBER_BYTES)
+    {
         return OscAction::Unmatched;
     }
     OscAction::AddressedCue { workspace, number, action }
@@ -735,6 +767,26 @@ fn resolve_network_target(
     workspace: Option<WorkspaceSelector<'_>>,
     number: &str,
 ) -> Option<(usize, CueId)> {
+    // QLab reserved identifiers: `playhead` and `selected` both mean the standby
+    // cue of the active list (Inkue keeps a single selection, the playhead).
+    if matches!(number, "playhead" | "selected") {
+        if workspace.is_some_and(|selector| !selector.matches(show)) {
+            return None;
+        }
+        let index = show.cue_lists.iter().position(|list| list.id == show.active_cue_list_id)?;
+        let cue = show.cue_lists[index].playhead_cue()?;
+        return Some((index, cue.id()));
+    }
+    // A UUID-shaped segment (from `/cue_id/...`) addresses a cue by unique ID.
+    // IDs are workspace-wide, but only top-level cues can be controlled directly.
+    if let Some(id) = hyphenated_query_id(number) {
+        if workspace.is_some_and(|selector| !selector.matches(show)) {
+            return None;
+        }
+        let (index, cue) = unique_workspace_cue(show, |cue| cue.id() == id)?;
+        return show.cue_lists[index].cues.iter().any(|row| std::ptr::eq(row.as_ref(), cue))
+            .then(|| (index, cue.id()));
+    }
     if let Some(selector) = workspace {
         if !selector.matches(show) {
             return None;
@@ -1035,7 +1087,11 @@ mod tests {
 
         let write = format!("/workspace/{instance}/cue_id/{nested}/start");
         assert!(CueQuery::parse(&query_message(&write)).is_none());
-        assert!(matches!(resolve_action(&write, &[]), OscAction::Unmatched));
+        let OscAction::AddressedCue { workspace: scope, number, action } = resolve_action(&write, &[]) else {
+            panic!("cue_id writes resolve as addressed cue actions");
+        };
+        assert_eq!(action, NetworkCueAction::Start);
+        assert_eq!(resolve_network_target(&workspace, scope, number), None, "nested cue IDs stay uncontrollable");
         assert!(CueQuery::parse(&query_message("/workspace/QueryPractice/cue/101/start")).is_none());
 
         workspace.metadata.name = "VenueB".into();
@@ -1156,6 +1212,158 @@ mod tests {
             OscAction::AddressedCue { action: NetworkCueAction::Reset, number: "12", .. }));
         assert!(matches!(authorized_action("/cue/12/reset", &[], false), OscAction::Unmatched));
         assert!(matches!(authorized_action("/workspace/*/reset", &[], true), OscAction::Unmatched));
+    }
+
+    #[test]
+    fn qlab_go_to_cue_number_maps_to_a_gated_workspace_transport_and_parks_then_goes() {
+        use crate::cue::wait_cue::WaitCue;
+        use crate::show::{cue_list::CueList, transport::Transport};
+
+        assert!(matches!(authorized_action("/go/202.1", &[], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/go/202.1", &[rosc::OscType::Int(1)], true), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/go/*", &[], true), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/go/", &[], true), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/go/202.1", &[], true),
+            OscAction::WorkspaceTransport { workspace: None, action } if action == NetworkWorkspaceAction::GoToCue("202.1")));
+        let scoped = "/workspace/Blue/go/202.1";
+        let workspace = Workspace::new("Blue");
+        assert!(matches!(authorized_action(scoped, &[], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action(scoped, &[], true),
+            OscAction::WorkspaceTransport { workspace: Some(selector), action: NetworkWorkspaceAction::GoToCue("202.1") }
+            if selector.matches(&workspace)));
+        assert!(parse_text_message(b"/go/202.1").is_some());
+        assert!(parse_text_message(b"/go/*").is_none());
+
+        let mut workspace = Workspace::new("Blue");
+        let active_list = workspace.active_cue_list_id;
+        let mut first = WaitCue::new();
+        first.set_number(Some("101".into()));
+        let first_id = first.id();
+        let mut second = WaitCue::new();
+        second.set_number(Some("202.1".into()));
+        let second_id = second.id();
+        let active = workspace.active_cue_list_mut().unwrap();
+        active.auto_renumber = false;
+        active.push(Box::new(first));
+        active.set_playhead(Some(first_id)).unwrap();
+        active.push(Box::new(second));
+
+        let target = crate::commands::transport_cmds::go_to_cue_target;
+        assert_eq!(target(&workspace, "202.1"), Some((active_list, second_id)));
+        assert_eq!(target(&workspace, "nope"), None);
+
+        // A duplicate number in another list loses to the active list's match.
+        let mut other = CueList::new("Other");
+        other.auto_renumber = false;
+        let mut duplicate = WaitCue::new();
+        duplicate.set_number(Some("202.1".into()));
+        other.push(Box::new(duplicate));
+        workspace.cue_lists.push(other);
+        assert_eq!(target(&workspace, "202.1"), Some((active_list, second_id)));
+
+        // A number unique to a non-active list switches the active list.
+        let mut third = WaitCue::new();
+        third.set_number(Some("303".into()));
+        let third_id = third.id();
+        let other_id = workspace.cue_lists[1].id;
+        workspace.cue_lists[1].push(Box::new(third));
+        assert_eq!(target(&workspace, "303"), Some((other_id, third_id)));
+
+        // Park the playhead on the numbered cue, then GO triggers it.
+        let (context, _, _) = crate::test_support::recording_context();
+        let (list_id, id) = target(&workspace, "202.1").unwrap();
+        workspace.switch_active_list(list_id);
+        let list = workspace.cue_lists.iter_mut().find(|list| list.id == list_id).unwrap();
+        list.set_playhead(Some(id)).unwrap();
+        let mut transport = Transport::new(context);
+        let result = transport.go(list).unwrap();
+        assert_eq!(result.triggered, [second_id]);
+    }
+
+    #[test]
+    fn qlab_playhead_selected_and_cue_id_identifiers_resolve_to_the_target_cue() {
+        use crate::cue::{group_cue::GroupCue, wait_cue::WaitCue};
+
+        let mut workspace = Workspace::new("Blue");
+        let mut standby = WaitCue::new();
+        standby.set_number(Some("101".into()));
+        let standby_id = standby.id();
+        let mut child = WaitCue::new();
+        child.set_number(Some("202.1".into()));
+        let child_id = child.id();
+        let mut group = GroupCue::new();
+        group.children.push(Box::new(child));
+        let active = workspace.active_cue_list_mut().unwrap();
+        active.auto_renumber = false;
+        active.push(Box::new(standby));
+        active.set_playhead(Some(standby_id)).unwrap();
+        active.push(Box::new(group));
+
+        fn resolve<'a>(address: &'a str, workspace: &Workspace) -> Option<(usize, CueId, &'a str, NetworkCueAction)> {
+            let OscAction::AddressedCue { workspace: scope, number, action } = resolve_action(address, &[]) else {
+                return None;
+            };
+            resolve_network_target(workspace, scope, number).map(|(index, id)| (index, id, number, action))
+        }
+
+        for (selector, verb, expected) in [
+            ("playhead", "stop", NetworkCueAction::Stop),
+            ("selected", "start", NetworkCueAction::Start),
+            ("selected", "pause", NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
+        ] {
+            let address = format!("/cue/{selector}/{verb}");
+            let (index, id, number, action) = resolve(&address, &workspace).unwrap();
+            assert_eq!((index, id), (0, standby_id));
+            assert_eq!(number, selector);
+            assert_eq!(action, expected);
+            let scoped = format!("/workspace/Blue/cue/{selector}/{verb}");
+            assert!(matches!(authorized_action(&scoped, &[], false), OscAction::Unmatched));
+            let OscAction::AddressedCue { workspace: Some(scope), number, action } = authorized_action(&scoped, &[], true) else {
+                panic!("{scoped}");
+            };
+            assert_eq!((number, action), (selector, expected));
+            assert_eq!(
+                resolve_network_target(&workspace, Some(scope), number).map(|(index, id)| (index, id)),
+                Some((0, standby_id))
+            );
+        }
+        assert!(parse_text_message(b"/cue/selected/stop").is_some());
+        assert!(parse_text_message(b"/cue/playhead/start").is_some());
+
+        // `/cue_id/{uuid}` finds cues by unique ID, but only top-level cues are controllable.
+        let nested = format!("/cue_id/{child_id}/pause");
+        let OscAction::AddressedCue { action, .. } = resolve_action(&nested, &[]) else { panic!() };
+        assert_eq!(action, NetworkCueAction::SetPause(NetworkPauseAction::Pause));
+        assert_eq!(resolve(&nested, &workspace), None, "nested cue IDs are not directly controllable");
+        let top = format!("/cue_id/{standby_id}/stop");
+        assert_eq!(resolve(&top, &workspace).map(|(index, id, _, _)| (index, id)), Some((0, standby_id)));
+        assert!(parse_text_message(top.as_bytes()).is_some());
+
+        for address in [
+            "/cue/playhead/go", "/cue/selected/seek", "/cue/playhead/", "/cue/all/stop", "/cue/*/stop",
+            "/cue_id/not-a-uuid/stop", "/cue_id/202.1/stop",
+        ] {
+            assert!(matches!(resolve_action(address, &[]), OscAction::Unmatched), "{address}");
+        }
+        assert!(matches!(resolve_action("/cue/playhead/stop", &[rosc::OscType::Int(1)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/selected/reset", &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::Reset, .. }));
+        assert!(matches!(authorized_action("/cue/selected/reset", &[], true),
+            OscAction::AddressedCue { action: NetworkCueAction::Reset, number: "selected", .. }));
+
+        // No playhead parked: the reserved identifiers match nothing.
+        workspace.active_cue_list_mut().unwrap().set_playhead(None).unwrap();
+        assert_eq!(resolve("/cue/playhead/stop", &workspace), None);
+        assert_eq!(resolve("/cue/selected/start", &workspace), None);
+    }
+
+    #[test]
+    fn qlab_thump_is_acknowledged_without_activity() {
+        assert!(matches!(resolve_action("/thump", &[]), OscAction::Heartbeat));
+        assert!(matches!(authorized_action("/thump", &[], false), OscAction::Heartbeat));
+        assert!(matches!(authorized_action("/workspace/Blue/thump", &[], false), OscAction::Heartbeat));
+        assert!(matches!(resolve_action("/thump", &[rosc::OscType::Int(1)]), OscAction::Unmatched));
+        assert!(parse_text_message(b"/thump\r\n").is_some());
     }
 
     #[test]
@@ -1357,8 +1565,8 @@ mod tests {
     fn text_rejects_invalid_oversize_ambiguous_or_multiple_commands() {
         for input in [
             "", "/go 2", "/inkue/go\0", "/inkue/go\n/inkue/stop", "/inkue/go /inkue/stop",
-            "/inkue/cue//go", "/inkue/cue/*/go", "/cue/all/stop", "/cue/selected/stop",
-            "/cue/selected/start", "/cue/102/start 1", "/cue/*/start", "/inkue/cue/102/seek/relative/extra 1", "/inkue/cue/102/seek",
+            "/inkue/cue//go", "/inkue/cue/*/go", "/cue/all/stop", "/cue/102/start 1",
+            "/cue/*/start", "/inkue/cue/102/seek/relative/extra 1", "/inkue/cue/102/seek",
             "/playhead/active", "/playbackPosition/previous/extra", "/playhead/1.5 1", "/playhead/*", "/playhead/1.5/extra",
             "/inkue/cue/102/seek NaN", "/inkue/cue/102/seek/percent 1.2", "/unknown",
         ] {
@@ -1433,6 +1641,8 @@ mod tests {
             ("/inkue/cue/3/resume", "3", SetPause(Resume)),
             ("/cue/1.5/pause", "1.5", SetPause(Pause)),
             ("/cue/1.5/resume", "1.5", SetPause(Resume)),
+            ("/cue/selected/pause", "selected", SetPause(Pause)),
+            ("/cue/playhead/stop", "playhead", Stop),
         ] {
             let parsed = parse_text_message(address.as_bytes()).unwrap();
             for action in [resolve_action(address, &[]), resolve_action(&parsed.addr, &parsed.args)] {
@@ -1442,7 +1652,7 @@ mod tests {
         }
         for invalid in ["/inkue/cue//start", "/cue/all/stop", "/playhead/next/extra", "/cue/*/stop",
             "/playhead/1.5/extra", "/select/1.5", "/workspace/show/playhead/1.5", "/cue/1.5/go",
-            "/cue/selected/pause", "/cue/all/resume", "/cue/*/pause", "/cue/3/resume/extra"]
+            "/cue/all/resume", "/cue/*/pause", "/cue/3/resume/extra", "/cue/selected/go"]
         {
             assert!(!is_matched(invalid, &[]), "{invalid}");
         }

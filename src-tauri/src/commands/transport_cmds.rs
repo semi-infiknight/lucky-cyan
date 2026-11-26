@@ -3,6 +3,7 @@
 use std::sync::atomic::Ordering;
 
 use tauri::{Emitter, State};
+use uuid::Uuid;
 
 use crate::{
     cue::{
@@ -228,8 +229,10 @@ pub(crate) fn address_numbered_network_cue(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NetworkWorkspaceAction {
+pub(crate) enum NetworkWorkspaceAction<'a> {
     Go,
+    /// QLab `/go/{cue_number}`: park the playhead on the numbered cue, then GO.
+    GoToCue(&'a str),
     Stop,
     HardStop,
     Reset,
@@ -238,10 +241,24 @@ pub(crate) enum NetworkWorkspaceAction {
     ClearStandby,
 }
 
-pub(crate) fn control_network_workspace(
+/// Resolve `/go/{cue_number}`: an exact match in the active list always wins;
+/// otherwise the number must be unique across the workspace's lists.
+pub(crate) fn go_to_cue_target(show: &Workspace, number: &str) -> Option<(Uuid, CueId)> {
+    let mut matches = show
+        .cue_lists
+        .iter()
+        .filter_map(|list| list.goto_number_target(number).ok().map(|id| (list.id, id)));
+    let first = matches.next()?;
+    if show.active_cue_list_id == first.0 || matches.next().is_none() {
+        return Some(first);
+    }
+    None
+}
+
+pub(crate) fn control_network_workspace<'a>(
     state: &AppState,
     app_handle: &tauri::AppHandle,
-    action: NetworkWorkspaceAction,
+    action: NetworkWorkspaceAction<'a>,
     matches_workspace: impl FnOnce(&Workspace) -> bool,
 ) -> Result<(), String> {
     use NetworkWorkspaceAction::*;
@@ -251,6 +268,17 @@ pub(crate) fn control_network_workspace(
     }
     match action {
         Go => go_locked(state, app_handle, &mut show).map(|_| ()),
+        GoToCue(number) => {
+            let Some((list_id, id)) = go_to_cue_target(&show, number) else { return Ok(()) };
+            show.switch_active_list(list_id);
+            let list = show
+                .cue_lists
+                .iter_mut()
+                .find(|list| list.id == list_id)
+                .ok_or("No active cue list")?;
+            super::cue_cmds::set_playhead_in_list(list, Some(id), app_handle)?;
+            go_locked(state, app_handle, &mut show).map(|_| ())
+        }
         Stop | HardStop => stop_locked(state, app_handle, &mut show, action == HardStop),
         Reset => reset_workspace_locked(state, app_handle, &mut show),
         SetPaused(paused) => {
