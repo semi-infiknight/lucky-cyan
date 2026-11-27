@@ -863,7 +863,8 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
                 || address == "/replyFormat" || address.ends_with("/replyFormat")
                 || address == "/eventFormat" || address.ends_with("/eventFormat")
                 || address == "/workingDirectory" || address == "/new" || address.ends_with("/new")
-                || address == "/alwaysAudition" || address.ends_with("/alwaysAudition") => {
+                || address == "/alwaysAudition" || address.ends_with("/alwaysAudition")
+                || address == "/fullScreen" || address.ends_with("/fullScreen") => {
                 match one.parse::<f64>() {
                     Ok(value) if (value * 1000.0).is_finite() => vec![rosc::OscType::Double(value)],
                     _ => vec![rosc::OscType::String((*one).to_owned())],
@@ -918,6 +919,8 @@ enum OscAction<'a> {
     SetReplyPort(u16),
     /// QLab `/overrideWindow {bool}` and `/toggleOverrideWindow` (`None` toggles).
     SetOverrideWindow(Option<bool>),
+    /// QLab `/fullScreen {bool}`: put the desk window in/out of full screen.
+    SetFullscreen(bool),
     /// QLab `/replyFormat {string}`: set this sender's reply payload format.
     SetReplyFormat(String),
     /// QLab show-control broadcast: `/listen[/{event}[/{detail}]]` / `/ignore/...`.
@@ -1041,6 +1044,18 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, src: SocketA
             let _ = app_handle.emit("override-window-changed", open);
             (true, false)
         }
+        OscAction::SetFullscreen(on) => {
+            match app_handle.get_webview_window("main") {
+                Some(window) => {
+                    if let Err(error) = window.set_fullscreen(on) {
+                        log::warn!("OSC /fullScreen: {error}");
+                    }
+                    FULLSCREEN_STATE.store(on, std::sync::atomic::Ordering::Relaxed);
+                }
+                None => log::warn!("OSC /fullScreen: no main window"),
+            }
+            (true, false)
+        }
         OscAction::SetReplyFormat(format) => {
             set_reply_format(src, Some(format));
             (true, false)
@@ -1138,6 +1153,7 @@ fn authorized_action<'a>(addr: &'a str, args: &[rosc::OscType], explicitly_allow
         | OscAction::AddressedCuePattern { action: NetworkCueAction::Reset, .. }
         | OscAction::WorkspaceTransport { .. }
         | OscAction::SetOverride { .. }
+        | OscAction::SetFullscreen(_)
         | OscAction::SetWorkingDirectory(_)
         | OscAction::CreateCue { .. } if !explicitly_allowed => OscAction::Unmatched,
         // Property writes edit saved show data: control-level only.
@@ -1468,7 +1484,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         || addr == "/replyFormat" || addr.ends_with("/replyFormat")
         || addr == "/eventFormat" || addr.ends_with("/eventFormat")
         || addr == "/workingDirectory" || addr == "/new" || addr.ends_with("/new")
-        || addr == "/alwaysAudition" || addr.ends_with("/alwaysAudition");
+        || addr == "/alwaysAudition" || addr.ends_with("/alwaysAudition")
+        || addr == "/fullScreen" || addr.ends_with("/fullScreen");
     if !args.is_empty() && !cue_write && !updates_arg {
         return OscAction::Unmatched;
     }
@@ -1630,6 +1647,17 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             OscAction::WorkspaceTransport { workspace, action: Transport::GoToCue(number) }
         } else {
             OscAction::Unmatched
+        };
+    }
+    // QLab `/fullScreen {bool}`: desk window full screen; the no-arg read is
+    // parsed as a query instead.
+    if addr == "/fullScreen" {
+        return match args {
+            [one] => match qlab_bool(one) {
+                Some(on) => OscAction::SetFullscreen(on),
+                None => OscAction::Unmatched,
+            },
+            _ => OscAction::Unmatched,
         };
     }
     // QLab `/alwaysAudition {bool}`: workspace setting; the no-arg read is
@@ -2152,6 +2180,8 @@ enum AppQueryKind {
     FontFamiliesAndStyles,
     /// QLab `/workingDirectory` read form: the current working directory.
     WorkingDirectory,
+    /// QLab `/fullScreen` read form: is the desk window full screen?
+    Fullscreen,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -2236,6 +2266,7 @@ impl<'a> CueQuery<'a> {
                 "version" => Some(AppQueryKind::Version),
                 "workspaces" => Some(AppQueryKind::Workspaces),
                 "overrideWindow" => Some(AppQueryKind::OverrideWindow),
+                "fullScreen" => Some(AppQueryKind::Fullscreen),
                 "fontNames" => Some(AppQueryKind::FontNames),
                 "fontFamiliesAndStyles" => Some(AppQueryKind::FontFamiliesAndStyles),
                 "workingDirectory" => Some(AppQueryKind::WorkingDirectory),
@@ -2257,9 +2288,16 @@ impl<'a> CueQuery<'a> {
         } {
             return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::Sender(sender) });
         }
-        // Workspace-level queries next: `/cueLists`, `/alwaysAudition`, `/cueList/{id}/playbackPosition`.
+        // Workspace-level queries next: `/cueLists`, `/alwaysAudition`, `/fullScreen`, `/cueList/{id}/playbackPosition`.
         if path == "alwaysAudition" {
             return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::AlwaysAudition });
+        }
+        if path == "fullScreen" {
+            return Some(Self {
+                address: &message.addr,
+                workspace,
+                kind: CueQueryKind::App(AppQueryKind::Fullscreen),
+            });
         }
         if path == "cueLists" {
             return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::CueLists });
@@ -2406,6 +2444,8 @@ impl<'a> CueQuery<'a> {
             )),
             CueQueryKind::App(AppQueryKind::OverrideWindow) =>
                 Some(serde_json::json!(crate::engine::overrides::OVERRIDES.override_window())),
+            CueQueryKind::App(AppQueryKind::Fullscreen) =>
+                Some(serde_json::json!(FULLSCREEN_STATE.load(std::sync::atomic::Ordering::Relaxed))),
             CueQueryKind::App(AppQueryKind::FontNames) =>
                 Some(serde_json::json!(crate::commands::preferences_cmds::list_system_fonts())),
             CueQueryKind::App(AppQueryKind::FontFamiliesAndStyles) => {
@@ -2634,6 +2674,10 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Last full-screen state set via OSC `/fullScreen`; the live window state is
+/// authoritative at query time (see `handle_query`), this is the fallback.
+static FULLSCREEN_STATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn hyphenated_query_id(id: &str) -> Option<Uuid> {
     if id.len() != 36 {
         return None;
@@ -2703,7 +2747,17 @@ fn handle_query(query: CueQuery<'_>, src: SocketAddr, handle: &tauri::AppHandle)
     let (workspace_id, data) = {
         // A read never blocks show work. A busy desk sends no reply; the peer can retry.
         let workspace = state.workspace.try_lock().ok()?;
-        query.reply_data(&workspace, src, port)?
+        let (workspace_id, data) = query.reply_data(&workspace, src, port)?;
+        // `/fullScreen` prefers the live window state when a main window exists.
+        let data = if matches!(query.kind, CueQueryKind::App(AppQueryKind::Fullscreen)) {
+            handle.get_webview_window("main")
+                .and_then(|window| window.is_fullscreen().ok())
+                .map(serde_json::Value::Bool)
+                .or(data)
+        } else {
+            data
+        };
+        (workspace_id, data)
     };
     let format = current_reply_format(src);
     query.encode_reply_formatted(workspace_id, data, format.as_deref())
@@ -3198,6 +3252,31 @@ mod tests {
             CueQuery::parse(&message).unwrap().read(&workspace, peer(), 0).unwrap(),
             serde_json::json!(true)
         );
+    }
+
+    #[test]
+    fn qlab_full_screen_write_is_gated_and_the_read_is_a_query() {
+        // Write: one boolean; allowlist required; scoped form works too.
+        assert!(matches!(authorized_action("/fullScreen", &[rosc::OscType::Int(1)], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/fullScreen", &[rosc::OscType::Int(1)], true),
+            OscAction::SetFullscreen(true)));
+        assert!(matches!(authorized_action("/fullScreen", &[rosc::OscType::String("false".into())], true),
+            OscAction::SetFullscreen(false)));
+        assert!(matches!(authorized_action("/fullScreen", &[], true), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/fullScreen", &[rosc::OscType::Int(1), rosc::OscType::Int(2)], true), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/workspace/Blue/fullScreen", &[rosc::OscType::Bool(true)], true),
+            OscAction::SetFullscreen(true)));
+        // Read: no-arg query, unscoped or scoped, answered at any access level.
+        let message = query_message("/fullScreen");
+        let query = CueQuery::parse(&message).unwrap();
+        assert!(matches!(query.kind, CueQueryKind::App(AppQueryKind::Fullscreen)));
+        assert!(query.is_any_access());
+        let workspace = Workspace::new("Blue");
+        assert_eq!(query.read(&workspace, peer(), 0).unwrap(), serde_json::json!(false));
+        let message = query_message("/workspace/Blue/fullScreen");
+        let query = CueQuery::parse(&message).unwrap();
+        assert!(matches!(query.kind, CueQueryKind::App(AppQueryKind::Fullscreen)));
+        assert!(query.is_any_access());
     }
 
     #[test]
