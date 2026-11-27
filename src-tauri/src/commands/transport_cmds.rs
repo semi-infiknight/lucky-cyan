@@ -226,6 +226,10 @@ pub(crate) enum VideoPropValue {
 pub(crate) enum NetworkCueAction {
     Go,
     Start,
+    /// QLab `/cue/{n}/preview`: start the cue now through the normal outputs
+    /// without moving the playhead and without triggering auto-continue or
+    /// auto-follow chains (Inkue's `start_independent`).
+    Preview,
     Select,
     Stop,
     /// QLab `/cue/{n}/hardStop`: immediate stop, effects cut too.
@@ -327,6 +331,11 @@ pub(crate) fn address_numbered_network_cue(
     match &action {
         NetworkCueAction::Go | NetworkCueAction::Start => {
             go_cue_in_list(&mut transport, cue_list, id, action == NetworkCueAction::Start, app_handle)
+        }
+        NetworkCueAction::Preview => {
+            let result = transport.start_independent(cue_list, id).map(|_| ()).map_err(|e| e.to_string());
+            let _ = app_handle.emit("cue-list-refresh", ());
+            result
         }
         NetworkCueAction::Select => super::cue_cmds::set_playhead_in_list(cue_list, Some(id), app_handle),
         NetworkCueAction::Stop => stop_cue_in_list(&mut transport, cue_list, id, app_handle),

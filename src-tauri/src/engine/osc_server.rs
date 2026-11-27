@@ -1197,6 +1197,7 @@ fn parse_cue_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a>
     let action = match action {
         "go" => NetworkCueAction::Go,
         "start" if args.is_empty() => NetworkCueAction::Start,
+        "preview" if args.is_empty() => NetworkCueAction::Preview,
         "select" if args.is_empty() => NetworkCueAction::Select,
         "stop" if args.is_empty() => NetworkCueAction::Stop,
         "pause" if args.is_empty() => NetworkCueAction::SetPause(NetworkPauseAction::Pause),
@@ -1614,6 +1615,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         }
         match action {
             "start" if args.is_empty() => (id, NetworkCueAction::Start),
+            "preview" if args.is_empty() => (id, NetworkCueAction::Preview),
             "stop" if args.is_empty() => (id, NetworkCueAction::Stop),
             "reset" if args.is_empty() => (id, NetworkCueAction::Reset),
             "pause" if args.is_empty() => (id, NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
@@ -1670,6 +1672,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         }
         match action {
             "start" if args.is_empty() => (number, NetworkCueAction::Start),
+            "preview" if args.is_empty() => (number, NetworkCueAction::Preview),
             "stop" if args.is_empty() => (number, NetworkCueAction::Stop),
             "reset" if args.is_empty() => (number, NetworkCueAction::Reset),
             "pause" if args.is_empty() => (number, NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
@@ -2812,6 +2815,7 @@ mod tests {
         let uuid = workspace.instance_id();
         for (verb, expected) in [
             ("start", NetworkCueAction::Start),
+            ("preview", NetworkCueAction::Preview),
             ("stop", NetworkCueAction::Stop),
             ("reset", NetworkCueAction::Reset),
             ("pause", NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
@@ -3003,6 +3007,34 @@ mod tests {
     }
 
     #[test]
+    fn qlab_cue_preview_parses_on_number_playhead_selected_and_cue_id_but_not_wildcards() {
+        // Control-level like start: unscoped works without the allowlist,
+        // scoped forms and arguments need the allowlist / no arguments.
+        assert!(matches!(authorized_action("/cue/12/preview", &[], true),
+            OscAction::AddressedCue { action: NetworkCueAction::Preview, number: "12", .. }));
+        assert!(matches!(authorized_action("/cue/12/preview", &[], false),
+            OscAction::AddressedCue { action: NetworkCueAction::Preview, .. }));
+        assert!(matches!(authorized_action("/cue/12/preview", &[rosc::OscType::Int(1)], true), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/playhead/preview", &[], true),
+            OscAction::AddressedCue { action: NetworkCueAction::Preview, number: "playhead", .. }));
+        assert!(matches!(authorized_action("/cue/selected/preview", &[], true),
+            OscAction::AddressedCue { action: NetworkCueAction::Preview, number: "selected", .. }));
+        let id = Uuid::new_v4().to_string();
+        let cue_id_addr = format!("/cue_id/{id}/preview");
+        assert!(matches!(authorized_action(&cue_id_addr, &[], true),
+            OscAction::AddressedCue { action: NetworkCueAction::Preview, number, .. } if number == id));
+        // Wildcards never preview (like start): starting every match at once is refused.
+        assert!(matches!(authorized_action("/cue/*/preview", &[], true), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/2*/preview", &[], true), OscAction::Unmatched));
+        // Scoped form needs the allowlist, like the other cue verbs.
+        assert!(matches!(authorized_action("/workspace/Blue/cue/12/preview", &[], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/workspace/Blue/cue/12/preview", &[], true),
+            OscAction::AddressedCue { workspace: Some(_), action: NetworkCueAction::Preview, .. }));
+        // Preview is a control action, not a saved-data write.
+        assert!(!NetworkCueAction::Preview.is_write());
+    }
+
+    #[test]
     fn qlab_playhead_selected_and_cue_id_identifiers_resolve_to_the_target_cue() {
         use crate::cue::{group_cue::GroupCue, wait_cue::WaitCue};
 
@@ -3030,7 +3062,9 @@ mod tests {
 
         for (selector, verb, expected) in [
             ("playhead", "stop", NetworkCueAction::Stop),
+            ("playhead", "preview", NetworkCueAction::Preview),
             ("selected", "start", NetworkCueAction::Start),
+            ("selected", "preview", NetworkCueAction::Preview),
             ("selected", "pause", NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
         ] {
             let address = format!("/cue/{selector}/{verb}");
