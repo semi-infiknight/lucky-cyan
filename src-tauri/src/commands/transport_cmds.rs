@@ -243,6 +243,9 @@ pub(crate) enum NetworkCueAction {
     Delete,
     /// QLab `/cue/{n}/infiniteLoop {bool}`; `None` toggles.
     SetInfiniteLoop(Option<bool>),
+    /// QLab `/cue/{n}/sliceMarker/{index}/playCount {n}`: play count of slice
+    /// `index` (0-based segment; `PLAY_COUNT_INFINITE` vamps until a Devamp).
+    SetSlicePlayCount { index: usize, count: u32 },
     /// QLab `/cue/{n}/load {seconds}`: arm at a time (negative counts from the end).
     Load(f64),
     Reset,
@@ -298,6 +301,7 @@ impl NetworkCueAction {
                 | NetworkCueAction::SetVideoProp { .. }
                 | NetworkCueAction::Delete
                 | NetworkCueAction::SetInfiniteLoop(_)
+                | NetworkCueAction::SetSlicePlayCount { .. }
         )
     }
 }
@@ -633,6 +637,10 @@ fn write_edit(action: &NetworkCueAction) -> Option<CueEdit<'_>> {
                 let next = on.unwrap_or_else(|| !cue.infinite_loop().unwrap_or(false));
                 cue.set_infinite_loop(next);
             }))
+        }
+        NetworkCueAction::SetSlicePlayCount { index, count } => {
+            let (index, count) = (*index, *count);
+            Some(Box::new(move |cue| { let _ = cue.set_slice_play_count(index, count); }))
         }
         NetworkCueAction::SetVideoProp { prop, value, live: false } => {
             let (prop, value) = (*prop, value.clone());

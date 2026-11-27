@@ -663,6 +663,17 @@ impl Cue for VideoCue {
     fn set_infinite_loop(&mut self, on: bool) {
         self.loop_count = if on { crate::cue::types::PLAY_COUNT_INFINITE } else { 0 };
     }
+    fn slice_list(&self) -> Option<crate::cue::types::SliceList> { Some(self.slices.clone()) }
+    fn set_slice_play_count(&mut self, index: usize, play_count: u32) -> Result<(), String> {
+        if self.slices.markers.is_empty() {
+            return Err("The cue has no slice markers.".into());
+        }
+        let Some(slot) = self.slices.play_counts.get_mut(index) else {
+            return Err(format!("Slice index {index} does not exist."));
+        };
+        *slot = play_count.max(1);
+        Ok(())
+    }
     fn visual_voice_id(&self) -> Option<VoiceId> { self.active_voice_id }
     fn video_style(&self) -> Option<LayerStyle> { Some(self.layer_style) }
     fn set_video_style(&mut self, style: LayerStyle) { self.layer_style = style; }

@@ -633,6 +633,17 @@ impl Cue for AudioCue {
     fn set_infinite_loop(&mut self, on: bool) {
         self.loop_count = if on { super::types::PLAY_COUNT_INFINITE } else { 0 };
     }
+    fn slice_list(&self) -> Option<super::types::SliceList> { Some(self.slices.clone()) }
+    fn set_slice_play_count(&mut self, index: usize, play_count: u32) -> Result<(), String> {
+        if self.slices.markers.is_empty() {
+            return Err("The cue has no slice markers.".into());
+        }
+        let Some(slot) = self.slices.play_counts.get_mut(index) else {
+            return Err(format!("Slice index {index} does not exist."));
+        };
+        *slot = play_count.max(1);
+        Ok(())
+    }
     fn set_rate(&mut self, rate: f64) { self.rate = rate; }
     fn level(&self, row: usize, col: usize) -> Option<f64> {
         self.level_matrix.as_ref()?.get(row)?.get(col).copied()

@@ -1254,6 +1254,30 @@ fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueActi
             _ => None,
         };
     }
+    // QLab `/cue/{n}/sliceMarker/{index}/playCount {n}`: 1-based slice index;
+    // per the OSC dictionary a negative value or 0 means infinite loop.
+    if let Some(rest) = verb.strip_prefix("sliceMarker/") {
+        let mut parts = rest.split('/');
+        let (Some(index), Some(prop), None) = (parts.next(), parts.next(), parts.next()) else {
+            return None;
+        };
+        if prop != "playCount" {
+            return None;
+        }
+        let Ok(index) = index.parse::<usize>() else { return None };
+        if index == 0 {
+            return None;
+        }
+        return match args {
+            [one] => numeric_arg(std::slice::from_ref(one))
+                .filter(|v| v.fract() == 0.0 && *v >= -1.0 && *v <= u32::MAX as f64)
+                .map(|v| NetworkCueAction::SetSlicePlayCount {
+                    index: index - 1,
+                    count: if v <= 0.0 { crate::cue::types::PLAY_COUNT_INFINITE } else { v as u32 },
+                }),
+            _ => None,
+        };
+    }
     // QLab video-cue properties: opacity 0..=1, layer 1..=1000, blendMode name,
     // saturation 0..=2, scale > 0, rotation 0..360, translateX/Y -1..=1.
     let video_prop = match verb {
@@ -1407,7 +1431,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             matches!(core, "preWait" | "postWait" | "armed" | "qName" | "continueMode"
                 | "notes" | "colorName" | "flagged" | "load" | "panic" | "rate" | "level"
                 | "opacity" | "layer" | "blendMode" | "saturation" | "scale" | "rotation"
-                | "translateX" | "translateY" | "infiniteLoop")
+                | "translateX" | "translateY" | "infiniteLoop" | "sliceMarker")
         });
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
@@ -1847,6 +1871,15 @@ fn cue_dict(
     })
 }
 
+/// QLab reports an infinitely-looping slice as play count `-1`.
+fn qlab_play_count(count: u32) -> serde_json::Value {
+    if count == crate::cue::types::PLAY_COUNT_INFINITE {
+        serde_json::json!(-1)
+    } else {
+        serde_json::json!(count)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CueQueryProperty {
     Number,
@@ -1875,6 +1908,10 @@ enum CueQueryProperty {
     Video { prop: VideoProp, live: bool },
     /// QLab `/cue/{n}/infiniteLoop`: bool loop flag of a media cue.
     InfiniteLoop,
+    /// QLab `/cue/{n}/sliceMarkers`: array of `{time, playCount}` per slice marker.
+    SliceMarkers,
+    /// QLab `/cue/{n}/sliceMarker/{index}/playCount` (1-based slice index).
+    SlicePlayCount { index: usize },
 }
 
 #[derive(Clone, Copy)]
@@ -2212,6 +2249,21 @@ impl<'a> CueQuery<'a> {
             "translateY" => CueQueryProperty::Video { prop: VideoProp::PanY, live: false },
             "translateY/live" => CueQueryProperty::Video { prop: VideoProp::PanY, live: true },
             "infiniteLoop" => CueQueryProperty::InfiniteLoop,
+            "sliceMarkers" => CueQueryProperty::SliceMarkers,
+            property if property.starts_with("sliceMarker/") => {
+                let mut parts = property.strip_prefix("sliceMarker/")?.split('/');
+                let (Some(index), Some(prop), None) = (parts.next(), parts.next(), parts.next()) else {
+                    return None;
+                };
+                if prop != "playCount" {
+                    return None;
+                }
+                let Ok(index) = index.parse::<usize>() else { return None };
+                if index == 0 {
+                    return None;
+                }
+                CueQueryProperty::SlicePlayCount { index: index - 1 }
+            }
             property if property.starts_with("level/") => {
                 let (rest, live) = match property.strip_suffix("/live") {
                     Some(core) => (core, true),
@@ -2446,6 +2498,25 @@ impl<'a> CueQuery<'a> {
             }
             CueQueryProperty::InfiniteLoop =>
                 Some(cue.infinite_loop().map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null)),
+            CueQueryProperty::SliceMarkers => {
+                let Some(mut slices) = cue.slice_list() else { return Some(serde_json::Value::Null) };
+                slices.normalize();
+                let markers = slices.markers.iter().enumerate().map(|(i, &ms)| {
+                    let count = slices.play_counts.get(i).copied().unwrap_or(1);
+                    serde_json::json!({
+                        "time": ms as f64 / 1000.0,
+                        "playCount": qlab_play_count(count),
+                    })
+                }).collect::<Vec<_>>();
+                Some(serde_json::Value::Array(markers))
+            }
+            CueQueryProperty::SlicePlayCount { index } => {
+                let count = cue.slice_list().and_then(|s| s.play_counts.get(index).copied());
+                Some(match count {
+                    None => serde_json::Value::Null,
+                    Some(c) => serde_json::json!(qlab_play_count(c)),
+                })
+            }
         }
     }
 
@@ -3032,6 +3103,72 @@ mod tests {
             OscAction::AddressedCue { workspace: Some(_), action: NetworkCueAction::Preview, .. }));
         // Preview is a control action, not a saved-data write.
         assert!(!NetworkCueAction::Preview.is_write());
+    }
+
+    #[test]
+    fn qlab_slice_marker_play_count_writes_and_queries_parse_and_read() {
+        use crate::cue::audio_cue::AudioCue;
+        use crate::cue::types::{SliceList, PLAY_COUNT_INFINITE};
+        use crate::cue::wait_cue::WaitCue;
+
+        let args = |v: f64| vec![rosc::OscType::Double(v)];
+        // Write: one whole number; 1-based slice index; <=0 means infinite loop.
+        assert!(matches!(resolve_action("/cue/12/sliceMarker/2/playCount", &args(3.0)),
+            OscAction::AddressedCue { action: NetworkCueAction::SetSlicePlayCount { index: 1, count: 3 }, number: "12", .. }));
+        assert!(matches!(resolve_action("/cue/12/sliceMarker/1/playCount", &args(-1.0)),
+            OscAction::AddressedCue { action: NetworkCueAction::SetSlicePlayCount { index: 0, count: PLAY_COUNT_INFINITE }, .. }));
+        assert!(matches!(resolve_action("/cue/12/sliceMarker/1/playCount", &args(0.0)),
+            OscAction::AddressedCue { action: NetworkCueAction::SetSlicePlayCount { index: 0, count: PLAY_COUNT_INFINITE }, .. }));
+        assert!(matches!(resolve_action("/cue/12/sliceMarker/2/playCount", &args(1.5)), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/12/sliceMarker/0/playCount", &args(1.0)), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/12/sliceMarker/2/playCount", &args(1.0).into_iter().chain(args(2.0)).collect::<Vec<_>>()), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/12/sliceMarker/2/time", &args(5.0)), OscAction::Unmatched));
+        // Writes are control-level: allowlist required, like the other saved writes.
+        assert!(matches!(authorized_action("/cue/12/sliceMarker/2/playCount", &args(3.0), false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/12/sliceMarker/2/playCount", &args(3.0), true),
+            OscAction::AddressedCue { action: NetworkCueAction::SetSlicePlayCount { .. }, .. }));
+        assert!(NetworkCueAction::SetSlicePlayCount { index: 0, count: 1 }.is_write());
+
+        // Query forms (no argument) parse as cue queries.
+        let markers_query = query_message("/cue/12/sliceMarkers");
+        let q = CueQuery::parse(&markers_query).unwrap();
+        assert!(matches!(q.kind, CueQueryKind::Cue { property: CueQueryProperty::SliceMarkers, .. }));
+        let count_query = query_message("/cue/12/sliceMarker/2/playCount");
+        let q = CueQuery::parse(&count_query).unwrap();
+        assert!(matches!(q.kind, CueQueryKind::Cue { property: CueQueryProperty::SlicePlayCount { index: 1 }, .. }));
+        let zero_index = query_message("/cue/12/sliceMarker/0/playCount");
+        assert!(CueQuery::parse(&zero_index).is_none());
+        let bad_prop = query_message("/cue/12/sliceMarker/2/time");
+        assert!(CueQuery::parse(&bad_prop).is_none());
+
+        // Reads: markers report {time seconds, playCount} with -1 = infinite.
+        let mut workspace = Workspace::new("Blue");
+        let mut cue = AudioCue::new();
+        cue.set_number(Some("12".into()));
+        cue.slices = SliceList { markers: vec![2000, 8000], play_counts: vec![1, PLAY_COUNT_INFINITE, 2] };
+        workspace.active_cue_list_mut().unwrap().push(Box::new(cue));
+        let mut plain = WaitCue::new();
+        plain.set_number(Some("13".into()));
+        let plain_id = plain.id();
+        workspace.active_cue_list_mut().unwrap().push(Box::new(plain));
+        let read = |address: &str| {
+            let message = query_message(address);
+            CueQuery::parse(&message).unwrap().read(&workspace, peer(), 0)
+        };
+        let markers = read("/cue/12/sliceMarkers").unwrap();
+        let array = markers.as_array().unwrap();
+        assert_eq!(array.len(), 2);
+        assert_eq!(array[0], serde_json::json!({ "time": 2.0, "playCount": 1 }));
+        assert_eq!(array[1], serde_json::json!({ "time": 8.0, "playCount": -1 }));
+        assert_eq!(read("/cue/12/sliceMarker/1/playCount").unwrap(), serde_json::json!(1));
+        assert_eq!(read("/cue/12/sliceMarker/2/playCount").unwrap(), serde_json::json!(-1));
+        // Slice 3 is the trailing segment after the last marker.
+        assert_eq!(read("/cue/12/sliceMarker/3/playCount").unwrap(), serde_json::json!(2));
+        assert_eq!(read("/cue/12/sliceMarker/4/playCount").unwrap(), serde_json::Value::Null);
+        // A cue without slices reads null and exposes no slice list.
+        assert_eq!(read("/cue/13/sliceMarkers").unwrap(), serde_json::Value::Null);
+        let cue_ref = workspace.active_cue_list().unwrap().get(&plain_id).unwrap();
+        assert!(cue_ref.slice_list().is_none());
     }
 
     #[test]

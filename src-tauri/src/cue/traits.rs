@@ -556,6 +556,16 @@ pub trait Cue: Send + std::any::Any {
     fn infinite_loop(&self) -> Option<bool> { None }
     fn set_infinite_loop(&mut self, _on: bool) {}
 
+    // QLab slice markers (`/cue/{n}/sliceMarkers`, `/cue/{n}/sliceMarker/{i}/playCount`).
+    /// QLab-style slice list of a media cue; `None` when the cue type has no slices.
+    fn slice_list(&self) -> Option<crate::cue::types::SliceList> { None }
+    /// Set the play count of slice segment `index` (0-based; segment *i* ends at
+    /// marker *i*). `PLAY_COUNT_INFINITE` vamps until a Devamp cue.
+    fn set_slice_play_count(&mut self, index: usize, play_count: u32) -> Result<(), String> {
+        let _ = (index, play_count);
+        Err("This cue has no slices.".to_owned())
+    }
+
     /// On-screen voice of a visual cue, when playing (for live writes).
     fn visual_voice_id(&self) -> Option<crate::engine::ring_command::VoiceId> { None }
     fn video_style(&self) -> Option<crate::engine::output_engine::LayerStyle> { None }
