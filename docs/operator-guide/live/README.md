@@ -16,6 +16,7 @@ Click **Show Mode** or press **F5**. The **Next GO** panel identifies the cue at
 | Stop the show | **Stop all** or **Esc** requests the normal stop across lists. The configured audio stop fade can still be audible. |
 | Cut immediately | **Hard stop** or two quick presses of **Esc** cuts audio and video immediately and resets cue state. DMX continues tracking its current look. |
 | Cut and take lights to black | Enable **Hard stop + blackout** for this workspace in **Preferences → General → Transport**. The separate transport button holds all DMX universes at zero until **Restore lights**. |
+| Mute whole input/output paths safely | Open **Overrides** on the transport bar and switch off DMX output, MIDI in/out, MSC in/out, external network input or timecode input; loopback traffic is never blocked. The same toggles answer QLab OSC messages such as `/overrides/toggleDmxOutput` from an allowlisted controller. Switch them back on before the next cue. |
 | Return to programming | Click **Show Mode** again or press **F5**. |
 
 QLab operators will recognize the distinction between selection and playback position, and the use of numbered cues to call the show. [QLab workspace reference](https://qlab.app/docs/v5/fundamentals/workspace/) · [QLab cue lists](https://qlab.app/docs/v5/fundamentals/cue-lists/)

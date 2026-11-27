@@ -692,6 +692,14 @@ export const dmxSetChannel = (workspaceId: string, universe: number, address: nu
   invoke<void>("dmx_set_channel", { workspaceId, universe, address, value });
 export const dmxSetBlackout = (on: boolean) => invoke<void>("dmx_set_blackout", { on });
 export const dmxGetBlackout = () => invoke<boolean>("dmx_get_blackout");
+
+// ---------------------------------------------------------------------------
+// Global engine overrides
+// ---------------------------------------------------------------------------
+export type GlobalOverrides = Record<string, boolean>;
+export const getGlobalOverrides = () => invoke<GlobalOverrides>("get_global_overrides");
+export const setGlobalOverride = (key: string, enabled: boolean) =>
+  invoke<void>("set_global_override", { key, enabled });
 export const dmxGetSnapshot = () => invoke<DmxUniverseSnapshot[]>("dmx_get_snapshot");
 
 // ---------------------------------------------------------------------------

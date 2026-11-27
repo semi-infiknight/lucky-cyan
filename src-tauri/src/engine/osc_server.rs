@@ -316,6 +316,10 @@ fn server_loop(
                         log::debug!("{label}: ignoring packet from non-allowlisted {src}");
                         continue;
                     }
+                    if !crate::engine::overrides::OVERRIDES.network_external_input() && !src.ip().is_loopback() {
+                        log::debug!("{label}: dropping external packet while the network input override is off");
+                        continue;
+                    }
                     let data = &buf[..n];
                     let Some(packet) = protocol.decode(data) else {
                         log::debug!("{label}: ignored malformed or unsupported packet");
@@ -436,6 +440,8 @@ enum OscAction<'a> {
     CueListRequest,
     /// Trigger a playhead feedback dump.
     PlayheadRequest,
+    /// Set or toggle a global engine override (QLab `/overrides/...`).
+    SetOverride { key: &'static str, value: Option<bool> },
     /// Address (or its arguments) does not map to any Inkue command.
     Unmatched,
 }
@@ -493,6 +499,15 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, app_handle: 
             let _ = app_handle.emit("osc-command", &payload);
             (true, true)
         }
+        OscAction::SetOverride { key, value } => {
+            let enabled = value
+                .unwrap_or_else(|| !crate::engine::overrides::OVERRIDES.get(key).unwrap_or(true));
+            if let Err(error) = crate::engine::overrides::OVERRIDES.set(key, enabled) {
+                log::warn!("Override {key}: {error}");
+            }
+            let _ = app_handle.emit("global-overrides-changed", crate::engine::overrides::OVERRIDES.snapshot());
+            (true, true)
+        }
         OscAction::CueListRequest => {
             crate::engine::osc_feedback::request_cue_list();
             (true, false)
@@ -527,7 +542,8 @@ fn authorized_action<'a>(addr: &'a str, args: &[rosc::OscType], explicitly_allow
     match action {
         OscAction::AddressedCue { workspace: Some(_), .. }
         | OscAction::AddressedCue { action: NetworkCueAction::Reset, .. }
-        | OscAction::WorkspaceTransport { .. } if !explicitly_allowed => OscAction::Unmatched,
+        | OscAction::WorkspaceTransport { .. }
+        | OscAction::SetOverride { .. } if !explicitly_allowed => OscAction::Unmatched,
         _ => action,
     }
 }
@@ -622,6 +638,9 @@ fn qlab_literal_cue_number(number: &str) -> bool {
 }
 
 fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a> {
+    if let Some(rest) = addr.strip_prefix("/overrides/") {
+        return parse_override_address(rest, args);
+    }
     if !args.is_empty() {
         return OscAction::Unmatched;
     }
@@ -703,6 +722,72 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         return OscAction::Unmatched;
     }
     OscAction::AddressedCue { workspace, number, action }
+}
+
+/// QLab application-level `/overrides/{toggleX|xxEnabled}[/toggle] [bool]`.
+/// With no argument (or `toggle`) the current value flips; otherwise the
+/// argument follows QLab's boolean rules (number != 0, or a string starting
+/// with Y/y/T/t/1-9 true, N/n/F/f/0 false).
+fn parse_override_address(rest: &str, args: &[rosc::OscType]) -> OscAction<'static> {
+    let (name, suffix) = match rest.split_once('/') {
+        Some((name, suffix)) => (name, Some(suffix)),
+        None => (rest, None),
+    };
+    if suffix.is_some() && suffix != Some("toggle") {
+        return OscAction::Unmatched;
+    }
+    let (core, toggle_name) = if let Some(core) = name.strip_prefix("toggle") {
+        (core, true)
+    } else if let Some(core) = name.strip_suffix("Enabled") {
+        (core, false)
+    } else {
+        return OscAction::Unmatched;
+    };
+    // The `toggle` prefix leaves the core capitalized ("DmxOutput"); the
+    // `Enabled` suffix form keeps QLab's camelCase ("dmxOutput").
+    let key = match core {
+        "dmxOutput" | "DmxOutput" => "dmx_output",
+        "midiInput" | "MidiInput" => "midi_input",
+        "midiOutput" | "MidiOutput" => "midi_output",
+        "mscInput" | "MscInput" => "msc_input",
+        "mscOutput" | "MscOutput" => "msc_output",
+        "networkExternalInput" | "NetworkExternalInput" => "network_external_input",
+        "timecodeInput" | "TimecodeInput" => "timecode_input",
+        _ => return OscAction::Unmatched,
+    };
+    let value = match args {
+        [] => None,
+        _ if toggle_name => return OscAction::Unmatched,
+        [one] => match one {
+            rosc::OscType::String(s) if s.eq_ignore_ascii_case("toggle") => None,
+            other => match qlab_bool(other) {
+                Some(value) => Some(value),
+                None => return OscAction::Unmatched,
+            },
+        },
+        _ => return OscAction::Unmatched,
+    };
+    OscAction::SetOverride { key, value }
+}
+
+/// QLab boolean coercion: any nonzero number is true; strings follow the
+/// yes/no/true/false prefix rules.
+fn qlab_bool(arg: &rosc::OscType) -> Option<bool> {
+    if let Some(number) = numeric_arg(std::slice::from_ref(arg)) {
+        return Some(number != 0.0);
+    }
+    if let rosc::OscType::String(text) = arg {
+        let first = text.chars().next()?;
+        return Some(match first {
+            'N' | 'n' | 'F' | 'f' | '0' => false,
+            'Y' | 'y' | 'T' | 't' | '1'..='9' => true,
+            _ => return None,
+        });
+    }
+    if let rosc::OscType::Bool(b) = arg {
+        return Some(*b);
+    }
+    None
 }
 
 const MAX_CUE_ADDRESS_NUMBER_BYTES: usize = 96;
@@ -1355,6 +1440,44 @@ mod tests {
         workspace.active_cue_list_mut().unwrap().set_playhead(None).unwrap();
         assert_eq!(resolve("/cue/playhead/stop", &workspace), None);
         assert_eq!(resolve("/cue/selected/start", &workspace), None);
+    }
+
+    #[test]
+    fn qlab_override_messages_resolve_are_gated_and_toggle() {
+        use crate::engine::overrides::GlobalOverrides;
+        assert!(matches!(resolve_action("/overrides/toggleDmxOutput", &[]),
+            OscAction::SetOverride { key: "dmx_output", value: None }));
+        assert!(matches!(resolve_action("/overrides/dmxOutputEnabled", &[rosc::OscType::Int(0)]),
+            OscAction::SetOverride { key: "dmx_output", value: Some(false) }));
+        assert!(matches!(resolve_action("/overrides/midiInputEnabled", &[rosc::OscType::String("no".into())]),
+            OscAction::SetOverride { key: "midi_input", value: Some(false) }));
+        assert!(matches!(resolve_action("/overrides/midiInputEnabled", &[rosc::OscType::String("yep".into())]),
+            OscAction::SetOverride { key: "midi_input", value: Some(true) }));
+        assert!(matches!(resolve_action("/overrides/networkExternalInputEnabled/toggle", &[]),
+            OscAction::SetOverride { key: "network_external_input", value: None }));
+        assert!(matches!(resolve_action("/overrides/timecodeInputEnabled", &[rosc::OscType::String("toggle".into())]),
+            OscAction::SetOverride { key: "timecode_input", value: None }));
+        assert!(matches!(resolve_action("/overrides/toggleMidiOutput", &[rosc::OscType::Int(1)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/overrides/toggleBogus", &[]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/overrides/dmxOutputEnabled", &[rosc::OscType::String("maybe".into())]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/overrides/dmxOutputEnabled/extra", &[]), OscAction::Unmatched));
+        // Control-level: an allowlisted sender only.
+        assert!(matches!(authorized_action("/overrides/toggleDmxOutput", &[], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/overrides/toggleDmxOutput", &[], true), OscAction::SetOverride { .. }));
+        assert!(parse_text_message(b"/overrides/toggleMidiInput").is_some());
+        assert!(parse_text_message(b"/overrides/dmxOutputEnabled 1").is_none());
+
+        // Toggle semantics on a local instance: None flips the current value,
+        // an explicit bool sets it.
+        let local = GlobalOverrides::new();
+        let OscAction::SetOverride { key, value } = resolve_action("/overrides/toggleMscOutput", &[]) else { panic!() };
+        let enabled = value.unwrap_or_else(|| !local.get(key).unwrap_or(true));
+        local.set(key, enabled).unwrap();
+        assert_eq!(local.get("msc_output"), Some(false));
+        let OscAction::SetOverride { key, value } = resolve_action("/overrides/mscOutputEnabled", &[rosc::OscType::Int(1)]) else { panic!() };
+        let enabled = value.unwrap_or_else(|| !local.get(key).unwrap_or(true));
+        local.set(key, enabled).unwrap();
+        assert_eq!(local.get("msc_output"), Some(true));
     }
 
     #[test]

@@ -333,6 +333,9 @@ fn listen(
             }
             let Some(&status) = message.first() else { return };
             let epoch = gate.capture();
+            if !crate::engine::overrides::OVERRIDES.midi_input() && is_channel_voice(status) {
+                return;
+            }
             if config.enabled && is_channel_voice(status) {
                 let owned = message.to_vec();
                 if let Ok(mut slot) = last_message.lock() {
@@ -341,8 +344,10 @@ fn listen(
                 if let Some(epoch) = epoch {
                     let _ = sender.send((epoch, MidiDeskInput::Voice(owned)));
                 }
-            } else if let Some((epoch, command)) = epoch.zip(msc_destination.and_then(|id| MscTransport::decode(message, id))) {
-                let _ = sender.send((epoch, MidiDeskInput::ShowControl(command)));
+            } else if crate::engine::overrides::OVERRIDES.msc_input() {
+                if let Some((epoch, command)) = epoch.zip(msc_destination.and_then(|id| MscTransport::decode(message, id))) {
+                    let _ = sender.send((epoch, MidiDeskInput::ShowControl(command)));
+                }
             }
         },
         (),

@@ -340,6 +340,7 @@ fn mtc_thread(
         "inkue-tc",
         move |_stamp, message, assembler| {
             if shutdown2.load(Ordering::Relaxed) { return; }
+            if !crate::engine::overrides::OVERRIDES.timecode_input() { return; }
             let Some(event) = decode_mtc_message(message, assembler) else { return };
             if let Ok(mut clock) = flywheel2.lock() {
                 clock.publish(&tx2, Some(event), Instant::now());
@@ -424,7 +425,11 @@ fn ltc_thread(
             mono.push(frame0);
         }
 
-        let positions = decoder.push(&mono);
+        let positions = if crate::engine::overrides::OVERRIDES.timecode_input() {
+            decoder.push(&mono)
+        } else {
+            Vec::new()
+        };
         if let Ok(mut clock) = flywheel.lock() {
             let now = Instant::now();
             clock.publish(&tx, None, now);

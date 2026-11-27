@@ -421,12 +421,13 @@ fn dmx_thread(cmd_rx: crossbeam_channel::Receiver<DmxCommand>, snapshot: Arc<Mut
             }
         }
 
-        // Transmit each universe (send-on-change + keepalive).
+        // Transmit each universe (send-on-change + keepalive). The global DMX
+        // output override suppresses transmission but keeps the monitor live.
         for active in sinks.iter_mut() {
             let data = state.rendered(active.universe);
             let changed = active.last.map(|(_, prev)| prev != data).unwrap_or(true);
             let due = active.last.map(|(t, _)| now.duration_since(t) >= KEEPALIVE).unwrap_or(true);
-            if changed || due {
+            if (changed || due) && crate::engine::overrides::OVERRIDES.dmx_output() {
                 active.sequence = active.sequence.wrapping_add(1);
                 let _ = active.sink.send(active.sequence, &data);
                 active.last = Some((now, data));

@@ -224,7 +224,7 @@ impl MidiRamp {
 /// Port open/close is negligible latency for fire-and-forget MIDI events.
 pub fn send_midi_messages(messages: &[MidiMessage]) -> Result<()> {
     let mut errors = Vec::new();
-    if messages.is_empty() {
+    if messages.is_empty() || !crate::engine::overrides::OVERRIDES.midi_output() {
         return Ok(());
     }
     let encoded = messages.iter().map(MidiMessage::to_bytes).collect::<Result<Vec<_>>>()?;

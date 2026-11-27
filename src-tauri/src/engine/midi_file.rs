@@ -505,7 +505,7 @@ fn play<S: MidiSink, C: Clock>(
         .events
         .partition_point(|e| scale(e.at, rate) < played_offset);
     for event in &sequence.events[..start_index] {
-        if event.kind == EventKind::ChannelState {
+        if event.kind == EventKind::ChannelState && crate::engine::overrides::OVERRIDES.midi_output() {
             let _ = sink.send(&event.data);
         }
     }
@@ -518,6 +518,9 @@ fn play<S: MidiSink, C: Clock>(
 
     for event in &sequence.events[start_index..] {
         if !wait_until(&clock, &mut origin, scale(event.at, rate), &control) {
+            break;
+        }
+        if !crate::engine::overrides::OVERRIDES.midi_output() {
             break;
         }
         if let Err(e) = sink.send(&event.data) {

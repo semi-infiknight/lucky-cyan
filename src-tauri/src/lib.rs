@@ -67,6 +67,7 @@ use commands::{
         get_cue_tc_trigger, set_cue_tc_trigger,
         get_cuelist_tc_config, set_cuelist_tc_config,
     },
+    override_cmds::{get_global_overrides, set_global_override},
     light_cmds::{
         add_fixture, add_fixture_group, capture_live_targets, dmx_clear_fixtures, dmx_get_blackout,
         dmx_get_outputs, dmx_get_snapshot, dmx_set_blackout, dmx_set_channel, dmx_set_fixture_cmy,
@@ -779,6 +780,7 @@ pub fn run() {
             dmx_get_outputs,
             dmx_set_channel,
             dmx_set_blackout,
+            get_global_overrides, set_global_override,
             dmx_get_blackout,
             dmx_get_snapshot,
             dmx_test_fixture,

@@ -4,11 +4,13 @@ import { dmxGetBlackout, dmxSetBlackout, go, hardStopAll, hardStopBlackout, stop
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useTransportStore } from "../../stores/transportStore";
 import { useTriggerOverride } from "../../hooks/useTriggerOverride";
+import { useGlobalOverrides } from "../../hooks/useGlobalOverrides";
 import { OscMonitor } from "../Osc/OscMonitor";
 import { CueMonitor } from "../Operator/CueMonitor";
 import { LightingPanel } from "../Lighting/LightingPanel";
 import { TcStatusIndicator } from "../Timecode/TcStatusIndicator";
 import { BlackoutStatus, HardStopBlackoutButton } from "./BlackoutControls";
+import { OverrideControls } from "./OverrideControls";
 import { MasterOutput } from "./MasterOutput";
 import { nextGoCue } from "../ShowMode/runSheet";
 import "../ShowMode/desk.css";
@@ -31,6 +33,7 @@ export function TransportBar({ onRefresh, showMode, onInspectCue }: {
   const combinedEnabled = useWorkspaceStore(s => s.generalPrefs.show_hard_stop_blackout);
   const midiOverride = useTriggerOverride("midi");
   const tcOverride = useTriggerOverride("timecode");
+  const globalOverrides = useGlobalOverrides();
   const [blackout, setBlackout] = useState<boolean | null>(null);
   const blackoutRead = useRef(0);
   const readBlackout = useCallback(async () => {
@@ -126,6 +129,7 @@ export function TransportBar({ onRefresh, showMode, onInspectCue }: {
 
     <div className="desk-output-tools">
       <BlackoutStatus blackout={blackout} restore={() => setDmxBlackout(false)} />
+      <OverrideControls {...globalOverrides} />
       {midiOverride.suspended && <div className="desk-trigger-status">
         <strong role="status">Incoming MIDI suspended</strong>
         <button type="button" disabled={midiOverride.pending}
