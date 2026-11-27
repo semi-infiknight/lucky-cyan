@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use crate::cue::{traits::Cue, types::CueId};
 use crate::commands::transport_cmds::{
-    address_numbered_network_cue, control_network_list_pause, control_network_workspace,
-    NetworkCueAction, NetworkPauseAction, NetworkWorkspaceAction,
+    address_network_cue_pattern, address_numbered_network_cue, control_network_list_pause,
+    control_network_workspace, NetworkCueAction, NetworkPauseAction, NetworkWorkspaceAction,
 };
 use crate::preferences::OscReceiveConfig;
 use crate::show::Workspace;
@@ -443,6 +443,9 @@ enum OscAction<'a> {
     Command(serde_json::Value),
     /// Resolve the target and run it under the workspace lock.
     AddressedCue { workspace: Option<WorkspaceSelector<'a>>, number: &'a str, action: NetworkCueAction },
+    /// QLab wildcard cue address (`/cue/*/stop`, `/cue/*1/reset`): applies to
+    /// every matching top-level cue. Transport verbs only; writes allowed.
+    AddressedCuePattern { workspace: Option<WorkspaceSelector<'a>>, pattern: &'a str, action: NetworkCueAction },
     WorkspaceTransport { workspace: Option<WorkspaceSelector<'a>>, action: NetworkWorkspaceAction<'a> },
     /// Use the current native states in the active list under the workspace lock.
     ListPause(NetworkPauseAction),
@@ -494,6 +497,16 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, app_handle: 
                     resolve_network_target(show, workspace, number)
                 }) {
                     log::warn!("Network cue {}: {error}", msg.addr);
+                }
+            }
+            (true, true)
+        }
+        OscAction::AddressedCuePattern { workspace, pattern, action } => {
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                if let Err(error) = address_network_cue_pattern(&state, app_handle, action, |show| {
+                    resolve_network_pattern(show, workspace, pattern)
+                }) {
+                    log::warn!("Network cue pattern {}: {error}", msg.addr);
                 }
             }
             (true, true)
@@ -554,10 +567,13 @@ fn authorized_action<'a>(addr: &'a str, args: &[rosc::OscType], explicitly_allow
     match action {
         OscAction::AddressedCue { workspace: Some(_), .. }
         | OscAction::AddressedCue { action: NetworkCueAction::Reset, .. }
+        | OscAction::AddressedCuePattern { workspace: Some(_), .. }
+        | OscAction::AddressedCuePattern { action: NetworkCueAction::Reset, .. }
         | OscAction::WorkspaceTransport { .. }
         | OscAction::SetOverride { .. } if !explicitly_allowed => OscAction::Unmatched,
         // Property writes edit saved show data: control-level only.
-        OscAction::AddressedCue { action, .. } if !explicitly_allowed && action.is_write() => OscAction::Unmatched,
+        OscAction::AddressedCue { action, .. }
+        | OscAction::AddressedCuePattern { action, .. } if !explicitly_allowed && action.is_write() => OscAction::Unmatched,
         _ => action,
     }
 }
@@ -757,6 +773,24 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             },
         }
     } else if let Some((number, action)) = addr.strip_prefix("/cue/").and_then(|cue| cue.split_once('/')) {
+        if number.contains('*') {
+            // Wildcard target: only stop/pause/resume/reset and property writes;
+            // never start or select every cue at once.
+            let action = match action {
+                "stop" if args.is_empty() => NetworkCueAction::Stop,
+                "reset" if args.is_empty() => NetworkCueAction::Reset,
+                "pause" if args.is_empty() => NetworkCueAction::SetPause(NetworkPauseAction::Pause),
+                "resume" if args.is_empty() => NetworkCueAction::SetPause(NetworkPauseAction::Resume),
+                verb => match cue_write_action(verb, args) {
+                    Some(write) if write.is_write() => write,
+                    _ => return OscAction::Unmatched,
+                },
+            };
+            if workspace.is_some() && number.len() > MAX_CUE_ADDRESS_NUMBER_BYTES {
+                return OscAction::Unmatched;
+            }
+            return OscAction::AddressedCuePattern { workspace, pattern: number, action };
+        }
         match action {
             "start" if args.is_empty() => (number, NetworkCueAction::Start),
             "stop" if args.is_empty() => (number, NetworkCueAction::Stop),
@@ -909,6 +943,71 @@ impl<'a> WorkspaceSelector<'a> {
                     .and_then(std::ffi::OsStr::to_str) == Some(name),
         }
     }
+}
+
+/// QLab wildcard match: `*` matches any (possibly empty) run of characters;
+/// every other character is literal. No `*` means an exact match.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut mark) = (usize::MAX, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = pi;
+            mark = ti;
+            pi += 1;
+        } else if star != usize::MAX {
+            pi = star + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// Resolve a wildcard cue address to every matching top-level cue. Unscoped
+/// patterns search the active list; workspace-scoped patterns search every
+/// list's top level (never nested children, so a remote can't bypass a
+/// parent group's transport).
+fn resolve_network_pattern(
+    show: &Workspace,
+    workspace: Option<WorkspaceSelector<'_>>,
+    pattern: &str,
+) -> Vec<(usize, CueId)> {
+    let mut out = Vec::new();
+    let mut push_matching = |index: usize, cues: &[Box<dyn Cue>]| {
+        if out.len() + cues.len() > MAX_SCOPED_ROWS {
+            return;
+        }
+        for cue in cues {
+            if cue.number().is_some_and(|number| glob_match(pattern, number)) {
+                out.push((index, cue.id()));
+            }
+        }
+    };
+    if let Some(selector) = workspace {
+        if !selector.matches(show) {
+            return out;
+        }
+        for (index, list) in show.cue_lists.iter().enumerate() {
+            push_matching(index, &list.cues);
+        }
+    } else {
+        let Some(index) = show.cue_lists.iter().position(|list| list.id == show.active_cue_list_id) else {
+            return out;
+        };
+        push_matching(index, &show.cue_lists[index].cues);
+    }
+    out
 }
 
 fn resolve_network_target(
@@ -1533,7 +1632,7 @@ mod tests {
         assert!(parse_text_message(top.as_bytes()).is_some());
 
         for address in [
-            "/cue/playhead/go", "/cue/selected/seek", "/cue/playhead/", "/cue/all/stop", "/cue/*/stop",
+            "/cue/playhead/go", "/cue/selected/seek", "/cue/playhead/", "/cue/all/stop", "/cue/*/start",
             "/cue_id/not-a-uuid/stop", "/cue_id/202.1/stop",
         ] {
             assert!(matches!(resolve_action(address, &[]), OscAction::Unmatched), "{address}");
@@ -1640,6 +1739,86 @@ mod tests {
         assert_eq!(parsed.args, vec![s("LX5")]);
         assert!(parse_text_message(b"/cue/5/qName LX 5").is_none(), "plain-text arguments cannot contain spaces");
         assert!(parse_text_message(b"/cue/5/stop 1").is_none());
+    }
+
+    #[test]
+    fn qlab_wildcard_cue_addresses_match_numbers_and_apply_safely() {
+        use crate::cue::{group_cue::GroupCue, wait_cue::WaitCue};
+
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("*1", "101"));
+        assert!(glob_match("1*", "1"));
+        assert!(glob_match("ham*", "hamlet"));
+        assert!(glob_match("h*t", "hamlet"));
+        assert!(glob_match("h*t", "ht"));
+        assert!(!glob_match("h*t", "ham"));
+        assert!(!glob_match("*1", "11a"));
+        assert!(glob_match("", ""));
+        assert!(glob_match("*", ""));
+
+        let mut workspace = Workspace::new("Blue");
+        let mut a = WaitCue::new();
+        a.set_number(Some("101".into()));
+        let a_id = a.id();
+        let mut b = WaitCue::new();
+        b.set_number(Some("201".into()));
+        let b_id = b.id();
+        let mut c = WaitCue::new();
+        c.set_number(Some("202".into()));
+        let c_id = c.id();
+        let mut child = WaitCue::new();
+        child.set_number(Some("101".into()));
+        let mut group = GroupCue::new();
+        group.children.push(Box::new(child));
+        let list = workspace.active_cue_list_mut().unwrap();
+        list.auto_renumber = false;
+        list.push(Box::new(a));
+        list.push(Box::new(b));
+        list.push(Box::new(c));
+        list.push(Box::new(group));
+
+        // Transport verbs on patterns resolve to AddressedCuePattern.
+        for (address, expected) in [
+            ("/cue/*/stop", NetworkCueAction::Stop),
+            ("/cue/2*/pause", NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
+            ("/cue/*/resume", NetworkCueAction::SetPause(NetworkPauseAction::Resume)),
+            ("/cue/*/reset", NetworkCueAction::Reset),
+        ] {
+            assert!(matches!(resolve_action(address, &[]),
+                OscAction::AddressedCuePattern { workspace: None, pattern, action } if action == expected && pattern == address.strip_prefix("/cue/").unwrap().split('/').next().unwrap()),
+                "{address}");
+        }
+        // Never start/select every cue; writes need their one argument; args on verbs stay out.
+        for address in ["/cue/*/start", "/cue/*/select", "/cue/*/go", "/cue/*/stop 1"] {
+            let args: &[rosc::OscType] = if address.ends_with(" 1") { &[rosc::OscType::Int(1)] } else { &[] };
+            assert!(matches!(resolve_action(address.trim_end_matches(" 1"), args), OscAction::Unmatched), "{address}");
+        }
+        assert!(matches!(resolve_action("/cue/*/armed", &[rosc::OscType::Int(0)]),
+            OscAction::AddressedCuePattern { action, .. } if action.is_write()));
+        assert!(matches!(resolve_action("/cue/*/armed", &[]), OscAction::Unmatched));
+
+        // Resolution: `*` hits all three top-level cues, never the nested duplicate.
+        let all = resolve_network_pattern(&workspace, None, "*");
+        assert_eq!(all.len(), 3);
+        assert!(all.contains(&(0, a_id)) && all.contains(&(0, b_id)) && all.contains(&(0, c_id)));
+        let twos = resolve_network_pattern(&workspace, None, "2*");
+        assert_eq!(twos, vec![(0, b_id), (0, c_id)]);
+        assert!(resolve_network_pattern(&workspace, None, "9*").is_empty());
+        // Scoped pattern searches every list's top level.
+        let scoped = resolve_network_pattern(&workspace, Some(WorkspaceSelector::Name("Blue")), "*");
+        assert_eq!(scoped.len(), 3);
+        assert!(resolve_network_pattern(&workspace, Some(WorkspaceSelector::Name("Other")), "*").is_empty());
+
+        // Gating mirrors single-cue rules: unscoped stop is open, reset and writes need the allowlist.
+        assert!(matches!(authorized_action("/cue/*/stop", &[], false),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::Stop, .. }));
+        assert!(matches!(authorized_action("/cue/*/reset", &[], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/*/armed", &[rosc::OscType::Int(1)], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/workspace/Blue/cue/*/stop", &[], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/workspace/Blue/cue/*/stop", &[], true),
+            OscAction::AddressedCuePattern { workspace: Some(_), .. }));
+        assert!(parse_text_message(b"/cue/*/stop").is_some());
+        assert!(parse_text_message(b"/cue/*/start").is_none());
     }
 
     #[test]
@@ -1851,7 +2030,7 @@ mod tests {
         for input in [
             "", "/go 2", "/inkue/go\0", "/inkue/go\n/inkue/stop", "/inkue/go /inkue/stop",
             "/inkue/cue//go", "/inkue/cue/*/go", "/cue/all/stop", "/cue/102/start 1",
-            "/cue/*/start", "/inkue/cue/102/seek/relative/extra 1", "/inkue/cue/102/seek",
+            "/cue/*/start", "/cue/*/stop 1", "/inkue/cue/102/seek/relative/extra 1", "/inkue/cue/102/seek",
             "/playhead/active", "/playbackPosition/previous/extra", "/playhead/1.5 1", "/playhead/*", "/playhead/1.5/extra",
             "/inkue/cue/102/seek NaN", "/inkue/cue/102/seek/percent 1.2", "/unknown",
         ] {
@@ -1935,9 +2114,9 @@ mod tests {
                     if number == cue_number && action == expected), "{address}");
             }
         }
-        for invalid in ["/inkue/cue//start", "/cue/all/stop", "/playhead/next/extra", "/cue/*/stop",
+        for invalid in ["/inkue/cue//start", "/cue/all/stop", "/playhead/next/extra", "/cue/*/start",
             "/playhead/1.5/extra", "/select/1.5", "/workspace/show/playhead/1.5", "/cue/1.5/go",
-            "/cue/all/resume", "/cue/*/pause", "/cue/3/resume/extra", "/cue/selected/go"]
+            "/cue/all/resume", "/cue/*/resume 1", "/cue/3/resume/extra", "/cue/selected/go"]
         {
             assert!(!is_matched(invalid, &[]), "{invalid}");
         }

@@ -233,7 +233,7 @@ pub(crate) fn address_numbered_network_cue(
     let mut transport = Transport::new(workspace_context(state, &ws));
     let cue_list = &mut ws.cue_lists[index];
 
-    match action {
+    match &action {
         NetworkCueAction::Go | NetworkCueAction::Start => {
             go_cue_in_list(&mut transport, cue_list, id, action == NetworkCueAction::Start, app_handle)
         }
@@ -244,23 +244,109 @@ pub(crate) fn address_numbered_network_cue(
             let _ = app_handle.emit("cue-list-refresh", ());
             result
         }
-        NetworkCueAction::SetPause(action) => network_pause_in_list(&transport.context, cue_list, Some(id), action, app_handle),
+        NetworkCueAction::SetPause(pause) => network_pause_in_list(&transport.context, cue_list, Some(id), *pause, app_handle),
+        write if write.is_write() => apply_write(&mut ws, index, id, write, app_handle),
+        _ => Ok(()),
+    }
+}
+
+/// Apply a wildcard (`/cue/*/...`) action to every resolved top-level cue.
+/// Start/Select/Go never reach here — the OSC parser rejects them on patterns.
+pub(crate) fn address_network_cue_pattern(
+    state: &AppState,
+    app_handle: &tauri::AppHandle,
+    action: NetworkCueAction,
+    resolve: impl FnOnce(&Workspace) -> Vec<(usize, CueId)>,
+) -> Result<(), String> {
+    let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    let targets = resolve(&ws);
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let mut transport = Transport::new(workspace_context(state, &ws));
+    let mut first_error: Option<String> = None;
+    let mut wrote = false;
+    for (index, id) in targets {
+        let result = match &action {
+            NetworkCueAction::Stop => {
+                let list = &mut ws.cue_lists[index];
+                stop_cue_in_list(&mut transport, list, id, app_handle)
+            }
+            NetworkCueAction::Reset => {
+                let list = &mut ws.cue_lists[index];
+                transport.reset_cue(list, id).map_err(|error| error.to_string())
+            }
+            NetworkCueAction::SetPause(pause) => {
+                let list = &mut ws.cue_lists[index];
+                network_pause_in_list(&transport.context, list, Some(id), *pause, app_handle)
+            }
+            write if write.is_write() => {
+                match write_edit(write) {
+                    Some(edit) => {
+                        if edit_cue_field(&mut ws, index, id, edit) {
+                            wrote = true;
+                        }
+                        Ok(())
+                    }
+                    None => Ok(()),
+                }
+            }
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+    }
+    if wrote {
+        ws.mark_modified();
+        let _ = app_handle.emit("cue-list-refresh", ());
+        let _ = app_handle.emit("workspace-modified", ());
+    }
+    if matches!(action, NetworkCueAction::Reset) {
+        let _ = app_handle.emit("cue-list-refresh", ());
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+type CueEdit<'a> = Box<dyn FnOnce(&mut dyn Cue) + 'a>;
+
+/// Map a property-write action to the cue edit it performs.
+fn write_edit(action: &NetworkCueAction) -> Option<CueEdit<'_>> {
+    match action {
         NetworkCueAction::SetPreWait(secs) => {
-            apply_cue_write(&mut ws, index, id, |cue| cue.set_pre_wait(std::time::Duration::from_secs_f64(secs.max(0.0))), app_handle)
+            let secs = *secs;
+            Some(Box::new(move |cue| cue.set_pre_wait(std::time::Duration::from_secs_f64(secs.max(0.0)))))
         }
         NetworkCueAction::SetPostWait(secs) => {
-            apply_cue_write(&mut ws, index, id, |cue| cue.set_post_wait(std::time::Duration::from_secs_f64(secs.max(0.0))), app_handle)
+            let secs = *secs;
+            Some(Box::new(move |cue| cue.set_post_wait(std::time::Duration::from_secs_f64(secs.max(0.0)))))
         }
         NetworkCueAction::SetArmed(armed) => {
-            apply_cue_write(&mut ws, index, id, |cue| cue.set_disabled(!armed), app_handle)
+            let armed = *armed;
+            Some(Box::new(move |cue| cue.set_disabled(!armed)))
         }
         NetworkCueAction::SetQName(name) => {
             let name = name.clone();
-            apply_cue_write(&mut ws, index, id, move |cue| cue.set_name(name), app_handle)
+            Some(Box::new(move |cue| cue.set_name(name)))
         }
         NetworkCueAction::SetContinueMode(mode) => {
-            apply_cue_write(&mut ws, index, id, move |cue| cue.set_continue_mode(mode), app_handle)
+            let mode = *mode;
+            Some(Box::new(move |cue| cue.set_continue_mode(mode)))
         }
+        _ => None,
+    }
+}
+
+fn apply_write(
+    ws: &mut Workspace,
+    index: usize,
+    id: CueId,
+    action: &NetworkCueAction,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    match write_edit(action) {
+        Some(edit) => apply_cue_write(ws, index, id, edit, app_handle),
+        None => Ok(()),
     }
 }
 
