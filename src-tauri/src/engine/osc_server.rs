@@ -6,7 +6,7 @@
 //! - Native transport handles workspace commands and addressed cue actions.
 //! - A few binary OSC queries reply directly to an explicitly allowlisted peer.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -345,11 +345,62 @@ fn server_loop(
                         continue;
                     }
                     crate::engine::osc_updates::touch(src);
+                    if let rosc::OscPacket::Message(message) = &packet {
+                        if let OscAction::AlwaysReply(on) = resolve_action(&message.addr, &message.args) {
+                            set_always_reply(src, on);
+                        }
+                        touch_always_reply(src);
+                        // Queries already get a unicast reply above; answer every
+                        // other message from an alwaysReply client.
+                        if always_reply_enabled(src) && CueQuery::parse(message).is_none() {
+                            let matched = !matches!(
+                                resolve_action(&message.addr, &message.args),
+                                OscAction::Unmatched
+                            );
+                            let json = serde_json::json!({
+                                "address": message.addr,
+                                "status": if matched { "ok" } else { "error" },
+                            });
+                            if let Ok(bytes) = rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
+                                addr: format!("/reply{}", message.addr),
+                                args: vec![rosc::OscType::String(json.to_string())],
+                            })) {
+                                let _ = socket.send_to(&bytes, src);
+                            }
+                        }
+                    }
                     on_packet(&packet, !config.allowed_ips.is_empty(), src);
                 }
                 Err(e) if is_timeout(&e) => {}
                 Err(e) => log::warn!("{label}: recv error: {e}"),
             }
+        }
+    }
+}
+
+/// Clients that sent `/alwaysReply 1` get a `/reply{addr}` for every message.
+/// Same 61 s UDP keepalive as `/updates` subscribers (any packet refreshes).
+static ALWAYS_REPLY: Mutex<Option<HashMap<SocketAddr, Instant>>> = Mutex::new(None);
+
+fn set_always_reply(addr: SocketAddr, on: bool) {
+    if let Ok(mut guard) = ALWAYS_REPLY.lock() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        if on { map.insert(addr, Instant::now()); } else { map.remove(&addr); }
+    }
+}
+
+fn always_reply_enabled(addr: SocketAddr) -> bool {
+    let Ok(mut guard) = ALWAYS_REPLY.lock() else { return false };
+    let Some(map) = guard.as_mut() else { return false };
+    let now = Instant::now();
+    map.retain(|_, seen| now.duration_since(*seen) < Duration::from_secs(61));
+    map.contains_key(&addr)
+}
+
+fn touch_always_reply(addr: SocketAddr) {
+    if let Ok(mut guard) = ALWAYS_REPLY.lock() {
+        if let Some(map) = guard.as_mut() {
+            if let Some(seen) = map.get_mut(&addr) { *seen = Instant::now(); }
         }
     }
 }
@@ -408,7 +459,8 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
             // One argument for QLab cue property writes (`/cue/5/preWait 3`,
             // `/cue/5/qName LX`); numeric when it parses, string otherwise.
             [one] if address.starts_with("/cue/") || address.starts_with("/cue_id/")
-                || address == "/updates" || address.ends_with("/updates") => {
+                || address == "/updates" || address.ends_with("/updates")
+                || address == "/alwaysReply" || address.ends_with("/alwaysReply") => {
                 match one.parse::<f64>() {
                     Ok(value) if (value * 1000.0).is_finite() => vec![rosc::OscType::Double(value)],
                     _ => vec![rosc::OscType::String((*one).to_owned())],
@@ -455,6 +507,8 @@ enum OscAction<'a> {
     Heartbeat,
     /// QLab `/updates {0|1}`: subscribe/unsubscribe the sender to push updates.
     Updates(bool),
+    /// QLab `/alwaysReply {0|1}`: reply to every message from this sender.
+    AlwaysReply(bool),
     /// Trigger a full cue-list feedback dump.
     CueListRequest,
     /// Trigger a playhead feedback dump.
@@ -528,6 +582,7 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, src: SocketA
             crate::engine::osc_updates::set_subscription(src, enabled);
             (true, false)
         }
+        OscAction::AlwaysReply(_) => (true, false),
         OscAction::Command(payload) => {
             let _ = app_handle.emit("osc-command", &payload);
             (true, true)
@@ -717,7 +772,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         .or_else(|| addr.strip_prefix("/cue_id/"))
         .and_then(|rest| rest.split_once('/'))
         .is_some_and(|(_, verb)| matches!(verb, "preWait" | "postWait" | "armed" | "qName" | "continueMode"));
-    let updates_arg = addr == "/updates" || addr.ends_with("/updates");
+    let updates_arg = addr == "/updates" || addr.ends_with("/updates")
+        || addr == "/alwaysReply" || addr.ends_with("/alwaysReply");
     if !args.is_empty() && !cue_write && !updates_arg {
         return OscAction::Unmatched;
     }
@@ -728,12 +784,13 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
     if addr == "/thump" {
         return OscAction::Heartbeat;
     }
-    // QLab `/updates {bool}` works at any access level and may be workspace-scoped.
-    if addr == "/updates" {
+    // QLab `/alwaysReply {bool}` and `/updates {bool}` work at any access level.
+    if addr == "/alwaysReply" || addr == "/updates" {
         let _ = workspace;
         return match args {
             [one] => match qlab_bool(one) {
-                Some(on) => OscAction::Updates(on),
+                Some(on) if addr == "/updates" => OscAction::Updates(on),
+                Some(on) => OscAction::AlwaysReply(on),
                 None => OscAction::Unmatched,
             },
             _ => OscAction::Unmatched,
@@ -1946,6 +2003,133 @@ mod tests {
         assert!(matches!(resolve_action("/updates/extra", &[rosc::OscType::Int(1)]), OscAction::Unmatched));
         assert!(parse_text_message(b"/updates 1").is_some());
         assert!(parse_text_message(b"/updates").is_none());
+    }
+
+    #[test]
+    fn qlab_always_reply_resolves_at_any_access_level() {
+        assert!(matches!(resolve_action("/alwaysReply", &[rosc::OscType::Int(1)]), OscAction::AlwaysReply(true)));
+        assert!(matches!(resolve_action("/alwaysReply", &[rosc::OscType::String("no".into())]), OscAction::AlwaysReply(false)));
+        assert!(matches!(resolve_action("/alwaysReply", &[rosc::OscType::Bool(false)]), OscAction::AlwaysReply(false)));
+        assert!(matches!(resolve_action("/workspace/Blue/alwaysReply", &[rosc::OscType::Double(1.0)]), OscAction::AlwaysReply(true)));
+        // Any access level: not gated by the allowlist, unlike transport/writes.
+        assert!(matches!(authorized_action("/alwaysReply", &[rosc::OscType::Int(1)], false), OscAction::AlwaysReply(true)));
+        assert!(matches!(authorized_action("/workspace/Blue/alwaysReply", &[rosc::OscType::Int(0)], false), OscAction::AlwaysReply(false)));
+        assert!(matches!(resolve_action("/alwaysReply", &[]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/alwaysReply", &[rosc::OscType::String("maybe".into())]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/alwaysReply", &[rosc::OscType::Int(1), rosc::OscType::Int(0)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/alwaysReply/extra", &[rosc::OscType::Int(1)]), OscAction::Unmatched));
+        let parsed = parse_text_message(b"/alwaysReply 1").unwrap();
+        assert!(matches!(resolve_action(&parsed.addr, &parsed.args), OscAction::AlwaysReply(true)));
+        assert!(parse_text_message(b"/alwaysReply true").is_some());
+        assert!(parse_text_message(b"/alwaysReply").is_none());
+        assert!(parse_text_message(b"/alwaysReply 1 0").is_none());
+    }
+
+    #[test]
+    fn always_reply_registry_tracks_senders_and_expires_after_the_keepalive_window() {
+        // Ports below the ephemeral range never collide with real sockets.
+        let peer: SocketAddr = (Ipv4Addr::LOCALHOST, 9).into();
+        let stale: SocketAddr = (Ipv4Addr::LOCALHOST, 10).into();
+        set_always_reply(peer, true);
+        assert!(always_reply_enabled(peer));
+        assert!(!always_reply_enabled(stale));
+        touch_always_reply(peer);
+        assert!(always_reply_enabled(peer));
+        set_always_reply(peer, false);
+        assert!(!always_reply_enabled(peer));
+        // Entries idle longer than the 61 s keepalive are pruned on read.
+        set_always_reply(stale, true);
+        if let Ok(mut guard) = ALWAYS_REPLY.lock() {
+            let old = Instant::now().checked_sub(Duration::from_secs(120)).unwrap();
+            guard.as_mut().unwrap().insert(stale, old);
+        }
+        assert!(!always_reply_enabled(stale));
+        if let Ok(guard) = ALWAYS_REPLY.lock() {
+            assert!(!guard.as_ref().unwrap().contains_key(&stale));
+        }
+    }
+
+    #[test]
+    fn always_reply_clients_get_a_reply_for_every_message_until_they_opt_out() {
+        let (status_tx, statuses) = crossbeam_channel::unbounded();
+        let protocol = Protocol::Osc;
+        let config = OscReceiveConfig {
+            enabled: true,
+            port: 0,
+            allowed_ips: vec!["127.0.0.1".into()],
+            ..OscReceiveConfig::default()
+        };
+        let listener = Listener::spawn(
+            protocol, protocol.settings(&config), || Ipv4Addr::LOCALHOST.into(),
+            move |status| { let _ = status_tx.send(status.clone()); },
+            |_, _, _| {},
+            |_| Some(rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
+                addr: "/reply/cue/101/number".into(),
+                args: vec![rosc::OscType::String("canned".into())],
+            })).unwrap()),
+        );
+        let OscListenerStatus::Listening { address } = statuses.recv_timeout(Duration::from_secs(2)).unwrap() else {
+            panic!("expected an OSC socket");
+        };
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        sender.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut response = [0; 1024];
+        let send = |addr: &str, args: Vec<rosc::OscType>| {
+            let packet = rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
+                addr: addr.into(), args,
+            })).unwrap();
+            sender.send_to(&packet, address).unwrap();
+        };
+        let recv_reply = |response: &mut [u8; 1024]| -> (String, String) {
+            let (length, origin) = sender.recv_from(response).unwrap();
+            assert_eq!(origin, address);
+            let (remaining, rosc::OscPacket::Message(message)) = rosc::decoder::decode_udp(&response[..length]).unwrap() else {
+                panic!("expected a single OSC reply");
+            };
+            assert!(remaining.is_empty());
+            let [rosc::OscType::String(json)] = message.args.as_slice() else { panic!("expected JSON data") };
+            (message.addr, json.clone())
+        };
+        let status_of = |json: &str| serde_json::from_str::<serde_json::Value>(json).unwrap()["status"].clone();
+
+        // Without opting in, no replies are sent.
+        send("/thump", vec![]);
+        sender.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        assert!(sender.recv_from(&mut response).is_err());
+        sender.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+        // `/alwaysReply 1` registers the sender and is itself acknowledged.
+        send("/alwaysReply", vec![rosc::OscType::Int(1)]);
+        let (addr, json) = recv_reply(&mut response);
+        assert_eq!(addr, "/reply/alwaysReply");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            serde_json::json!({"address": "/alwaysReply", "status": "ok"}));
+
+        // Every following message gets a reply; unmatched ones report an error.
+        send("/go", vec![]);
+        let (addr, json) = recv_reply(&mut response);
+        assert_eq!(addr, "/reply/go");
+        assert_eq!(status_of(&json), "ok");
+        send("/bogus", vec![]);
+        let (addr, json) = recv_reply(&mut response);
+        assert_eq!(addr, "/reply/bogus");
+        assert_eq!(status_of(&json), "error");
+
+        // Queries keep their dedicated reply and are not answered twice.
+        send("/cue/101/number", vec![]);
+        let (addr, json) = recv_reply(&mut response);
+        assert_eq!(addr, "/reply/cue/101/number");
+        assert_eq!(json, "canned");
+        sender.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        assert!(sender.recv_from(&mut response).is_err(), "a query must not also get an alwaysReply packet");
+        sender.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+        // `/alwaysReply 0` unregisters the sender: no further replies.
+        send("/alwaysReply", vec![rosc::OscType::Int(0)]);
+        send("/panic", vec![]);
+        sender.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        assert!(sender.recv_from(&mut response).is_err());
+        listener.stop();
     }
 
     #[test]
