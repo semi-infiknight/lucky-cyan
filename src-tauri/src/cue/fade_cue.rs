@@ -334,6 +334,9 @@ pub struct FadeCue {
     pub target_cue_ids: Vec<CueId>,
     /// Display labels kept in sync with target_cue_ids (for inspector).
     pub target_cue_numbers: Vec<String>,
+    /// Temporary target set by a Target cue or OSC `tempCueTargetNumber/ID`.
+    /// Never part of the saved document.
+    temporary_target: Option<CueId>,
     /// Target audio volume in dB (−60 = silence, 0 = unity).
     pub target_volume_db: f64,
     pub patch_target_id: Option<Uuid>,
@@ -445,6 +448,7 @@ impl FadeCue {
             action_elapsed_before_pause: Duration::ZERO,
             target_cue_ids: Vec::new(),
             target_cue_numbers: Vec::new(),
+            temporary_target: None,
             target_volume_db: -60.0,
             patch_target_id: None,
             patch_target_db: 0.0,
@@ -996,6 +1000,7 @@ impl Cue for FadeCue {
     }
 
     fn clear_temporary_targets(&mut self) {
+        self.set_temporary_target(None);
         self.completed_picture_fade = None;
     }
 
@@ -1330,9 +1335,12 @@ impl Cue for FadeCue {
         std::mem::take(&mut self.stop_targets_pending)
     }
 
+    fn set_temporary_target(&mut self, id: Option<CueId>) { self.temporary_target = id; }
+    fn temporary_target(&self) -> Option<CueId> { self.temporary_target }
+
     fn fade_specification(&self) -> Option<FadeAction> {
         Some(FadeAction {
-            target_cue_ids: self.target_cue_ids.clone(),
+            target_cue_ids: self.temporary_target.map(|id| vec![id]).unwrap_or_else(|| self.target_cue_ids.clone()),
             target_gain_linear: db_to_linear(self.target_volume_db) as f32,
             target_visual_alpha: Some(self.target_brightness_alpha()),
             target_rate: self.target_rate.filter(|_| self.effect_destination().is_none()),
@@ -2617,6 +2625,22 @@ mod tests {
         assert_eq!(rebuilt.linked_incoming_voice(), incoming_voice);
         assert!(rebuilt.awaiting_picture, "still waiting for its picture");
         assert!(!rebuilt.in_pre_wait, "waiting for a picture is not a pre-wait");
+    }
+
+    #[test]
+    fn temporary_target_overrides_fade_targets_until_cleared() {
+        use crate::cue::traits::Cue;
+        let mut fade = FadeCue::new();
+        let saved = Uuid::new_v4();
+        fade.target_cue_ids = vec![saved];
+        assert_eq!(fade.fade_specification().unwrap().target_cue_ids, vec![saved]);
+        let temp = Uuid::new_v4();
+        fade.set_temporary_target(Some(temp));
+        assert_eq!(fade.temporary_target(), Some(temp));
+        assert_eq!(fade.fade_specification().unwrap().target_cue_ids, vec![temp]);
+        fade.clear_temporary_targets();
+        assert_eq!(fade.temporary_target(), None);
+        assert_eq!(fade.fade_specification().unwrap().target_cue_ids, vec![saved]);
     }
 
     #[test]

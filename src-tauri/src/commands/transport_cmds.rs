@@ -247,6 +247,11 @@ pub(crate) enum NetworkCueAction {
     /// QLab `/cue/{n}/sliceMarker/{index}/playCount {n}`: play count of slice
     /// `index` (0-based segment; `PLAY_COUNT_INFINITE` vamps until a Devamp).
     SetSlicePlayCount { index: usize, count: u32 },
+    /// QLab `/cue/{n}/tempCueTargetNumber {m}`: temporary (live) target cue,
+    /// resolved by cue number; cleared on reset, never saved.
+    SetTemporaryTargetNumber(String),
+    /// QLab `/cue/{n}/tempCueTargetID {uuid}`: same, resolved by unique ID.
+    SetTemporaryTargetId(Uuid),
     /// QLab `/cue/{n}/load {seconds}`: arm at a time (negative counts from the end).
     Load(f64),
     /// QLab `/cue/{n}/duration {seconds}` write (cues with an editable duration).
@@ -309,6 +314,8 @@ impl NetworkCueAction {
                 | NetworkCueAction::Delete
                 | NetworkCueAction::SetInfiniteLoop(_)
                 | NetworkCueAction::SetSlicePlayCount { .. }
+                | NetworkCueAction::SetTemporaryTargetNumber(_)
+                | NetworkCueAction::SetTemporaryTargetId(_)
         )
     }
 }
@@ -337,9 +344,27 @@ pub(crate) fn address_numbered_network_cue(
         return Ok(());
     }
     let mut transport = Transport::new(workspace_context(state, &ws));
+    // Resolve a temporary-target argument while the workspace is still
+    // immutably borrowed; the addressed cue list is borrowed mutably below.
+    let temp_target = match &action {
+        NetworkCueAction::SetTemporaryTargetNumber(number) =>
+            go_to_cue_target(&ws, number).map(|(_, id)| id),
+        NetworkCueAction::SetTemporaryTargetId(uuid) => {
+            let uuid = *uuid;
+            crate::engine::osc_server::unique_workspace_cue(&ws, |cue| cue.id() == uuid).map(|(_, cue)| cue.id())
+        }
+        _ => None,
+    };
     let cue_list = &mut ws.cue_lists[index];
 
     match &action {
+        NetworkCueAction::SetTemporaryTargetNumber(_) | NetworkCueAction::SetTemporaryTargetId(_) => {
+            if let Some(cue) = cue_list.get_mut_recursive(&id) {
+                cue.set_temporary_target(temp_target);
+            }
+            let _ = app_handle.emit("cue-list-refresh", ());
+            Ok(())
+        }
         NetworkCueAction::Go | NetworkCueAction::Start => {
             go_cue_in_list(&mut transport, cue_list, id, action == NetworkCueAction::Start, app_handle)
         }

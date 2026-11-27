@@ -1401,6 +1401,20 @@ fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueActi
             _ => None,
         };
     }
+    // QLab `/cue/{n}/tempCueTargetNumber {m}` / `tempCueTargetID {uuid}`: set a
+    // temporary (live) target cue, cleared on reset and never saved.
+    if verb == "tempCueTargetNumber" || verb == "tempCueTargetID" {
+        return match args {
+            [rosc::OscType::String(text)] if verb == "tempCueTargetNumber" => {
+                qlab_literal_cue_number(text)
+                    .then(|| NetworkCueAction::SetTemporaryTargetNumber(text.clone()))
+            }
+            [rosc::OscType::String(text)] => {
+                hyphenated_query_id(text).map(NetworkCueAction::SetTemporaryTargetId)
+            }
+            _ => None,
+        };
+    }
     if toggle_suffix || args.len() != 1 {
         return None;
     }
@@ -1473,7 +1487,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             matches!(core, "preWait" | "postWait" | "armed" | "qName" | "continueMode"
                 | "notes" | "colorName" | "flagged" | "load" | "panic" | "rate" | "level"
                 | "opacity" | "layer" | "blendMode" | "saturation" | "scale" | "rotation"
-                | "translateX" | "translateY" | "infiniteLoop" | "sliceMarker" | "duration")
+                | "translateX" | "translateY" | "infiniteLoop" | "sliceMarker" | "duration"
+                | "tempCueTargetNumber" | "tempCueTargetID")
         });
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
@@ -1996,6 +2011,10 @@ enum CueQueryProperty {
     SliceMarkers,
     /// QLab `/cue/{n}/sliceMarker/{index}/playCount` (1-based slice index).
     SlicePlayCount { index: usize },
+    /// QLab `/cue/{n}/tempCueTargetNumber` read: the temporary target's cue number, or null.
+    TempCueTargetNumber,
+    /// QLab `/cue/{n}/tempCueTargetID` read: the temporary target's unique ID, or null.
+    TempCueTargetId,
 }
 
 #[derive(Clone, Copy)]
@@ -2350,6 +2369,8 @@ impl<'a> CueQuery<'a> {
             "translateY/live" => CueQueryProperty::Video { prop: VideoProp::PanY, live: true },
             "infiniteLoop" => CueQueryProperty::InfiniteLoop,
             "sliceMarkers" => CueQueryProperty::SliceMarkers,
+            "tempCueTargetNumber" => CueQueryProperty::TempCueTargetNumber,
+            "tempCueTargetID" => CueQueryProperty::TempCueTargetId,
             property if property.starts_with("sliceMarker/") => {
                 let mut parts = property.strip_prefix("sliceMarker/")?.split('/');
                 let (Some(index), Some(prop), None) = (parts.next(), parts.next(), parts.next()) else {
@@ -2621,6 +2642,17 @@ impl<'a> CueQuery<'a> {
                     Some(c) => serde_json::json!(qlab_play_count(c)),
                 })
             }
+            CueQueryProperty::TempCueTargetNumber => {
+                let number = cue.temporary_target()
+                    .and_then(|tid| unique_workspace_cue(workspace, |c| c.id() == tid))
+                    .and_then(|(_, target)| target.number().map(str::to_owned));
+                Some(number.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null))
+            }
+            CueQueryProperty::TempCueTargetId => {
+                Some(cue.temporary_target()
+                    .map(|id| serde_json::json!(id.to_string()))
+                    .unwrap_or(serde_json::Value::Null))
+            }
         }
     }
 
@@ -2687,7 +2719,7 @@ fn hyphenated_query_id(id: &str) -> Option<Uuid> {
 
 /// Bound the full search before a result can be trusted as unique. Iterate
 /// groups without adding call-stack depth while the workspace is locked.
-fn unique_workspace_cue(
+pub(crate) fn unique_workspace_cue(
     workspace: &Workspace,
     matches: impl Fn(&dyn Cue) -> bool,
 ) -> Option<(usize, &dyn Cue)> {
@@ -3277,6 +3309,55 @@ mod tests {
         let query = CueQuery::parse(&message).unwrap();
         assert!(matches!(query.kind, CueQueryKind::App(AppQueryKind::Fullscreen)));
         assert!(query.is_any_access());
+    }
+
+    #[test]
+    fn qlab_temp_cue_target_writes_and_queries_parse_and_read() {
+        use crate::cue::fade_cue::FadeCue;
+        use crate::cue::wait_cue::WaitCue;
+        let s = |t: &str| rosc::OscType::String(t.into());
+        // Writes: one string argument (cue number, or a UUID for the ID form).
+        assert!(matches!(resolve_action("/cue/5/tempCueTargetNumber", &[s("12")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetTemporaryTargetNumber(n), .. } if n == "12"));
+        let id = Uuid::new_v4();
+        assert!(matches!(resolve_action("/cue/5/tempCueTargetID", &[s(&id.to_string())]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetTemporaryTargetId(u), .. } if u == id));
+        assert!(matches!(resolve_action("/cue/5/tempCueTargetID", &[s("not-a-uuid")]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/tempCueTargetNumber", &[s("a b")]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/tempCueTargetNumber", &[]), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/5/tempCueTargetNumber", &[s("12")], false), OscAction::Unmatched));
+        assert!(NetworkCueAction::SetTemporaryTargetNumber("12".into()).is_write());
+        assert!(NetworkCueAction::SetTemporaryTargetId(id).is_write());
+        // Wildcard writes are allowed like the other property writes.
+        assert!(matches!(resolve_action("/cue/*/tempCueTargetNumber", &[s("12")]),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::SetTemporaryTargetNumber(_), .. }));
+        // Queries: no-arg reads of the temporary target's number / unique ID.
+        let message = query_message("/cue/5/tempCueTargetNumber");
+        assert!(matches!(CueQuery::parse(&message).unwrap().kind,
+            CueQueryKind::Cue { property: CueQueryProperty::TempCueTargetNumber, .. }));
+        let message = query_message("/cue/5/tempCueTargetID");
+        assert!(matches!(CueQuery::parse(&message).unwrap().kind,
+            CueQueryKind::Cue { property: CueQueryProperty::TempCueTargetId, .. }));
+
+        let mut workspace = Workspace::new("Blue");
+        let mut fade = FadeCue::new();
+        fade.set_number(Some("5".into()));
+        let fade_id = fade.id();
+        let mut target = WaitCue::new();
+        target.set_number(Some("12".into()));
+        let target_id = target.id();
+        workspace.active_cue_list_mut().unwrap().push(Box::new(fade));
+        workspace.active_cue_list_mut().unwrap().push(Box::new(target));
+        let read = |address: &str, ws: &Workspace| {
+            let message = query_message(address);
+            CueQuery::parse(&message).unwrap().read(ws, peer(), 0)
+        };
+        assert_eq!(read("/cue/5/tempCueTargetNumber", &workspace).unwrap(), serde_json::Value::Null);
+        assert_eq!(read("/cue/5/tempCueTargetID", &workspace).unwrap(), serde_json::Value::Null);
+        workspace.active_cue_list_mut().unwrap().get_mut_recursive(&fade_id).unwrap()
+            .set_temporary_target(Some(target_id));
+        assert_eq!(read("/cue/5/tempCueTargetNumber", &workspace).unwrap(), serde_json::json!("12"));
+        assert_eq!(read("/cue/5/tempCueTargetID", &workspace).unwrap(), serde_json::json!(target_id.to_string()));
     }
 
     #[test]
