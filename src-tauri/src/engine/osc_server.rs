@@ -813,11 +813,31 @@ fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueActi
     if verb == "flagged" {
         return match args {
             [] if toggle_suffix => Some(NetworkCueAction::SetFlagged(None)),
-            [one] => match one {
+            [] => None,
+            [one] if !toggle_suffix => match one {
                 rosc::OscType::String(text) if text.eq_ignore_ascii_case("toggle") =>
                     Some(NetworkCueAction::SetFlagged(None)),
                 other => qlab_bool(other).map(|flag| NetworkCueAction::SetFlagged(Some(flag))),
             },
+            _ => None,
+        };
+    }
+    // QLab 5.5+ increment/decrement: `/cue/{n}/preWait/+ {delta}` and the
+    // embedded form `/cue/{n}/preWait/+/1` (delta carried in the address).
+    if let Some((core, sign, embedded)) = increment_verb(verb) {
+        let delta = match (embedded, args) {
+            (Some(text), []) => text.parse::<f64>().ok()?,
+            (None, [one]) => numeric_arg(std::slice::from_ref(one))?,
+            _ => return None,
+        };
+        if !delta.is_finite() {
+            return None;
+        }
+        return match core {
+            "preWait" => Some(NetworkCueAction::AdjustPreWait(sign * delta)),
+            "postWait" => Some(NetworkCueAction::AdjustPostWait(sign * delta)),
+            "continueMode" if delta.fract() == 0.0 =>
+                Some(NetworkCueAction::AdjustContinueMode((sign * delta) as i64)),
             _ => None,
         };
     }
@@ -860,6 +880,19 @@ fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueActi
     }
 }
 
+/// Split a QLab 5.5 increment/decrement verb (`preWait/+`, `preWait/+/1`) into
+/// the property core, the sign, and an optional address-embedded delta.
+fn increment_verb(verb: &str) -> Option<(&str, f64, Option<&str>)> {
+    let (core, rest) = verb.split_once('/')?;
+    match rest.split_once('/') {
+        Some(("+", delta)) => Some((core, 1.0, Some(delta))),
+        Some(("-", delta)) => Some((core, -1.0, Some(delta))),
+        None if rest == "+" => Some((core, 1.0, None)),
+        None if rest == "-" => Some((core, -1.0, None)),
+        _ => None,
+    }
+}
+
 fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a> {
     if let Some(rest) = addr.strip_prefix("/overrides/") {
         return parse_override_address(rest, args);
@@ -869,8 +902,11 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         .strip_prefix("/cue/")
         .or_else(|| addr.strip_prefix("/cue_id/"))
         .and_then(|rest| rest.split_once('/'))
-        .is_some_and(|(_, verb)| matches!(verb, "preWait" | "postWait" | "armed" | "qName" | "continueMode"
-            | "notes" | "colorName" | "flagged"));
+        .is_some_and(|(_, verb)| {
+            let core = verb.split('/').next().unwrap_or(verb);
+            matches!(core, "preWait" | "postWait" | "armed" | "qName" | "continueMode"
+                | "notes" | "colorName" | "flagged")
+        });
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
         || addr == "/forgetMeNot" || addr.ends_with("/forgetMeNot")
@@ -2240,6 +2276,48 @@ mod tests {
         // The toggle suffix is a command, not a query.
         assert!(CueQuery::parse(&query_message("/cue/5/flagged/toggle")).is_none());
         assert!(parse_text_message(b"/cue/5/flagged").is_none(), "reads are binary-OSC only");
+    }
+
+    #[test]
+    fn qlab_increment_decrement_verbs_parse_in_both_qlab_55_forms() {
+        use crate::cue::types::ContinueMode;
+        let d = |v: f64| rosc::OscType::Double(v);
+
+        // Delta as the argument: `/cue/5/preWait/+ 1`.
+        assert!(matches!(resolve_action("/cue/5/preWait/+", &[d(1.0)]),
+            OscAction::AddressedCue { action: NetworkCueAction::AdjustPreWait(v), .. } if v == 1.0));
+        assert!(matches!(resolve_action("/cue/5/postWait/-", &[d(0.5)]),
+            OscAction::AddressedCue { action: NetworkCueAction::AdjustPostWait(v), .. } if v == -0.5));
+        assert!(matches!(resolve_action("/cue/5/continueMode/+", &[rosc::OscType::Int(1)]),
+            OscAction::AddressedCue { action: NetworkCueAction::AdjustContinueMode(1), .. }));
+        // Delta embedded in the address: `/cue/5/preWait/+/2.5` (QLab 5.5+).
+        assert!(matches!(resolve_action("/cue/5/preWait/+/2.5", &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::AdjustPreWait(v), .. } if v == 2.5));
+        assert!(matches!(resolve_action("/cue/5/preWait/-/0.25", &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::AdjustPreWait(v), .. } if v == -0.25));
+        assert!(matches!(resolve_action("/cue/*/preWait/+", &[d(1.0)]),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::AdjustPreWait(1.0), .. }));
+        // Invalid forms stay unmatched.
+        for (address, args) in [
+            ("/cue/5/preWait/+", &[][..]),
+            ("/cue/5/preWait/+", &[d(1.0), d(2.0)][..]),
+            ("/cue/5/preWait/+/1", &[d(1.0)][..]),
+            ("/cue/5/preWait/+/abc", &[][..]),
+            ("/cue/5/preWait/+", &[d(f64::NAN)][..]),
+            ("/cue/5/preWait/*", &[d(1.0)][..]),
+            ("/cue/5/qName/+", &[d(1.0)][..]),
+            ("/cue/5/continueMode/+", &[d(1.5)][..]),
+        ] {
+            assert!(matches!(resolve_action(address, args), OscAction::Unmatched), "{address} {args:?}");
+        }
+        // Adjustments are writes: control-level, and not queries.
+        assert!(matches!(authorized_action("/cue/5/preWait/+", &[d(1.0)], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/5/preWait/+", &[d(1.0)], true),
+            OscAction::AddressedCue { action, .. } if action.is_write()));
+        assert!(CueQuery::parse(&query_message("/cue/5/preWait/+")).is_none());
+        assert!(CueQuery::parse(&query_message("/cue/5/preWait/+/1")).is_none());
+        assert!(parse_text_message(b"/cue/5/preWait/+ 1").is_some());
+        let _ = ContinueMode::AutoFollow; // enum stays queryable
     }
 
     #[test]

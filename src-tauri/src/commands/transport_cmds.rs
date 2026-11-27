@@ -199,6 +199,12 @@ pub(crate) enum NetworkCueAction {
     /// QLab `/cue/{n}/flagged {bool}`; `None` toggles (the `toggle` argument or
     /// `/toggle` suffix). Flagging lives on the owning cue list, not the cue.
     SetFlagged(Option<bool>),
+    /// QLab 5.5 `/cue/{n}/preWait/+ {delta}` (or `/preWait/+/1`): add delta seconds.
+    AdjustPreWait(f64),
+    /// QLab 5.5 `/cue/{n}/postWait/- {delta}`: subtract delta seconds.
+    AdjustPostWait(f64),
+    /// QLab 5.5 `/cue/{n}/continueMode/+ {steps}`: cycle through the modes.
+    AdjustContinueMode(i64),
 }
 
 impl NetworkCueAction {
@@ -213,6 +219,9 @@ impl NetworkCueAction {
                 | NetworkCueAction::SetNotes(_)
                 | NetworkCueAction::SetColor(_)
                 | NetworkCueAction::SetFlagged(_)
+                | NetworkCueAction::AdjustPreWait(_)
+                | NetworkCueAction::AdjustPostWait(_)
+                | NetworkCueAction::AdjustContinueMode(_)
         )
     }
 }
@@ -350,6 +359,27 @@ fn write_edit(action: &NetworkCueAction) -> Option<CueEdit<'_>> {
         NetworkCueAction::SetColor(color) => {
             let color = *color;
             Some(Box::new(move |cue| cue.set_color(color)))
+        }
+        NetworkCueAction::AdjustPreWait(delta) => {
+            let delta = *delta;
+            Some(Box::new(move |cue| {
+                let next = (cue.pre_wait().as_secs_f64() + delta).max(0.0);
+                cue.set_pre_wait(std::time::Duration::from_secs_f64(next));
+            }))
+        }
+        NetworkCueAction::AdjustPostWait(delta) => {
+            let delta = *delta;
+            Some(Box::new(move |cue| {
+                let next = (cue.post_wait().as_secs_f64() + delta).max(0.0);
+                cue.set_post_wait(std::time::Duration::from_secs_f64(next));
+            }))
+        }
+        NetworkCueAction::AdjustContinueMode(steps) => {
+            let steps = *steps;
+            Some(Box::new(move |cue| {
+                let mode = cue.continue_mode().cycled(steps);
+                cue.set_continue_mode(mode);
+            }))
         }
         _ => None,
     }
@@ -1063,6 +1093,43 @@ mod tests {
         assert!(NetworkCueAction::SetColor(CueColor::Red).is_write());
         assert!(NetworkCueAction::SetFlagged(None).is_write());
         assert!(!NetworkCueAction::Go.is_write());
+    }
+
+    #[test]
+    fn qlab_increment_decrement_writes_adjust_waits_and_cycle_continue_mode() {
+        use crate::cue::types::ContinueMode;
+        let mut workspace = Workspace::new("OSC +/- writes");
+        let mut cue = WaitCue::new();
+        cue.set_number(Some("3".into()));
+        cue.set_pre_wait(std::time::Duration::from_secs(2));
+        cue.set_post_wait(std::time::Duration::from_secs(1));
+        cue.set_continue_mode(ContinueMode::DoNotContinue);
+        let id = cue.id();
+        workspace.active_cue_list_mut().unwrap().push(Box::new(cue));
+
+        let apply = |workspace: &mut Workspace, action: &NetworkCueAction| {
+            let edit = write_edit(action).unwrap();
+            assert!(edit_cue_field(workspace, 0, id, edit));
+        };
+        apply(&mut workspace, &NetworkCueAction::AdjustPreWait(1.5));
+        apply(&mut workspace, &NetworkCueAction::AdjustPostWait(-0.5));
+        apply(&mut workspace, &NetworkCueAction::AdjustPreWait(-99.0));
+        let cue = workspace.cue_lists[0].get_recursive(&id).unwrap();
+        assert_eq!(cue.pre_wait(), std::time::Duration::from_secs_f64(0.0), "waits clamp at zero");
+        assert_eq!(cue.post_wait(), std::time::Duration::from_secs_f64(0.5));
+
+        // continueMode cycles with rollover in both directions.
+        assert_eq!(cue.continue_mode(), ContinueMode::DoNotContinue);
+        apply(&mut workspace, &NetworkCueAction::AdjustContinueMode(1));
+        assert_eq!(workspace.cue_lists[0].get_recursive(&id).unwrap().continue_mode(), ContinueMode::AutoContinue);
+        apply(&mut workspace, &NetworkCueAction::AdjustContinueMode(1));
+        assert_eq!(workspace.cue_lists[0].get_recursive(&id).unwrap().continue_mode(), ContinueMode::AutoFollow);
+        apply(&mut workspace, &NetworkCueAction::AdjustContinueMode(1));
+        assert_eq!(workspace.cue_lists[0].get_recursive(&id).unwrap().continue_mode(), ContinueMode::DoNotContinue, "rolls over");
+        apply(&mut workspace, &NetworkCueAction::AdjustContinueMode(-1));
+        assert_eq!(workspace.cue_lists[0].get_recursive(&id).unwrap().continue_mode(), ContinueMode::AutoFollow, "negative steps wrap");
+        assert!(NetworkCueAction::AdjustPreWait(1.0).is_write());
+        assert!(NetworkCueAction::AdjustContinueMode(1).is_write());
     }
 
     #[test]

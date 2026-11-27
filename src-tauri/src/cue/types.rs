@@ -134,6 +134,18 @@ pub enum ContinueMode {
     AutoFollow,
 }
 
+impl ContinueMode {
+    /// QLab `/cue/{n}/continueMode/+/-` cycle order (rolls over at the ends).
+    const CYCLE: [ContinueMode; 3] = [ContinueMode::DoNotContinue, ContinueMode::AutoContinue, ContinueMode::AutoFollow];
+
+    /// Move `steps` positions through the cycle (negative steps go backwards,
+    /// wrapping around like QLab 5.5's rollover).
+    pub fn cycled(self, steps: i64) -> Self {
+        let index = Self::CYCLE.iter().position(|mode| *mode == self).unwrap_or(0) as i64;
+        Self::CYCLE[(index + steps).rem_euclid(Self::CYCLE.len() as i64) as usize]
+    }
+}
+
 /// Color label displayed on a cue row in the Cue List, matching QLab's palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -541,6 +553,29 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[test]
+    fn continue_mode_cycles_with_rollover_in_both_directions() {
+        assert_eq!(ContinueMode::DoNotContinue.cycled(1), ContinueMode::AutoContinue);
+        assert_eq!(ContinueMode::AutoContinue.cycled(1), ContinueMode::AutoFollow);
+        assert_eq!(ContinueMode::AutoFollow.cycled(1), ContinueMode::DoNotContinue);
+        assert_eq!(ContinueMode::DoNotContinue.cycled(-1), ContinueMode::AutoFollow);
+        assert_eq!(ContinueMode::AutoFollow.cycled(5), ContinueMode::AutoContinue);
+        assert_eq!(ContinueMode::AutoContinue.cycled(0), ContinueMode::AutoContinue);
+    }
+
+    #[test]
+    fn cue_color_osc_names_round_trip() {
+        for color in [
+            CueColor::None, CueColor::Red, CueColor::Green, CueColor::HotPink, CueColor::SkyBlue,
+        ] {
+            assert_eq!(CueColor::from_osc_name(color.osc_name()), Some(color));
+        }
+        assert_eq!(CueColor::from_osc_name("Hot Pink"), Some(CueColor::HotPink));
+        assert_eq!(CueColor::from_osc_name("SKY-BLUE"), Some(CueColor::SkyBlue));
+        assert_eq!(CueColor::from_osc_name("no color"), Some(CueColor::None));
+        assert_eq!(CueColor::from_osc_name("chartreuse"), None);
+        assert_eq!(CueColor::None.osc_name(), "none");
+    }
 
     #[test]
     fn eof_fade_not_due_early() {
