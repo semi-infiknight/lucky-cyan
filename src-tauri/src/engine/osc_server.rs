@@ -419,6 +419,30 @@ pub(crate) fn reply_target(addr: SocketAddr) -> SocketAddr {
     SocketAddr::new(addr.ip(), current_reply_port(addr))
 }
 
+/// QLab `/replyFormat {string}`: per-sender reply payload format with `#token#`
+/// placeholders; an empty string resets to the default JSON envelope. Same 61 s
+/// keepalive as the other per-sender registries; pinned clients keep theirs.
+static REPLY_FORMATS: Mutex<Option<HashMap<SocketAddr, (String, Instant)>>> = Mutex::new(None);
+
+fn set_reply_format(addr: SocketAddr, format: Option<String>) {
+    if let Ok(mut guard) = REPLY_FORMATS.lock() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        match format {
+            Some(format) if !format.is_empty() => { map.insert(addr, (format, Instant::now())); }
+            _ => { map.remove(&addr); }
+        }
+    }
+}
+
+fn current_reply_format(addr: SocketAddr) -> Option<String> {
+    let Ok(mut guard) = REPLY_FORMATS.lock() else { return None };
+    let map = guard.as_mut()?;
+    let now = Instant::now();
+    map.retain(|peer, (_, seen)| crate::engine::osc_updates::is_pinned(*peer)
+        || now.duration_since(*seen) < Duration::from_secs(61));
+    map.get(&addr).map(|(format, _)| format.clone())
+}
+
 fn set_always_reply(addr: SocketAddr, on: bool) {
     if let Ok(mut guard) = ALWAYS_REPLY.lock() {
         let map = guard.get_or_insert_with(HashMap::new);
@@ -502,7 +526,8 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
                 || address == "/forgetMeNot" || address.ends_with("/forgetMeNot")
                 || address == "/udpKeepAlive" || address.ends_with("/udpKeepAlive")
                 || address == "/udpReplyPort" || address.ends_with("/udpReplyPort")
-                || address == "/overrideWindow" || address.ends_with("/overrideWindow") => {
+                || address == "/overrideWindow" || address.ends_with("/overrideWindow")
+                || address == "/replyFormat" || address.ends_with("/replyFormat") => {
                 match one.parse::<f64>() {
                     Ok(value) if (value * 1000.0).is_finite() => vec![rosc::OscType::Double(value)],
                     _ => vec![rosc::OscType::String((*one).to_owned())],
@@ -557,6 +582,8 @@ enum OscAction<'a> {
     SetReplyPort(u16),
     /// QLab `/overrideWindow {bool}` and `/toggleOverrideWindow` (`None` toggles).
     SetOverrideWindow(Option<bool>),
+    /// QLab `/replyFormat {string}`: set this sender's reply payload format.
+    SetReplyFormat(String),
     /// Trigger a full cue-list feedback dump.
     CueListRequest,
     /// Trigger a playhead feedback dump.
@@ -604,6 +631,7 @@ fn apply_client_session(action: ClientSessionAction, src: SocketAddr) {
             crate::engine::osc_updates::disconnect_client(src);
             set_always_reply(src, false);
             set_reply_port(src, None);
+            set_reply_format(src, None);
         }
     }
 }
@@ -666,6 +694,10 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, src: SocketA
             let open = open.unwrap_or_else(|| !crate::engine::overrides::OVERRIDES.override_window());
             crate::engine::overrides::OVERRIDES.set_override_window(open);
             let _ = app_handle.emit("override-window-changed", open);
+            (true, false)
+        }
+        OscAction::SetReplyFormat(format) => {
+            set_reply_format(src, Some(format));
             (true, false)
         }
         OscAction::Command(payload) => {
@@ -925,7 +957,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         || addr == "/forgetMeNot" || addr.ends_with("/forgetMeNot")
         || addr == "/udpKeepAlive" || addr.ends_with("/udpKeepAlive")
         || addr == "/udpReplyPort" || addr.ends_with("/udpReplyPort")
-        || addr == "/overrideWindow" || addr.ends_with("/overrideWindow");
+        || addr == "/overrideWindow" || addr.ends_with("/overrideWindow")
+        || addr == "/replyFormat" || addr.ends_with("/replyFormat");
     if !args.is_empty() && !cue_write && !updates_arg {
         return OscAction::Unmatched;
     }
@@ -965,6 +998,14 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
                 Some(on) => OscAction::ClientSession { action: ClientSessionAction::Pin(on) },
                 None => OscAction::Unmatched,
             },
+            _ => OscAction::Unmatched,
+        };
+    }
+    // QLab `/replyFormat {string}`; the no-argument form is the read (a query).
+    if addr == "/replyFormat" {
+        let _ = workspace;
+        return match args {
+            [rosc::OscType::String(format)] => OscAction::SetReplyFormat(format.clone()),
             _ => OscAction::Unmatched,
         };
     }
@@ -1391,6 +1432,8 @@ enum SenderQuery {
     Pinned,
     /// QLab `/udpReplyPort` read form: this sender's current reply port.
     ReplyPort,
+    /// QLab `/replyFormat` read form: this sender's current reply format ("" = default).
+    ReplyFormat,
 }
 
 struct CueQuery<'a> {
@@ -1425,6 +1468,7 @@ impl<'a> CueQuery<'a> {
             "updates" => Some(SenderQuery::Updates),
             "forgetMeNot" | "udpKeepAlive" => Some(SenderQuery::Pinned),
             "udpReplyPort" => Some(SenderQuery::ReplyPort),
+            "replyFormat" => Some(SenderQuery::ReplyFormat),
             _ => None,
         } {
             return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::Sender(sender) });
@@ -1533,6 +1577,8 @@ impl<'a> CueQuery<'a> {
                 Some(serde_json::json!(crate::engine::osc_updates::is_pinned(src))),
             CueQueryKind::Sender(SenderQuery::ReplyPort) =>
                 Some(serde_json::json!(current_reply_port(src))),
+            CueQueryKind::Sender(SenderQuery::ReplyFormat) =>
+                Some(serde_json::json!(current_reply_format(src).unwrap_or_default())),
             CueQueryKind::CueLists => Some(serde_json::Value::Array(
                 workspace.cue_lists.iter().map(|list| serde_json::json!({
                     "id": list.id.to_string(),
@@ -1612,12 +1658,24 @@ impl<'a> CueQuery<'a> {
         Some((instance, self.read(workspace, src, port)))
     }
 
-    fn encode_reply(&self, workspace_id: Uuid, data: Option<serde_json::Value>) -> Option<Vec<u8>> {
+    /// QLab `/replyFormat`: when the sender set a format, the reply payload is the
+    /// format string with `#workspace_id#`, `#address#`, `#status#` and `#data#`
+    /// replaced (string data renders bare, everything else as JSON). The reply
+    /// address stays `/reply{address}`.
+    fn encode_reply_formatted(
+        &self,
+        workspace_id: Uuid,
+        data: Option<serde_json::Value>,
+        format: Option<&str>,
+    ) -> Option<Vec<u8>> {
         let status = if data.is_some() { "ok" } else { "error" };
-        let json = serde_json::json!({ "workspace_id": workspace_id, "address": self.address, "status": status, "data": data });
+        let payload = match format {
+            Some(format) if !format.is_empty() => format_reply(format, workspace_id, self.address, status, &data),
+            _ => serde_json::json!({ "workspace_id": workspace_id, "address": self.address, "status": status, "data": data }).to_string(),
+        };
         rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
             addr: format!("/reply{}", self.address),
-            args: vec![rosc::OscType::String(json.to_string())],
+            args: vec![rosc::OscType::String(payload)],
         })).ok()
     }
 }
@@ -1657,6 +1715,21 @@ fn unique_workspace_cue(
     found
 }
 
+/// Render a `/replyFormat` template: `#data#` is the bare string for string data,
+/// compact JSON otherwise, empty when the query errored.
+fn format_reply(format: &str, workspace_id: Uuid, address: &str, status: &str, data: &Option<serde_json::Value>) -> String {
+    let data_text = match data {
+        None => String::new(),
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(other) => serde_json::to_string(other).unwrap_or_default(),
+    };
+    format
+        .replace("#workspace_id#", &workspace_id.to_string())
+        .replace("#address#", address)
+        .replace("#status#", status)
+        .replace("#data#", &data_text)
+}
+
 fn handle_query(query: CueQuery<'_>, src: SocketAddr, handle: &tauri::AppHandle) -> Option<Vec<u8>> {
     let state = handle.try_state::<AppState>()?;
     let port = match state.osc_server.status(false) {
@@ -1668,7 +1741,8 @@ fn handle_query(query: CueQuery<'_>, src: SocketAddr, handle: &tauri::AppHandle)
         let workspace = state.workspace.try_lock().ok()?;
         query.reply_data(&workspace, src, port)?
     };
-    query.encode_reply(workspace_id, data)
+    let format = current_reply_format(src);
+    query.encode_reply_formatted(workspace_id, data, format.as_deref())
 }
 
 // ---------------------------------------------------------------------------
@@ -2661,7 +2735,7 @@ mod tests {
         assert!(parse_text_message(b"/workspaces").is_none());
 
         // Replies keep the standard query envelope at /reply{address}.
-        let bytes = version.encode_reply(instance, version.read(&workspace, peer(), 0)).unwrap();
+        let bytes = version.encode_reply_formatted(instance, version.read(&workspace, peer(), 0), None).unwrap();
         let (remaining, rosc::OscPacket::Message(message)) = rosc::decoder::decode_udp(&bytes).unwrap() else {
             panic!("expected a single OSC reply");
         };
@@ -2771,6 +2845,58 @@ mod tests {
     }
 
     #[test]
+    fn qlab_reply_format_parses_renders_tokens_and_tracks_per_sender() {
+        let s = |v: &str| rosc::OscType::String(v.to_owned());
+        // Write form: exactly one string argument; an empty string resets.
+        assert!(matches!(resolve_action("/replyFormat", &[s("#data# #address#")]),
+            OscAction::SetReplyFormat(ref f) if f == "#data# #address#"));
+        assert!(matches!(resolve_action("/replyFormat", &[s("")]), OscAction::SetReplyFormat(ref f) if f.is_empty()));
+        assert!(matches!(resolve_action("/replyFormat", &[]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/replyFormat", &[rosc::OscType::Int(1)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/replyFormat", &[s("a"), s("b")]), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/replyFormat", &[s("x")], false), OscAction::SetReplyFormat(_)));
+        assert!(parse_text_message(b"/replyFormat #data#_#address#").is_some());
+        assert!(parse_text_message(b"/replyFormat").is_none());
+        // Read form: per-sender query, any access.
+        let read_message = query_message("/replyFormat");
+        let read = CueQuery::parse(&read_message).unwrap();
+        assert!(matches!(read.kind, CueQueryKind::Sender(SenderQuery::ReplyFormat)));
+        assert!(read.is_any_access());
+
+        // Token rendering: string data bare, other data as JSON, empty on error.
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(format_reply("#data# #address#", id, "/cue/1/colorName", "ok", &Some(serde_json::json!("green"))),
+            "green /cue/1/colorName");
+        assert_eq!(format_reply("#status#/#data#", id, "/x", "ok", &Some(serde_json::json!(false))), "ok/false");
+        assert_eq!(format_reply("#status#/#data#", id, "/x", "error", &None), "error/");
+        assert_eq!(format_reply("#workspace_id#", id, "/x", "ok", &None), id.to_string());
+
+        // Registry: set, read back through the query, empty resets, disconnect clears.
+        let fmt_peer: SocketAddr = (Ipv4Addr::LOCALHOST, 16).into();
+        assert_eq!(current_reply_format(fmt_peer), None);
+        set_reply_format(fmt_peer, Some("#data#".into()));
+        assert_eq!(current_reply_format(fmt_peer), Some("#data#".into()));
+        assert_eq!(read.read(&Workspace::new("fmt"), fmt_peer, 0), Some(serde_json::json!("#data#")));
+        set_reply_format(fmt_peer, Some(String::new()));
+        assert_eq!(current_reply_format(fmt_peer), None, "empty format resets to the default");
+        set_reply_format(fmt_peer, Some("#status#".into()));
+        apply_client_session(ClientSessionAction::Disconnect, fmt_peer);
+        assert_eq!(current_reply_format(fmt_peer), None, "disconnect clears the format");
+
+        // Envelope: default JSON without a format, formatted payload with one.
+        let message = query_message("/cue/1/colorName");
+        let query = CueQuery::parse(&message).unwrap();
+        let bytes = query.encode_reply_formatted(id, Some(serde_json::json!("green")), Some("#data# #address#")).unwrap();
+        let (_, rosc::OscPacket::Message(reply)) = rosc::decoder::decode_udp(&bytes).unwrap() else { panic!("expected a reply") };
+        assert_eq!(reply.addr, "/reply/cue/1/colorName");
+        assert_eq!(reply.args, vec![rosc::OscType::String("green /cue/1/colorName".into())]);
+        let bytes = query.encode_reply_formatted(id, Some(serde_json::json!("green")), None).unwrap();
+        let (_, rosc::OscPacket::Message(reply)) = rosc::decoder::decode_udp(&bytes).unwrap() else { panic!("expected a reply") };
+        let [rosc::OscType::String(json)] = reply.args.as_slice() else { panic!("expected JSON data") };
+        assert_eq!(serde_json::from_str::<serde_json::Value>(json).unwrap()["data"], "green");
+    }
+
+    #[test]
     fn udp_reply_port_registry_tracks_resets_and_expires_unless_pinned() {
         // Port 14/15: other registry tests own 9-13.
         let peer_addr: SocketAddr = (Ipv4Addr::LOCALHOST, 14).into();
@@ -2824,7 +2950,7 @@ mod tests {
                     CueQueryKind::Sender(SenderQuery::ReplyPort) => Some(serde_json::json!(current_reply_port(src))),
                     _ => Some(serde_json::json!("x")),
                 };
-                query.encode_reply(uuid::Uuid::new_v4(), data)
+                query.encode_reply_formatted(uuid::Uuid::new_v4(), data, None)
             },
         );
         let OscListenerStatus::Listening { address } = statuses.recv_timeout(Duration::from_secs(2)).unwrap() else {
@@ -3125,7 +3251,7 @@ mod tests {
             protocol, protocol.settings(&config), || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
             |_, _, _| {},
-            move |query, _src| query.encode_reply(instance, Some(false.into())),
+            move |query, _src| query.encode_reply_formatted(instance, Some(false.into()), None),
         );
         let OscListenerStatus::Listening { address } = statuses.recv_timeout(Duration::from_secs(2)).unwrap() else {
             panic!("expected an OSC socket");
