@@ -659,6 +659,11 @@ impl Cue for VideoCue {
         matrix[row][col] = db;
     }
     fn level_mirror_mono(&self) -> bool { self.matrix_mirror_mono }
+    fn visual_voice_id(&self) -> Option<VoiceId> { self.active_voice_id }
+    fn video_style(&self) -> Option<LayerStyle> { Some(self.layer_style) }
+    fn set_video_style(&mut self, style: LayerStyle) { self.layer_style = style; }
+    fn video_geometry(&self) -> Option<VideoGeometry> { Some(self.geometry) }
+    fn set_video_geometry(&mut self, geometry: VideoGeometry) { self.geometry = geometry; }
     fn has_prepared_media(&self) -> bool { self.preloaded }
     fn source_channel_names_mut(&mut self) -> Option<&mut Vec<String>> { Some(&mut self.source_channel_names) }
     fn output_patch_id(&self) -> Option<uuid::Uuid> { self.output_patch_id }

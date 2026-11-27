@@ -69,6 +69,21 @@ impl BlendMode {
         BlendMode::SourceAtop,
     ];
 
+    /// Parse a QLab `/cue/{n}/blendMode` string: snake_case, display or
+    /// hyphenated names, case-insensitive ("multiply", "Multiply", "soft-light").
+    pub fn from_osc_name(name: &str) -> Option<BlendMode> {
+        let normalized: String = name
+            .trim()
+            .chars()
+            .map(|c| if c == '-' || c == ' ' { '_' } else { c.to_ascii_lowercase() })
+            .collect();
+        BlendMode::ALL
+            .into_iter()
+            .find(|mode| {
+                serde_json::to_string(mode).ok().as_deref() == Some(format!("\"{normalized}\"").as_str())
+            })
+    }
+
     /// Stable integer id passed to the composite shader (`u_blend_mode`).
     pub fn shader_id(self) -> i32 {
         match self {

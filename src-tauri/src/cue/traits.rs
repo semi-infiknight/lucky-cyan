@@ -550,6 +550,28 @@ pub trait Cue: Send + std::any::Any {
     /// Crosspoint mono-mirroring flag used when building the live matrix.
     fn level_mirror_mono(&self) -> bool { false }
 
+    // QLab OSC video-cue properties (`/cue/{n}/opacity|layer|blendMode|
+    // saturation|scale|rotation|translateX|translateY`, saved and `/live`).
+    /// On-screen voice of a visual cue, when playing (for live writes).
+    fn visual_voice_id(&self) -> Option<crate::engine::ring_command::VoiceId> { None }
+    fn video_style(&self) -> Option<crate::engine::output_engine::LayerStyle> { None }
+    fn set_video_style(&mut self, _style: crate::engine::output_engine::LayerStyle) {}
+    fn video_geometry(&self) -> Option<crate::engine::output_engine::VideoGeometry> { None }
+    fn set_video_geometry(&mut self, _geometry: crate::engine::output_engine::VideoGeometry) {}
+    /// Push a live (unsaved) style/geometry to the on-screen voice.
+    fn push_live_video(
+        &self,
+        engine: &dyn crate::engine::engine_traits::OutputEngineApi,
+        style: &crate::engine::output_engine::LayerStyle,
+        geometry: &crate::engine::output_engine::VideoGeometry,
+    ) {
+        if let Some(voice) = self.visual_voice_id() {
+            engine.set_voice_opacity(voice, style.opacity as f32);
+            engine.set_layer_props(voice, style, [false, false, false, true]);
+            engine.apply_geometry(voice, geometry);
+        }
+    }
+
     fn clear_temporary_targets(&mut self) {
         self.set_temporary_target(None);
         self.set_live_rate(None);

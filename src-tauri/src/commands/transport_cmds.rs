@@ -201,6 +201,27 @@ pub fn go_cue(
     go_cue_in_list(&mut transport, cue_list, id, false, &app_handle)
 }
 
+/// QLab video-cue OSC property (`/cue/{n}/opacity|layer|blendMode|saturation|
+/// scale|rotation|translateX|translateY`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VideoProp {
+    Opacity,
+    Layer,
+    BlendMode,
+    Saturation,
+    Scale,
+    Rotation,
+    PanX,
+    PanY,
+}
+
+/// Write payload for a video-cue property (blendMode takes the mode name).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum VideoPropValue {
+    Num(f64),
+    Text(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum NetworkCueAction {
     Go,
@@ -238,6 +259,9 @@ pub(crate) enum NetworkCueAction {
     /// QLab `/cue/{n}/level/{row}/{col} {db}` (or `/live` form): saved or live
     /// crosspoint level of a media cue.
     SetLevel { row: u32, col: u32, db: f64, live: bool },
+    /// QLab video-cue property write (`/cue/{n}/opacity 0.5`, `/blendMode
+    /// multiply`, ...; `/live` drives the on-screen voice without saving).
+    SetVideoProp { prop: VideoProp, value: VideoPropValue, live: bool },
     /// QLab 5.5 `/cue/{n}/preWait/+ {delta}` (or `/preWait/+/1`): add delta seconds.
     AdjustPreWait(f64),
     /// QLab 5.5 `/cue/{n}/postWait/- {delta}`: subtract delta seconds.
@@ -263,6 +287,7 @@ impl NetworkCueAction {
                 | NetworkCueAction::AdjustContinueMode(_)
                 | NetworkCueAction::SetRate { .. }
                 | NetworkCueAction::SetLevel { .. }
+                | NetworkCueAction::SetVideoProp { .. }
         )
     }
 }
@@ -343,6 +368,11 @@ pub(crate) fn address_numbered_network_cue(
         }
         NetworkCueAction::SetLevel { row, col, db, live: true } => {
             apply_live_level(transport.context.audio_engine.as_ref(), cue_list, id, *row, *col, *db);
+            let _ = app_handle.emit("cue-list-refresh", ());
+            Ok(())
+        }
+        NetworkCueAction::SetVideoProp { prop, value, live: true } => {
+            apply_live_video_prop(transport.context.output_engine.as_ref(), cue_list, id, *prop, value);
             let _ = app_handle.emit("cue-list-refresh", ());
             Ok(())
         }
@@ -430,6 +460,11 @@ pub(crate) fn address_network_cue_pattern(
             NetworkCueAction::SetLevel { row, col, db, live: true } => {
                 let list = &mut ws.cue_lists[index];
                 apply_live_level(transport.context.audio_engine.as_ref(), list, id, *row, *col, *db);
+                Ok(())
+            }
+            NetworkCueAction::SetVideoProp { prop, value, live: true } => {
+                let list = &mut ws.cue_lists[index];
+                apply_live_video_prop(transport.context.output_engine.as_ref(), list, id, *prop, value);
                 Ok(())
             }
             write if write.is_write() => {
@@ -522,8 +557,58 @@ fn write_edit(action: &NetworkCueAction) -> Option<CueEdit<'_>> {
             let (row, col, db) = (*row, *col, *db);
             Some(Box::new(move |cue| cue.set_level(row as usize, col as usize, db)))
         }
+        NetworkCueAction::SetVideoProp { prop, value, live: false } => {
+            let (prop, value) = (*prop, value.clone());
+            Some(Box::new(move |cue| {
+                let mut style = cue.video_style().unwrap_or_default();
+                let mut geometry = cue.video_geometry().unwrap_or_default();
+                apply_video_prop_to(&mut style, &mut geometry, prop, &value);
+                cue.set_video_style(style);
+                cue.set_video_geometry(geometry);
+            }))
+        }
         _ => None,
     }
+}
+
+/// Mutate a style/geometry pair for one QLab video-cue property write.
+fn apply_video_prop_to(
+    style: &mut crate::engine::output_engine::LayerStyle,
+    geometry: &mut crate::engine::output_engine::VideoGeometry,
+    prop: VideoProp,
+    value: &VideoPropValue,
+) {
+    match (prop, value) {
+        (VideoProp::Opacity, VideoPropValue::Num(v)) => style.opacity = v.clamp(0.0, 1.0),
+        (VideoProp::Layer, VideoPropValue::Num(v)) => style.layer = Some(*v as u32),
+        (VideoProp::BlendMode, VideoPropValue::Text(name)) => {
+            if let Some(mode) = crate::engine::output_engine::BlendMode::from_osc_name(name) {
+                style.blend_mode = mode;
+            }
+        }
+        (VideoProp::Saturation, VideoPropValue::Num(v)) => style.saturation = v.clamp(0.0, 2.0),
+        (VideoProp::Scale, VideoPropValue::Num(v)) => geometry.scale = *v,
+        (VideoProp::Rotation, VideoPropValue::Num(v)) => geometry.rotation = (*v as u32) % 360,
+        (VideoProp::PanX, VideoPropValue::Num(v)) => geometry.pan_x = v.clamp(-1.0, 1.0),
+        (VideoProp::PanY, VideoPropValue::Num(v)) => geometry.pan_y = v.clamp(-1.0, 1.0),
+        _ => {}
+    }
+}
+
+/// QLab `/cue/{n}/{prop}/live {value}`: push the change to the on-screen voice
+/// without touching saved data (a reset clears it, like all temporary values).
+fn apply_live_video_prop(
+    output_engine: &dyn crate::engine::engine_traits::OutputEngineApi,
+    cue_list: &mut CueList,
+    id: CueId,
+    prop: VideoProp,
+    value: &VideoPropValue,
+) {
+    let Some(cue) = cue_list.get_mut_recursive(&id) else { return };
+    let mut style = cue.video_style().unwrap_or_default();
+    let mut geometry = cue.video_geometry().unwrap_or_default();
+    apply_video_prop_to(&mut style, &mut geometry, prop, value);
+    cue.push_live_video(output_engine, &style, &geometry);
 }
 
 fn apply_write(

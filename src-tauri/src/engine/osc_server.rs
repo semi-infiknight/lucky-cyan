@@ -20,6 +20,7 @@ use crate::cue::{traits::Cue, types::CueId};
 use crate::commands::transport_cmds::{
     address_network_cue_pattern, address_numbered_network_cue, control_network_list_pause,
     control_network_workspace, NetworkCueAction, NetworkPauseAction, NetworkWorkspaceAction,
+    VideoProp, VideoPropValue,
 };
 use crate::preferences::OscReceiveConfig;
 use crate::show::Workspace;
@@ -1230,6 +1231,45 @@ fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueActi
             _ => None,
         };
     }
+    // QLab video-cue properties: opacity 0..=1, layer 1..=1000, blendMode name,
+    // saturation 0..=2, scale > 0, rotation 0..360, translateX/Y -1..=1.
+    let video_prop = match verb {
+        "opacity" => Some(VideoProp::Opacity),
+        "layer" => Some(VideoProp::Layer),
+        "blendMode" => Some(VideoProp::BlendMode),
+        "saturation" => Some(VideoProp::Saturation),
+        "scale" => Some(VideoProp::Scale),
+        "rotation" => Some(VideoProp::Rotation),
+        "translateX" => Some(VideoProp::PanX),
+        "translateY" => Some(VideoProp::PanY),
+        _ => None,
+    };
+    if let Some(prop) = video_prop {
+        let value = match (prop, args) {
+            (VideoProp::BlendMode, [rosc::OscType::String(name)]) => {
+                crate::engine::output_engine::BlendMode::from_osc_name(name)?;
+                VideoPropValue::Text(name.clone())
+            }
+            (_, [one]) => {
+                let v = numeric_arg(std::slice::from_ref(one))?;
+                let in_range = match prop {
+                    VideoProp::Opacity => (0.0..=1.0).contains(&v),
+                    VideoProp::Saturation => (0.0..=2.0).contains(&v),
+                    VideoProp::Layer => (1.0..=1000.0).contains(&v) && v.fract() == 0.0,
+                    VideoProp::Scale => v.is_finite() && v > 0.0,
+                    VideoProp::Rotation => (0.0..=360.0).contains(&v),
+                    VideoProp::PanX | VideoProp::PanY => (-1.0..=1.0).contains(&v),
+                    VideoProp::BlendMode => false,
+                };
+                if !v.is_finite() || !in_range {
+                    return None;
+                }
+                VideoPropValue::Num(v)
+            }
+            _ => return None,
+        };
+        return Some(NetworkCueAction::SetVideoProp { prop, value, live });
+    }
     let (verb, toggle_suffix) = match verb.split_once('/') {
         Some((core, "toggle")) => (core, true),
         _ => (verb, false),
@@ -1329,7 +1369,9 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         .is_some_and(|(_, verb)| {
             let core = verb.split('/').next().unwrap_or(verb);
             matches!(core, "preWait" | "postWait" | "armed" | "qName" | "continueMode"
-                | "notes" | "colorName" | "flagged" | "load" | "panic" | "rate" | "level")
+                | "notes" | "colorName" | "flagged" | "load" | "panic" | "rate" | "level"
+                | "opacity" | "layer" | "blendMode" | "saturation" | "scale" | "rotation"
+                | "translateX" | "translateY")
         });
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
@@ -1768,6 +1810,8 @@ enum CueQueryProperty {
     Rate { live: bool },
     /// QLab `/cue/{n}/level/{row}/{col}[/live]`: crosspoint level in dB.
     Level { row: u32, col: u32, live: bool },
+    /// QLab video-cue property read (`/cue/{n}/opacity[/live]`, ...).
+    Video { prop: VideoProp, live: bool },
 }
 
 #[derive(Clone, Copy)]
@@ -2088,6 +2132,22 @@ impl<'a> CueQuery<'a> {
             "children" => CueQueryProperty::Children,
             "rate" => CueQueryProperty::Rate { live: false },
             "rate/live" => CueQueryProperty::Rate { live: true },
+            "opacity" => CueQueryProperty::Video { prop: VideoProp::Opacity, live: false },
+            "opacity/live" => CueQueryProperty::Video { prop: VideoProp::Opacity, live: true },
+            "layer" => CueQueryProperty::Video { prop: VideoProp::Layer, live: false },
+            "layer/live" => CueQueryProperty::Video { prop: VideoProp::Layer, live: true },
+            "blendMode" => CueQueryProperty::Video { prop: VideoProp::BlendMode, live: false },
+            "blendMode/live" => CueQueryProperty::Video { prop: VideoProp::BlendMode, live: true },
+            "saturation" => CueQueryProperty::Video { prop: VideoProp::Saturation, live: false },
+            "saturation/live" => CueQueryProperty::Video { prop: VideoProp::Saturation, live: true },
+            "scale" => CueQueryProperty::Video { prop: VideoProp::Scale, live: false },
+            "scale/live" => CueQueryProperty::Video { prop: VideoProp::Scale, live: true },
+            "rotation" => CueQueryProperty::Video { prop: VideoProp::Rotation, live: false },
+            "rotation/live" => CueQueryProperty::Video { prop: VideoProp::Rotation, live: true },
+            "translateX" => CueQueryProperty::Video { prop: VideoProp::PanX, live: false },
+            "translateX/live" => CueQueryProperty::Video { prop: VideoProp::PanX, live: true },
+            "translateY" => CueQueryProperty::Video { prop: VideoProp::PanY, live: false },
+            "translateY/live" => CueQueryProperty::Video { prop: VideoProp::PanY, live: true },
             property if property.starts_with("level/") => {
                 let (rest, live) = match property.strip_suffix("/live") {
                     Some(core) => (core, true),
@@ -2303,6 +2363,22 @@ impl<'a> CueQuery<'a> {
                 let value = if live { cue.live_level(row, col).or_else(|| cue.level(row, col)) }
                     else { cue.level(row, col) };
                 Some(value.map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null))
+            }
+            CueQueryProperty::Video { prop, .. } => {
+                // `/live` reads fall back to the saved value here: the query
+                // path has no engine access, and an unset live override equals
+                // the saved value anyway.
+                let value = match prop {
+                    VideoProp::Opacity => cue.video_style().map(|s| serde_json::json!(s.opacity)),
+                    VideoProp::Layer => cue.video_style().and_then(|s| s.layer).map(|l| serde_json::json!(l)),
+                    VideoProp::BlendMode => cue.video_style().map(|s| serde_json::to_value(s.blend_mode).unwrap_or(serde_json::Value::Null)),
+                    VideoProp::Saturation => cue.video_style().map(|s| serde_json::json!(s.saturation)),
+                    VideoProp::Scale => cue.video_geometry().map(|g| serde_json::json!(g.scale)),
+                    VideoProp::Rotation => cue.video_geometry().map(|g| serde_json::json!(g.rotation)),
+                    VideoProp::PanX => cue.video_geometry().map(|g| serde_json::json!(g.pan_x)),
+                    VideoProp::PanY => cue.video_geometry().map(|g| serde_json::json!(g.pan_y)),
+                };
+                Some(value.unwrap_or(serde_json::Value::Null))
             }
         }
     }
@@ -3320,6 +3396,87 @@ mod tests {
         let memo_msg = query_message("/cue/1/rate");
         let memo_read = CueQuery::parse(&memo_msg).unwrap().read(&memo_workspace, src, 53000);
         assert_eq!(memo_read, Some(serde_json::Value::Null));
+    }
+
+    #[test]
+    fn qlab_video_cue_properties_saved_live_and_queries_resolve() {
+        use crate::cue::video_cue::VideoCue;
+        let d = |v: f64| rosc::OscType::Double(v);
+        let s = |text: &str| rosc::OscType::String(text.into());
+        // Saved and /live writes for each video property.
+        assert!(matches!(resolve_action("/cue/5/opacity", &[d(0.5)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetVideoProp { prop: VideoProp::Opacity, value: VideoPropValue::Num(v), live: false }, .. } if v == 0.5));
+        assert!(matches!(resolve_action("/cue/5/opacity/live", &[d(0.25)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetVideoProp { prop: VideoProp::Opacity, live: true, .. }, .. }));
+        assert!(matches!(resolve_action("/cue/5/layer", &[rosc::OscType::Int(10)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetVideoProp { prop: VideoProp::Layer, value: VideoPropValue::Num(10.0), .. }, .. }));
+        assert!(matches!(resolve_action("/cue/5/blendMode", &[s("multiply")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetVideoProp { prop: VideoProp::BlendMode, value: VideoPropValue::Text(ref n), .. }, .. } if n == "multiply"));
+        assert!(matches!(resolve_action("/cue/5/saturation", &[d(1.5)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetVideoProp { prop: VideoProp::Saturation, .. }, .. }));
+        assert!(matches!(resolve_action("/cue/5/scale", &[d(2.0)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetVideoProp { prop: VideoProp::Scale, value: VideoPropValue::Num(2.0), .. }, .. }));
+        assert!(matches!(resolve_action("/cue/5/rotation", &[d(90.0)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetVideoProp { prop: VideoProp::Rotation, .. }, .. }));
+        assert!(matches!(resolve_action("/cue/5/translateX", &[d(-0.5)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetVideoProp { prop: VideoProp::PanX, .. }, .. }));
+        assert!(matches!(resolve_action("/cue/5/translateY/live", &[d(0.5)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetVideoProp { prop: VideoProp::PanY, live: true, .. }, .. }));
+        // Out-of-range values, unknown blend modes, bare and multi-arg forms.
+        for (address, args) in [
+            ("/cue/5/opacity", &[d(1.5)][..]),
+            ("/cue/5/opacity", &[d(-0.1)][..]),
+            ("/cue/5/layer", &[d(0.0)][..]),
+            ("/cue/5/layer", &[d(1001.0)][..]),
+            ("/cue/5/scale", &[d(0.0)][..]),
+            ("/cue/5/rotation", &[d(400.0)][..]),
+            ("/cue/5/translateX", &[d(2.0)][..]),
+            ("/cue/5/blendMode", &[s("bogus")][..]),
+            ("/cue/5/blendMode", &[d(1.0)][..]),
+            ("/cue/5/opacity", &[][..]),
+            ("/cue/5/opacity", &[d(1.0), d(2.0)][..]),
+        ] {
+            assert!(matches!(resolve_action(address, args), OscAction::Unmatched), "{address} {args:?}");
+        }
+        // Wildcards accept video property writes; control-level only.
+        assert!(matches!(resolve_action("/cue/*/opacity", &[d(0.5)]),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::SetVideoProp { prop: VideoProp::Opacity, .. }, .. }));
+        assert!(matches!(authorized_action("/cue/5/opacity", &[d(0.5)], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/5/opacity/live", &[d(0.5)], true),
+            OscAction::AddressedCue { action: NetworkCueAction::SetVideoProp { live: true, .. }, .. }));
+        assert!(parse_text_message(b"/cue/5/opacity 0.5").is_some());
+        assert!(parse_text_message(b"/cue/5/blendMode multiply").is_some());
+
+        // Blend mode names normalize across spellings.
+        assert_eq!(crate::engine::output_engine::BlendMode::from_osc_name("Soft Light"),
+            Some(crate::engine::output_engine::BlendMode::SoftLight));
+        assert_eq!(crate::engine::output_engine::BlendMode::from_osc_name("source-atop"),
+            Some(crate::engine::output_engine::BlendMode::SourceAtop));
+        assert_eq!(crate::engine::output_engine::BlendMode::from_osc_name("nope"), None);
+
+        // Queries read the video cue's saved style/geometry.
+        let mut workspace = Workspace::new("Video");
+        let mut cue = VideoCue::new();
+        cue.set_number(Some("9".into()));
+        workspace.active_cue_list_mut().unwrap().push(Box::new(cue));
+        let src: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let read = |address: &str| {
+            let message = query_message(address);
+            CueQuery::parse(&message).unwrap().read(&workspace, src, 53000)
+        };
+        assert_eq!(read("/cue/9/opacity"), Some(serde_json::json!(1.0)));
+        assert_eq!(read("/cue/9/opacity/live"), Some(serde_json::json!(1.0)));
+        assert_eq!(read("/cue/9/blendMode"), Some(serde_json::json!("normal")));
+        assert_eq!(read("/cue/9/saturation"), Some(serde_json::json!(1.0)));
+        assert_eq!(read("/cue/9/scale"), Some(serde_json::json!(1.0)));
+        assert_eq!(read("/cue/9/rotation"), Some(serde_json::json!(0)));
+        assert_eq!(read("/cue/9/translateX"), Some(serde_json::json!(0.0)));
+        assert_eq!(read("/cue/9/layer"), Some(serde_json::Value::Null), "automatic layer reads null");
+        let opacity_msg = query_message("/cue/9/opacity/live");
+        let opacity_q = CueQuery::parse(&opacity_msg).unwrap();
+        assert!(matches!(opacity_q.kind, CueQueryKind::Cue {
+            property: CueQueryProperty::Video { prop: VideoProp::Opacity, live: true }, .. }));
+        assert!(CueQuery::parse(&query_message("/cue/9/opacity/live/extra")).is_none());
     }
 
     #[test]
