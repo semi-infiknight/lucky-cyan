@@ -1051,11 +1051,18 @@ fn resolve_network_target(
     }
 }
 
+enum CueQueryKind<'a> {
+    Cue { target: CueQueryTarget<'a>, property: CueQueryProperty },
+    /// QLab `/cueLists` (optionally workspace-scoped): every cue list in the workspace.
+    CueLists,
+    /// QLab `/cueList/{list_id}/playbackPosition`: the standby cue ID, or null.
+    CueListPlaybackPosition(Uuid),
+}
+
 struct CueQuery<'a> {
     address: &'a str,
     workspace: Option<WorkspaceSelector<'a>>,
-    target: CueQueryTarget<'a>,
-    property: CueQueryProperty,
+    kind: CueQueryKind<'a>,
 }
 
 impl<'a> CueQuery<'a> {
@@ -1065,6 +1072,21 @@ impl<'a> CueQuery<'a> {
         }
         let (workspace, path) = WorkspaceSelector::split_address(&message.addr)?;
         let path = path.strip_prefix('/')?;
+        // Workspace-level queries first: `/cueLists`, `/cueList/{id}/playbackPosition`.
+        if path == "cueLists" {
+            return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::CueLists });
+        }
+        if let Some(rest) = path.strip_prefix("cueList/") {
+            let (id, property) = rest.split_once('/')?;
+            if property != "playbackPosition" {
+                return None;
+            }
+            return Some(Self {
+                address: &message.addr,
+                workspace,
+                kind: CueQueryKind::CueListPlaybackPosition(hyphenated_query_id(id)?),
+            });
+        }
         let (kind, address) = path.split_once('/')?;
         let (key, property) = address.split_once('/')?;
         let property = match property {
@@ -1089,7 +1111,11 @@ impl<'a> CueQuery<'a> {
             "cue_id" => CueQueryTarget::Id(hyphenated_query_id(key)?),
             _ => return None,
         };
-        Some(Self { address: &message.addr, workspace, target, property })
+        Some(Self {
+            address: &message.addr,
+            workspace,
+            kind: CueQueryKind::Cue { target, property },
+        })
     }
 
     fn is_single_datagram(&self, data: &[u8]) -> bool {
@@ -1105,7 +1131,31 @@ impl<'a> CueQuery<'a> {
         if workspace.cue_lists.len() > MAX_SCOPED_ROWS {
             return None;
         }
-        let cue = match self.target {
+        match &self.kind {
+            CueQueryKind::CueLists => Some(serde_json::Value::Array(
+                workspace.cue_lists.iter().map(|list| serde_json::json!({
+                    "id": list.id.to_string(),
+                    "name": list.name,
+                })).collect(),
+            )),
+            CueQueryKind::CueListPlaybackPosition(list_id) => {
+                let list = workspace.cue_lists.iter().find(|list| list.id == *list_id)?;
+                Some(match list.playhead_cue_id {
+                    Some(id) => serde_json::Value::String(id.to_string()),
+                    None => serde_json::Value::Null,
+                })
+            }
+            CueQueryKind::Cue { target, property } => self.read_cue(workspace, *target, *property),
+        }
+    }
+
+    fn read_cue(
+        &self,
+        workspace: &Workspace,
+        target: CueQueryTarget<'_>,
+        property: CueQueryProperty,
+    ) -> Option<serde_json::Value> {
+        let cue = match target {
             CueQueryTarget::Playhead => {
                 let list = workspace.active_cue_list().filter(|list| list.cues.len() <= MAX_SCOPED_ROWS)?;
                 let playhead = list.playhead_cue()?;
@@ -1126,7 +1176,7 @@ impl<'a> CueQuery<'a> {
             CueQueryTarget::Number(number) => unique_workspace_cue(workspace, |cue| cue.number() == Some(number)).map(|(_, cue)| cue),
             CueQueryTarget::Id(id) => unique_workspace_cue(workspace, |cue| cue.id() == id).map(|(_, cue)| cue),
         }?;
-        match self.property {
+        match property {
             CueQueryProperty::Number => cue.number()
                 .filter(|number| number.len() <= MAX_CUE_ADDRESS_NUMBER_BYTES)
                 .map(|number| serde_json::Value::String(number.to_owned())),
@@ -1245,6 +1295,48 @@ mod tests {
         assert!(CueQuery::parse(&query_message(&oversized)).is_none());
         let oversized = format!("/workspace/{}/cue/101/number", "a".repeat(MAX_WORKSPACE_SELECTOR_BYTES + 1));
         assert!(CueQuery::parse(&query_message(&oversized)).is_none());
+    }
+
+    #[test]
+    fn queries_read_cue_lists_and_playback_position_per_list() {
+        use crate::cue::{memo_cue::MemoCue, traits::Cue, wait_cue::WaitCue};
+
+        let mut workspace = Workspace::new("Lists");
+        let active_id = workspace.active_cue_list_id;
+        let mut standby = WaitCue::new();
+        standby.set_number(Some("5".into()));
+        let standby_id = standby.id();
+        workspace.active_cue_list_mut().unwrap().push(Box::new(standby));
+        workspace.active_cue_list_mut().unwrap().set_playhead(Some(standby_id)).unwrap();
+        let mut other = crate::show::cue_list::CueList::new("Cart");
+        other.push(Box::new(MemoCue::new()));
+        let other_id = other.id;
+        workspace.cue_lists.push(other);
+        workspace.cue_lists.last_mut().unwrap().set_playhead(None).unwrap();
+
+        let read = |address: &str| CueQuery::parse(&query_message(address)).unwrap().read(&workspace);
+        let lists = read("/cueLists").unwrap();
+        assert_eq!(lists.as_array().unwrap().len(), 2);
+        assert_eq!(lists[0]["id"], active_id.to_string());
+        assert_eq!(lists[0]["name"], serde_json::Value::String("Cue List 1".into()));
+        assert_eq!(lists[1]["name"], serde_json::Value::String("Cart".into()));
+
+        let position = read(&format!("/cueList/{active_id}/playbackPosition")).unwrap();
+        assert_eq!(position, serde_json::Value::String(standby_id.to_string()));
+        let empty = read(&format!("/cueList/{other_id}/playbackPosition")).unwrap();
+        assert_eq!(empty, serde_json::Value::Null);
+
+        // Workspace-scoped forms work; wrong workspace selector reads nothing.
+        let scoped = format!("/workspace/Lists/cueLists");
+        assert_eq!(CueQuery::parse(&query_message(&scoped)).unwrap().read(&workspace).unwrap().as_array().unwrap().len(), 2);
+        let wrong = format!("/workspace/Other/cueLists");
+        assert!(CueQuery::parse(&query_message(&wrong)).unwrap().reply_data(&workspace).is_none());
+
+        // Unknown shapes stay unmatched.
+        for address in ["/cueList/abc/playbackPosition", "/cueLists/extra", "/cueList/", "/cueLists 1"] {
+            let args: &[rosc::OscType] = if address.ends_with('1') { &[rosc::OscType::Int(1)] } else { &[] };
+            assert!(CueQuery::parse(&rosc::OscMessage { addr: address.trim_end_matches('1').trim_end().into(), args: args.to_vec() }).is_none(), "{address}");
+        }
     }
 
     #[test]
