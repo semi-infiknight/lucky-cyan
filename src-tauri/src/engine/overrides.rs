@@ -3,14 +3,21 @@
 //! Loopback/local traffic is never blocked by the network override.
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub const OVERRIDE_KEYS: [&str; 7] = [
+/// QLab's full Override-window key set (13 paths).
+pub const OVERRIDE_KEYS: [&str; 13] = [
     "dmx_output",
     "midi_input",
     "midi_output",
     "msc_input",
     "msc_output",
     "network_external_input",
+    "network_external_output",
+    "network_local_input",
+    "network_local_output",
+    "sysex_input",
+    "sysex_output",
     "timecode_input",
+    "timecode_output",
 ];
 
 pub struct GlobalOverrides {
@@ -20,7 +27,15 @@ pub struct GlobalOverrides {
     msc_input: AtomicBool,
     msc_output: AtomicBool,
     network_external_input: AtomicBool,
+    network_external_output: AtomicBool,
+    network_local_input: AtomicBool,
+    network_local_output: AtomicBool,
+    sysex_input: AtomicBool,
+    sysex_output: AtomicBool,
     timecode_input: AtomicBool,
+    timecode_output: AtomicBool,
+    /// Visibility of the Override window (QLab `/overrideWindow`).
+    window_open: AtomicBool,
 }
 
 pub static OVERRIDES: GlobalOverrides = GlobalOverrides::new();
@@ -34,7 +49,14 @@ impl GlobalOverrides {
             msc_input: AtomicBool::new(true),
             msc_output: AtomicBool::new(true),
             network_external_input: AtomicBool::new(true),
+            network_external_output: AtomicBool::new(true),
+            network_local_input: AtomicBool::new(true),
+            network_local_output: AtomicBool::new(true),
+            sysex_input: AtomicBool::new(true),
+            sysex_output: AtomicBool::new(true),
             timecode_input: AtomicBool::new(true),
+            timecode_output: AtomicBool::new(true),
+            window_open: AtomicBool::new(false),
         }
     }
 
@@ -46,7 +68,13 @@ impl GlobalOverrides {
             "msc_input" => Some(self.msc_input()),
             "msc_output" => Some(self.msc_output()),
             "network_external_input" => Some(self.network_external_input()),
+            "network_external_output" => Some(self.network_external_output()),
+            "network_local_input" => Some(self.network_local_input()),
+            "network_local_output" => Some(self.network_local_output()),
+            "sysex_input" => Some(self.sysex_input()),
+            "sysex_output" => Some(self.sysex_output()),
             "timecode_input" => Some(self.timecode_input()),
+            "timecode_output" => Some(self.timecode_output()),
             _ => None,
         }
     }
@@ -59,7 +87,13 @@ impl GlobalOverrides {
             "msc_input" => &self.msc_input,
             "msc_output" => &self.msc_output,
             "network_external_input" => &self.network_external_input,
+            "network_external_output" => &self.network_external_output,
+            "network_local_input" => &self.network_local_input,
+            "network_local_output" => &self.network_local_output,
+            "sysex_input" => &self.sysex_input,
+            "sysex_output" => &self.sysex_output,
             "timecode_input" => &self.timecode_input,
+            "timecode_output" => &self.timecode_output,
             _ => return Err(format!("Unknown override '{key}'.")),
         };
         flag.store(enabled, Ordering::Relaxed);
@@ -72,7 +106,16 @@ impl GlobalOverrides {
     pub fn msc_input(&self) -> bool { self.msc_input.load(Ordering::Relaxed) }
     pub fn msc_output(&self) -> bool { self.msc_output.load(Ordering::Relaxed) }
     pub fn network_external_input(&self) -> bool { self.network_external_input.load(Ordering::Relaxed) }
+    pub fn network_external_output(&self) -> bool { self.network_external_output.load(Ordering::Relaxed) }
+    pub fn network_local_input(&self) -> bool { self.network_local_input.load(Ordering::Relaxed) }
+    pub fn network_local_output(&self) -> bool { self.network_local_output.load(Ordering::Relaxed) }
+    pub fn sysex_input(&self) -> bool { self.sysex_input.load(Ordering::Relaxed) }
+    pub fn sysex_output(&self) -> bool { self.sysex_output.load(Ordering::Relaxed) }
     pub fn timecode_input(&self) -> bool { self.timecode_input.load(Ordering::Relaxed) }
+    pub fn timecode_output(&self) -> bool { self.timecode_output.load(Ordering::Relaxed) }
+
+    pub fn override_window(&self) -> bool { self.window_open.load(Ordering::Relaxed) }
+    pub fn set_override_window(&self, open: bool) { self.window_open.store(open, Ordering::Relaxed); }
 
     pub fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({
@@ -82,7 +125,13 @@ impl GlobalOverrides {
             "msc_input": self.msc_input(),
             "msc_output": self.msc_output(),
             "network_external_input": self.network_external_input(),
+            "network_external_output": self.network_external_output(),
+            "network_local_input": self.network_local_input(),
+            "network_local_output": self.network_local_output(),
+            "sysex_input": self.sysex_input(),
+            "sysex_output": self.sysex_output(),
             "timecode_input": self.timecode_input(),
+            "timecode_output": self.timecode_output(),
         })
     }
 }

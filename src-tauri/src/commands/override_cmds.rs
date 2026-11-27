@@ -18,6 +18,19 @@ pub fn get_global_overrides() -> serde_json::Value {
     OVERRIDES.snapshot()
 }
 
+/// QLab `/overrideWindow {bool}`: show or hide the Override window.
+#[tauri::command]
+pub fn set_override_window_open(open: bool, app_handle: tauri::AppHandle) -> Result<(), String> {
+    OVERRIDES.set_override_window(open);
+    let _ = app_handle.emit("override-window-changed", open);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_override_window_open() -> bool {
+    OVERRIDES.override_window()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -29,5 +42,15 @@ mod tests {
             assert!(snap[key].is_boolean(), "{key}");
         }
         assert!(OVERRIDES.set("bogus", true).is_err());
+    }
+
+    #[test]
+    fn override_window_state_round_trips() {
+        let local = crate::engine::overrides::GlobalOverrides::new();
+        assert!(!local.override_window());
+        local.set_override_window(true);
+        assert!(local.override_window());
+        local.set_override_window(false);
+        assert!(!local.override_window());
     }
 }

@@ -700,6 +700,9 @@ export type GlobalOverrides = Record<string, boolean>;
 export const getGlobalOverrides = () => invoke<GlobalOverrides>("get_global_overrides");
 export const setGlobalOverride = (key: string, enabled: boolean) =>
   invoke<void>("set_global_override", { key, enabled });
+export const getOverrideWindowOpen = () => invoke<boolean>("get_override_window_open");
+export const setOverrideWindowOpen = (open: boolean) =>
+  invoke<void>("set_override_window_open", { open });
 export const dmxGetSnapshot = () => invoke<DmxUniverseSnapshot[]>("dmx_get_snapshot");
 
 // ---------------------------------------------------------------------------

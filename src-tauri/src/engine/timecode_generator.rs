@@ -81,6 +81,10 @@ impl MtcGenerator {
     /// Start generating MTC from `start_pos` on `port_name`, advancing in
     /// real time.  Returns `None` if the port cannot be opened.
     pub fn start(start_pos: TcPosition, port_name: Option<String>) -> Option<Self> {
+        // QLab's timecodeOutput override: no MTC while it is off.
+        if !crate::engine::overrides::OVERRIDES.timecode_output() {
+            return None;
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = Arc::clone(&stop);
 
@@ -210,6 +214,10 @@ fn ltc_gen_thread(
     mut prod: ringbuf::HeapProd<f32>,
     stop: Arc<AtomicBool>,
 ) {
+    // QLab's timecodeOutput override: no LTC while it is off.
+    if !crate::engine::overrides::OVERRIDES.timecode_output() {
+        return;
+    }
     let mut enc = LtcEncoder::new(start, sample_rate);
     let spf = enc.samples_per_frame().max(1);
     let mut frame_buf = vec![0.0_f32; spf];

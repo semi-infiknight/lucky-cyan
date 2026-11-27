@@ -236,6 +236,11 @@ pub fn send_midi_messages(messages: &[MidiMessage]) -> Result<()> {
         }
     };
     for (msg, bytes) in messages.iter().zip(encoded) {
+        // QLab's sysexOutput override: drop SysEx (0xF0...) messages only.
+        if bytes.first() == Some(&0xF0) && !crate::engine::overrides::OVERRIDES.sysex_output() {
+            log::debug!("MIDI: dropping SysEx message while the sysex output override is off");
+            continue;
+        }
         let ports = midi_out.ports();
         let port = ports
             .into_iter()

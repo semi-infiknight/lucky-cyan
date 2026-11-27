@@ -336,6 +336,14 @@ fn listen(
             if !crate::engine::overrides::OVERRIDES.midi_input() && is_channel_voice(status) {
                 return;
             }
+            // QLab's sysexInput override: system messages that are not MSC
+            // (SysEx is 0xF0 with a non-0x7F device id) are dropped when off.
+            if status >= 0xF0
+                && message.get(1) != Some(&0x7F)
+                && !crate::engine::overrides::OVERRIDES.sysex_input()
+            {
+                return;
+            }
             if config.enabled && is_channel_voice(status) {
                 let owned = message.to_vec();
                 if let Ok(mut slot) = last_message.lock() {

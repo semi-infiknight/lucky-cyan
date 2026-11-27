@@ -108,9 +108,20 @@ pub fn push(messages: &[(String, Vec<rosc::OscType>)]) {
     for (addr, args) in messages {
         let packet = rosc::OscPacket::Message(rosc::OscMessage { addr: addr.clone(), args: args.clone() });
         let Ok(bytes) = rosc::encoder::encode(&packet) else { continue };
+        let overrides = &super::overrides::OVERRIDES;
         for peer in map.keys() {
             // Honor QLab `/udpReplyPort` for this subscriber.
-            let _ = socket.send_to(&bytes, super::osc_server::reply_target(*peer));
+            let target = super::osc_server::reply_target(*peer);
+            // QLab network output overrides apply to pushes too.
+            let allowed = if target.ip().is_loopback() {
+                overrides.network_local_output()
+            } else {
+                overrides.network_external_output()
+            };
+            if !allowed {
+                continue;
+            }
+            let _ = socket.send_to(&bytes, target);
         }
     }
 }

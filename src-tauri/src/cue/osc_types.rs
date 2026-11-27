@@ -77,14 +77,47 @@ impl OscMessage {
     }
 
     pub fn send(&self, target: &str) -> anyhow::Result<usize> {
+        let overrides = &crate::engine::overrides::OVERRIDES;
+        anyhow::ensure!(
+            network_output_allowed(target, overrides.network_external_output(), overrides.network_local_output()),
+            "network output to '{target}' is disabled by the override window"
+        );
         let bytes = self.encode()?;
         Ok(crate::engine::net_interface::udp_send_socket()?.send_to(&bytes, target)?)
     }
 }
 
+/// QLab network output overrides: external targets need `network_external_output`,
+/// loopback targets need `network_local_output`. Pure so tests need no sockets.
+pub fn network_output_allowed(target: &str, external_output: bool, local_output: bool) -> bool {
+    let host = target.rsplit_once(':').map(|(host, _)| host).unwrap_or(target);
+    let local = host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if local { local_output } else { external_output }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_output_gate_splits_external_and_loopback_targets() {
+        // Both overrides on: everything allowed.
+        assert!(network_output_allowed("192.168.1.20:53000", true, true));
+        assert!(network_output_allowed("127.0.0.1:53001", true, true));
+        assert!(network_output_allowed("localhost:53001", true, true));
+        // External off: only loopback goes out.
+        assert!(!network_output_allowed("192.168.1.20:53000", false, true));
+        assert!(network_output_allowed("127.0.0.1:53001", false, true));
+        assert!(network_output_allowed("localhost:9", false, true));
+        // Local off: only external goes out.
+        assert!(network_output_allowed("192.168.1.20:53000", true, false));
+        assert!(!network_output_allowed("127.0.0.1:53001", true, false));
+        assert!(!network_output_allowed("LOCALHOST:9", true, false));
+        // Bare host without port still classifies.
+        assert!(!network_output_allowed("10.0.0.8", false, true));
+        assert!(network_output_allowed("10.0.0.8", true, false));
+    }
 
     #[test]
     fn osc_arg_int_roundtrip() {

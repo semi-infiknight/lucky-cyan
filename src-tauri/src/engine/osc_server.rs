@@ -320,6 +320,10 @@ fn server_loop(
                         log::debug!("{label}: dropping external packet while the network input override is off");
                         continue;
                     }
+                    if !crate::engine::overrides::OVERRIDES.network_local_input() && src.ip().is_loopback() {
+                        log::debug!("{label}: dropping local packet while the local network input override is off");
+                        continue;
+                    }
                     let data = &buf[..n];
                     let Some(packet) = protocol.decode(data) else {
                         log::debug!("{label}: ignored malformed or unsupported packet");
@@ -497,7 +501,8 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
                 || address == "/alwaysReply" || address.ends_with("/alwaysReply")
                 || address == "/forgetMeNot" || address.ends_with("/forgetMeNot")
                 || address == "/udpKeepAlive" || address.ends_with("/udpKeepAlive")
-                || address == "/udpReplyPort" || address.ends_with("/udpReplyPort") => {
+                || address == "/udpReplyPort" || address.ends_with("/udpReplyPort")
+                || address == "/overrideWindow" || address.ends_with("/overrideWindow") => {
                 match one.parse::<f64>() {
                     Ok(value) if (value * 1000.0).is_finite() => vec![rosc::OscType::Double(value)],
                     _ => vec![rosc::OscType::String((*one).to_owned())],
@@ -550,6 +555,8 @@ enum OscAction<'a> {
     ClientSession { action: ClientSessionAction },
     /// QLab `/udpReplyPort {0..65535}`: set this sender's UDP reply port.
     SetReplyPort(u16),
+    /// QLab `/overrideWindow {bool}` and `/toggleOverrideWindow` (`None` toggles).
+    SetOverrideWindow(Option<bool>),
     /// Trigger a full cue-list feedback dump.
     CueListRequest,
     /// Trigger a playhead feedback dump.
@@ -653,6 +660,12 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, src: SocketA
         }
         OscAction::SetReplyPort(port) => {
             apply_reply_port(port, src);
+            (true, false)
+        }
+        OscAction::SetOverrideWindow(open) => {
+            let open = open.unwrap_or_else(|| !crate::engine::overrides::OVERRIDES.override_window());
+            crate::engine::overrides::OVERRIDES.set_override_window(open);
+            let _ = app_handle.emit("override-window-changed", open);
             (true, false)
         }
         OscAction::Command(payload) => {
@@ -911,7 +924,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
         || addr == "/forgetMeNot" || addr.ends_with("/forgetMeNot")
         || addr == "/udpKeepAlive" || addr.ends_with("/udpKeepAlive")
-        || addr == "/udpReplyPort" || addr.ends_with("/udpReplyPort");
+        || addr == "/udpReplyPort" || addr.ends_with("/udpReplyPort")
+        || addr == "/overrideWindow" || addr.ends_with("/overrideWindow");
     if !args.is_empty() && !cue_write && !updates_arg {
         return OscAction::Unmatched;
     }
@@ -949,6 +963,20 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         return match args {
             [one] => match qlab_bool(one) {
                 Some(on) => OscAction::ClientSession { action: ClientSessionAction::Pin(on) },
+                None => OscAction::Unmatched,
+            },
+            _ => OscAction::Unmatched,
+        };
+    }
+    // QLab `/overrideWindow {bool}` (no-arg is the read, a query) and
+    // `/toggleOverrideWindow`. Any access level, like the other app controls.
+    if addr == "/overrideWindow" || addr == "/toggleOverrideWindow" {
+        let _ = workspace;
+        let toggle = addr == "/toggleOverrideWindow";
+        return match args {
+            [] if toggle => OscAction::SetOverrideWindow(None),
+            [one] if !toggle => match qlab_bool(one) {
+                Some(on) => OscAction::SetOverrideWindow(Some(on)),
                 None => OscAction::Unmatched,
             },
             _ => OscAction::Unmatched,
@@ -1078,7 +1106,13 @@ fn override_key(core: &str) -> Option<&'static str> {
         "mscInput" | "MscInput" => Some("msc_input"),
         "mscOutput" | "MscOutput" => Some("msc_output"),
         "networkExternalInput" | "NetworkExternalInput" => Some("network_external_input"),
+        "networkExternalOutput" | "NetworkExternalOutput" => Some("network_external_output"),
+        "networkLocalInput" | "NetworkLocalInput" => Some("network_local_input"),
+        "networkLocalOutput" | "NetworkLocalOutput" => Some("network_local_output"),
+        "sysexInput" | "SysexInput" => Some("sysex_input"),
+        "sysexOutput" | "SysexOutput" => Some("sysex_output"),
         "timecodeInput" | "TimecodeInput" => Some("timecode_input"),
+        "timecodeOutput" | "TimecodeOutput" => Some("timecode_output"),
         _ => None,
     }
 }
@@ -1343,6 +1377,8 @@ enum AppQueryKind {
     Workspaces,
     /// QLab `/overrides/{x}Enabled` read form: the current override state.
     Override(&'static str),
+    /// QLab `/overrideWindow` read form: is the Override window visible?
+    OverrideWindow,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1376,6 +1412,7 @@ impl<'a> CueQuery<'a> {
             if let Some(app) = match path {
                 "version" => Some(AppQueryKind::Version),
                 "workspaces" => Some(AppQueryKind::Workspaces),
+                "overrideWindow" => Some(AppQueryKind::OverrideWindow),
                 _ => path.strip_prefix("overrides/").and_then(override_enabled_key).map(AppQueryKind::Override),
             } {
                 return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::App(app) });
@@ -1486,6 +1523,8 @@ impl<'a> CueQuery<'a> {
             CueQueryKind::App(AppQueryKind::Override(key)) => Some(serde_json::json!(
                 crate::engine::overrides::OVERRIDES.get(key).unwrap_or(true)
             )),
+            CueQueryKind::App(AppQueryKind::OverrideWindow) =>
+                Some(serde_json::json!(crate::engine::overrides::OVERRIDES.override_window())),
             CueQueryKind::Sender(SenderQuery::AlwaysReply) =>
                 Some(serde_json::json!(always_reply_enabled(src))),
             CueQueryKind::Sender(SenderQuery::Updates) =>
@@ -2115,6 +2154,50 @@ mod tests {
         workspace.active_cue_list_mut().unwrap().set_playhead(None).unwrap();
         assert_eq!(resolve("/cue/playhead/stop", &workspace), None);
         assert_eq!(resolve("/cue/selected/start", &workspace), None);
+    }
+
+    #[test]
+    fn qlab_full_override_key_set_and_override_window_resolve() {
+        use crate::engine::overrides::GlobalOverrides;
+        // The whole QLab key set maps to registry keys, in both address styles.
+        let one = [rosc::OscType::Int(1)];
+        for (address, key, args) in [
+            ("/overrides/sysexInputEnabled", "sysex_input", &one[..]),
+            ("/overrides/sysexOutputEnabled", "sysex_output", &one[..]),
+            ("/overrides/networkExternalOutputEnabled", "network_external_output", &one[..]),
+            ("/overrides/networkLocalInputEnabled", "network_local_input", &one[..]),
+            ("/overrides/networkLocalOutputEnabled", "network_local_output", &one[..]),
+            ("/overrides/timecodeOutputEnabled", "timecode_output", &one[..]),
+            ("/overrides/toggleSysexInput", "sysex_input", &[][..]),
+            ("/overrides/toggleTimecodeOutput", "timecode_output", &[][..]),
+        ] {
+            assert!(matches!(resolve_action(address, args), OscAction::SetOverride { key: k, .. } if k == key), "{address}");
+        }
+        let local = GlobalOverrides::new();
+        for key in crate::engine::overrides::OVERRIDE_KEYS {
+            assert!(local.get(key).is_some(), "{key}");
+        }
+        assert_eq!(crate::engine::overrides::OVERRIDE_KEYS.len(), 13);
+
+        // `/overrideWindow {bool}` writes, `/toggleOverrideWindow` toggles,
+        // and the no-arg form reads the window state as an any-access query.
+        assert!(matches!(resolve_action("/overrideWindow", &[rosc::OscType::Int(1)]),
+            OscAction::SetOverrideWindow(Some(true))));
+        assert!(matches!(resolve_action("/overrideWindow", &[rosc::OscType::String("no".into())]),
+            OscAction::SetOverrideWindow(Some(false))));
+        assert!(matches!(resolve_action("/toggleOverrideWindow", &[]), OscAction::SetOverrideWindow(None)));
+        assert!(matches!(resolve_action("/overrideWindow", &[]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/toggleOverrideWindow", &[rosc::OscType::Int(1)]), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/overrideWindow", &[rosc::OscType::Int(1)], false),
+            OscAction::SetOverrideWindow(Some(true))));
+        let read_message = query_message("/overrideWindow");
+        let read = CueQuery::parse(&read_message).unwrap();
+        assert!(matches!(read.kind, CueQueryKind::App(AppQueryKind::OverrideWindow)));
+        assert!(read.is_any_access());
+        assert!(read.read(&Workspace::new("Window"), peer(), 0).unwrap().is_boolean());
+        assert!(parse_text_message(b"/overrideWindow 1").is_some());
+        assert!(parse_text_message(b"/toggleOverrideWindow").is_some());
+        assert!(parse_text_message(b"/overrideWindow").is_none());
     }
 
     #[test]
