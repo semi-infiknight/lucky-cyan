@@ -950,7 +950,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         .is_some_and(|(_, verb)| {
             let core = verb.split('/').next().unwrap_or(verb);
             matches!(core, "preWait" | "postWait" | "armed" | "qName" | "continueMode"
-                | "notes" | "colorName" | "flagged")
+                | "notes" | "colorName" | "flagged" | "load")
         });
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
@@ -1083,6 +1083,17 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             "reset" if args.is_empty() => (id, NetworkCueAction::Reset),
             "pause" if args.is_empty() => (id, NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
             "resume" if args.is_empty() => (id, NetworkCueAction::SetPause(NetworkPauseAction::Resume)),
+            "hardStop" if args.is_empty() => (id, NetworkCueAction::HardStop),
+            "devamp" if args.is_empty() => (id, NetworkCueAction::Devamp),
+            "togglePause" if args.is_empty() => (id, NetworkCueAction::SetPause(NetworkPauseAction::Toggle)),
+            "load" => match args {
+                [] => (id, NetworkCueAction::Load(0.0)),
+                [one] => match numeric_arg(std::slice::from_ref(one)) {
+                    Some(secs) if secs.is_finite() => (id, NetworkCueAction::Load(secs)),
+                    _ => return OscAction::Unmatched,
+                },
+                _ => return OscAction::Unmatched,
+            },
             verb => match cue_write_action(verb, args) {
                 Some(write) => (id, write),
                 None => return OscAction::Unmatched,
@@ -1097,6 +1108,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
                 "reset" if args.is_empty() => NetworkCueAction::Reset,
                 "pause" if args.is_empty() => NetworkCueAction::SetPause(NetworkPauseAction::Pause),
                 "resume" if args.is_empty() => NetworkCueAction::SetPause(NetworkPauseAction::Resume),
+                "hardStop" if args.is_empty() => NetworkCueAction::HardStop,
+                "togglePause" if args.is_empty() => NetworkCueAction::SetPause(NetworkPauseAction::Toggle),
                 verb => match cue_write_action(verb, args) {
                     Some(write) if write.is_write() => write,
                     _ => return OscAction::Unmatched,
@@ -1113,6 +1126,17 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             "reset" if args.is_empty() => (number, NetworkCueAction::Reset),
             "pause" if args.is_empty() => (number, NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
             "resume" if args.is_empty() => (number, NetworkCueAction::SetPause(NetworkPauseAction::Resume)),
+            "hardStop" if args.is_empty() => (number, NetworkCueAction::HardStop),
+            "devamp" if args.is_empty() => (number, NetworkCueAction::Devamp),
+            "togglePause" if args.is_empty() => (number, NetworkCueAction::SetPause(NetworkPauseAction::Toggle)),
+            "load" => match args {
+                [] => (number, NetworkCueAction::Load(0.0)),
+                [one] => match numeric_arg(std::slice::from_ref(one)) {
+                    Some(secs) if secs.is_finite() => (number, NetworkCueAction::Load(secs)),
+                    _ => return OscAction::Unmatched,
+                },
+                _ => return OscAction::Unmatched,
+            },
             verb => match cue_write_action(verb, args) {
                 Some(write) => (number, write),
                 None => return OscAction::Unmatched,
@@ -2475,6 +2499,58 @@ mod tests {
         assert!(CueQuery::parse(&query_message("/cue/5/preWait/+/1")).is_none());
         assert!(parse_text_message(b"/cue/5/preWait/+ 1").is_some());
         let _ = ContinueMode::AutoFollow; // enum stays queryable
+    }
+
+    #[test]
+    fn qlab_cue_action_verbs_hard_stop_toggle_pause_devamp_and_load_resolve() {
+        use NetworkPauseAction::Toggle;
+        let d = |v: f64| rosc::OscType::Double(v);
+        for (address, expected) in [
+            ("/cue/5/hardStop", NetworkCueAction::HardStop),
+            ("/cue/5/devamp", NetworkCueAction::Devamp),
+            ("/cue/5/togglePause", NetworkCueAction::SetPause(Toggle)),
+            ("/cue/playhead/hardStop", NetworkCueAction::HardStop),
+            ("/cue/selected/togglePause", NetworkCueAction::SetPause(Toggle)),
+        ] {
+            assert!(matches!(resolve_action(address, &[]), OscAction::AddressedCue { action, .. } if action == expected), "{address}");
+        }
+        assert!(matches!(resolve_action("/cue/5/load", &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::Load(v), .. } if v == 0.0));
+        assert!(matches!(resolve_action("/cue/5/load", &[d(12.5)]),
+            OscAction::AddressedCue { action: NetworkCueAction::Load(v), .. } if v == 12.5));
+        // Negative loads count from the end of the cue.
+        assert!(matches!(resolve_action("/cue/5/load", &[d(-3.0)]),
+            OscAction::AddressedCue { action: NetworkCueAction::Load(v), .. } if v == -3.0));
+        let uuid = uuid::Uuid::new_v4();
+        assert!(matches!(resolve_action(&format!("/cue_id/{uuid}/hardStop"), &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::HardStop, .. }));
+        assert!(matches!(resolve_action(&format!("/cue_id/{uuid}/load"), &[d(2.0)]),
+            OscAction::AddressedCue { action: NetworkCueAction::Load(2.0), .. }));
+        // Wildcards take the stop-family verbs, not devamp/load.
+        assert!(matches!(resolve_action("/cue/*/hardStop", &[]),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::HardStop, .. }));
+        assert!(matches!(resolve_action("/cue/*/togglePause", &[]),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::SetPause(Toggle), .. }));
+        assert!(matches!(resolve_action("/cue/*/devamp", &[]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/*/load", &[d(1.0)]), OscAction::Unmatched));
+        // Arguments on no-arg verbs and malformed load args are rejected.
+        assert!(matches!(resolve_action("/cue/5/hardStop", &[d(1.0)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/devamp", &[d(1.0)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/load", &[d(f64::NAN)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/load", &[d(1.0), d(2.0)]), OscAction::Unmatched));
+        // Actions are not saved-field writes: any access level, like start/stop.
+        assert!(matches!(authorized_action("/cue/5/hardStop", &[], false),
+            OscAction::AddressedCue { action: NetworkCueAction::HardStop, .. }));
+        assert!(matches!(authorized_action("/cue/5/load", &[d(1.0)], false),
+            OscAction::AddressedCue { action, .. } if !action.is_write()));
+        assert!(!NetworkCueAction::Load(1.0).is_write());
+        assert!(!NetworkCueAction::HardStop.is_write());
+        assert!(!NetworkCueAction::Devamp.is_write());
+        assert!(parse_text_message(b"/cue/5/hardStop").is_some());
+        assert!(parse_text_message(b"/cue/5/togglePause").is_some());
+        assert!(parse_text_message(b"/cue/5/devamp").is_some());
+        assert!(parse_text_message(b"/cue/5/load 2.5").is_some());
+        assert!(parse_text_message(b"/cue/5/load").is_some());
     }
 
     #[test]

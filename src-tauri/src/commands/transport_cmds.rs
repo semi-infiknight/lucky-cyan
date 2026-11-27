@@ -183,6 +183,12 @@ pub(crate) enum NetworkCueAction {
     Start,
     Select,
     Stop,
+    /// QLab `/cue/{n}/hardStop`: immediate stop, effects cut too.
+    HardStop,
+    /// QLab `/cue/{n}/devamp`: exit the loop at the end of the current pass.
+    Devamp,
+    /// QLab `/cue/{n}/load {seconds}`: arm at a time (negative counts from the end).
+    Load(f64),
     Reset,
     SetPause(NetworkPauseAction),
     /// QLab property writes (`/cue/{n}/preWait 5`, `/armed 0`, ...). These edit
@@ -258,6 +264,29 @@ pub(crate) fn address_numbered_network_cue(
         }
         NetworkCueAction::Select => super::cue_cmds::set_playhead_in_list(cue_list, Some(id), app_handle),
         NetworkCueAction::Stop => stop_cue_in_list(&mut transport, cue_list, id, app_handle),
+        NetworkCueAction::HardStop => {
+            let result = transport.hard_stop_cue(cue_list, &id).map_err(|error| error.to_string());
+            let _ = app_handle.emit("cue-list-refresh", ());
+            result
+        }
+        NetworkCueAction::Devamp => {
+            let result = transport.devamp_cue(cue_list, id).map(|_| ()).map_err(|error| error.to_string());
+            let _ = app_handle.emit("cue-list-refresh", ());
+            result
+        }
+        NetworkCueAction::Load(secs) => {
+            let secs = *secs;
+            let Some(cue) = cue_list.get_mut_recursive(&id) else { return Ok(()) };
+            let ms = if secs < 0.0 {
+                let total = cue.duration().map(|d| d.as_millis() as i64).unwrap_or(0);
+                (total + (secs * 1000.0) as i64).max(0)
+            } else {
+                (secs * 1000.0) as i64
+            };
+            cue.seek(ms.max(0) as u64, &transport.context);
+            let _ = app_handle.emit("cue-list-refresh", ());
+            Ok(())
+        }
         NetworkCueAction::Reset => {
             let result = transport.reset_cue(cue_list, id).map_err(|error| error.to_string());
             let _ = app_handle.emit("cue-list-refresh", ());
@@ -290,6 +319,10 @@ pub(crate) fn address_network_cue_pattern(
             NetworkCueAction::Stop => {
                 let list = &mut ws.cue_lists[index];
                 stop_cue_in_list(&mut transport, list, id, app_handle)
+            }
+            NetworkCueAction::HardStop => {
+                let list = &mut ws.cue_lists[index];
+                transport.hard_stop_cue(list, &id).map_err(|error| error.to_string())
             }
             NetworkCueAction::Reset => {
                 let list = &mut ws.cue_lists[index];

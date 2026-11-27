@@ -725,6 +725,11 @@ impl Transport {
         stopped.and(reset)
     }
 
+    /// Devamp the addressed cue's voices (QLab `/cue/{n}/devamp`).
+    pub fn devamp_cue(&self, cue_list: &mut CueList, cue_id: CueId) -> Result<bool> {
+        self.fire_whole_cue_devamp(cue_list, cue_id)
+    }
+
     pub(crate) fn reset_cue(&self, list: &mut CueList, id: CueId) -> Result<()> {
         list.cancel_enter_follow_for(id);
         let cue = list.get_mut(&id).ok_or_else(|| anyhow!("Cue {id} no longer exists"))?;
