@@ -109,7 +109,8 @@ pub fn push(messages: &[(String, Vec<rosc::OscType>)]) {
         let packet = rosc::OscPacket::Message(rosc::OscMessage { addr: addr.clone(), args: args.clone() });
         let Ok(bytes) = rosc::encoder::encode(&packet) else { continue };
         for peer in map.keys() {
-            let _ = socket.send_to(&bytes, peer);
+            // Honor QLab `/udpReplyPort` for this subscriber.
+            let _ = socket.send_to(&bytes, super::osc_server::reply_target(*peer));
         }
     }
 }

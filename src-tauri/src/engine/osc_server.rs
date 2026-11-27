@@ -335,7 +335,7 @@ fn server_loop(
                                 && (!config.allowed_ips.is_empty() || query.is_any_access())
                             {
                                 if let Some(reply) = on_query(query, src) {
-                                    let _ = socket.send_to(&reply, src);
+                                    let _ = socket.send_to(&reply, reply_target(src));
                                 }
                             }
                             // Query results are unicast and can change between identical requests.
@@ -368,7 +368,7 @@ fn server_loop(
                                 addr: format!("/reply{}", message.addr),
                                 args: vec![rosc::OscType::String(json.to_string())],
                             })) {
-                                let _ = socket.send_to(&bytes, src);
+                                let _ = socket.send_to(&bytes, reply_target(src));
                             }
                         }
                     }
@@ -384,6 +384,36 @@ fn server_loop(
 /// Clients that sent `/alwaysReply 1` get a `/reply{addr}` for every message.
 /// Same 61 s UDP keepalive as `/updates` subscribers (any packet refreshes).
 static ALWAYS_REPLY: Mutex<Option<HashMap<SocketAddr, Instant>>> = Mutex::new(None);
+
+/// QLab `/udpReplyPort {0..65535}`: per-sender port that receives UDP replies.
+/// `0` (or removal) restores the default of replying to the sender's own port.
+/// Same 61 s keepalive as the other per-sender registries; pinned clients keep theirs.
+static REPLY_PORTS: Mutex<Option<HashMap<SocketAddr, (u16, Instant)>>> = Mutex::new(None);
+
+fn set_reply_port(addr: SocketAddr, port: Option<u16>) {
+    if let Ok(mut guard) = REPLY_PORTS.lock() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        match port {
+            Some(port) => { map.insert(addr, (port, Instant::now())); }
+            None => { map.remove(&addr); }
+        }
+    }
+}
+
+/// The port this sender currently receives UDP replies on (its own port by default).
+fn current_reply_port(addr: SocketAddr) -> u16 {
+    let Ok(mut guard) = REPLY_PORTS.lock() else { return addr.port() };
+    let Some(map) = guard.as_mut() else { return addr.port() };
+    let now = Instant::now();
+    map.retain(|peer, (_, seen)| crate::engine::osc_updates::is_pinned(*peer)
+        || now.duration_since(*seen) < Duration::from_secs(61));
+    map.get(&addr).map(|(port, _)| *port).unwrap_or_else(|| addr.port())
+}
+
+/// Where to send a UDP reply for this sender, honoring `/udpReplyPort`.
+pub(crate) fn reply_target(addr: SocketAddr) -> SocketAddr {
+    SocketAddr::new(addr.ip(), current_reply_port(addr))
+}
 
 fn set_always_reply(addr: SocketAddr, on: bool) {
     if let Ok(mut guard) = ALWAYS_REPLY.lock() {
@@ -466,7 +496,8 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
                 || address == "/updates" || address.ends_with("/updates")
                 || address == "/alwaysReply" || address.ends_with("/alwaysReply")
                 || address == "/forgetMeNot" || address.ends_with("/forgetMeNot")
-                || address == "/udpKeepAlive" || address.ends_with("/udpKeepAlive") => {
+                || address == "/udpKeepAlive" || address.ends_with("/udpKeepAlive")
+                || address == "/udpReplyPort" || address.ends_with("/udpReplyPort") => {
                 match one.parse::<f64>() {
                     Ok(value) if (value * 1000.0).is_finite() => vec![rosc::OscType::Double(value)],
                     _ => vec![rosc::OscType::String((*one).to_owned())],
@@ -517,6 +548,8 @@ enum OscAction<'a> {
     AlwaysReply(bool),
     /// QLab `/forgetMeNot` | `/udpKeepAlive {0|1}` and `/disconnect`: client session.
     ClientSession { action: ClientSessionAction },
+    /// QLab `/udpReplyPort {0..65535}`: set this sender's UDP reply port.
+    SetReplyPort(u16),
     /// Trigger a full cue-list feedback dump.
     CueListRequest,
     /// Trigger a playhead feedback dump.
@@ -553,12 +586,17 @@ fn resolve_action<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a> {
     OscAction::Command(payload)
 }
 
+fn apply_reply_port(port: u16, src: SocketAddr) {
+    set_reply_port(src, if port == 0 { None } else { Some(port) });
+}
+
 fn apply_client_session(action: ClientSessionAction, src: SocketAddr) {
     match action {
         ClientSessionAction::Pin(on) => crate::engine::osc_updates::pin_client(src, on),
         ClientSessionAction::Disconnect => {
             crate::engine::osc_updates::disconnect_client(src);
             set_always_reply(src, false);
+            set_reply_port(src, None);
         }
     }
 }
@@ -611,6 +649,10 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, src: SocketA
         OscAction::AlwaysReply(_) => (true, false),
         OscAction::ClientSession { action } => {
             apply_client_session(action, src);
+            (true, false)
+        }
+        OscAction::SetReplyPort(port) => {
+            apply_reply_port(port, src);
             (true, false)
         }
         OscAction::Command(payload) => {
@@ -805,7 +847,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
         || addr == "/forgetMeNot" || addr.ends_with("/forgetMeNot")
-        || addr == "/udpKeepAlive" || addr.ends_with("/udpKeepAlive");
+        || addr == "/udpKeepAlive" || addr.ends_with("/udpKeepAlive")
+        || addr == "/udpReplyPort" || addr.ends_with("/udpReplyPort");
     if !args.is_empty() && !cue_write && !updates_arg {
         return OscAction::Unmatched;
     }
@@ -844,6 +887,18 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             [one] => match qlab_bool(one) {
                 Some(on) => OscAction::ClientSession { action: ClientSessionAction::Pin(on) },
                 None => OscAction::Unmatched,
+            },
+            _ => OscAction::Unmatched,
+        };
+    }
+    // QLab `/udpReplyPort {0..65535}`; the no-argument form is the read (a query).
+    if addr == "/udpReplyPort" {
+        let _ = workspace;
+        return match args {
+            [one] => match numeric_arg(std::slice::from_ref(one)) {
+                Some(value) if value.fract() == 0.0 && (0.0..=65535.0).contains(&value) =>
+                    OscAction::SetReplyPort(value as u16),
+                _ => OscAction::Unmatched,
             },
             _ => OscAction::Unmatched,
         };
@@ -1226,6 +1281,8 @@ enum SenderQuery {
     Updates,
     /// QLab `/forgetMeNot`/`/udpKeepAlive` read form: is this sender pinned?
     Pinned,
+    /// QLab `/udpReplyPort` read form: this sender's current reply port.
+    ReplyPort,
 }
 
 struct CueQuery<'a> {
@@ -1258,6 +1315,7 @@ impl<'a> CueQuery<'a> {
             "alwaysReply" => Some(SenderQuery::AlwaysReply),
             "updates" => Some(SenderQuery::Updates),
             "forgetMeNot" | "udpKeepAlive" => Some(SenderQuery::Pinned),
+            "udpReplyPort" => Some(SenderQuery::ReplyPort),
             _ => None,
         } {
             return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::Sender(sender) });
@@ -1359,6 +1417,8 @@ impl<'a> CueQuery<'a> {
                 Some(serde_json::json!(crate::engine::osc_updates::is_subscribed(src))),
             CueQueryKind::Sender(SenderQuery::Pinned) =>
                 Some(serde_json::json!(crate::engine::osc_updates::is_pinned(src))),
+            CueQueryKind::Sender(SenderQuery::ReplyPort) =>
+                Some(serde_json::json!(current_reply_port(src))),
             CueQueryKind::CueLists => Some(serde_json::Value::Array(
                 workspace.cue_lists.iter().map(|list| serde_json::json!({
                     "id": list.id.to_string(),
@@ -2409,6 +2469,133 @@ mod tests {
         assert!(parse_text_message(b"/udpKeepAlive true").is_some());
         assert!(parse_text_message(b"/forgetMeNot").is_none());
         assert!(parse_text_message(b"/disconnect 1").is_none());
+    }
+
+    #[test]
+    fn qlab_udp_reply_port_resolves_validates_and_reads_at_any_access_level() {
+        assert!(matches!(resolve_action("/udpReplyPort", &[rosc::OscType::Int(53001)]), OscAction::SetReplyPort(53001)));
+        assert!(matches!(resolve_action("/udpReplyPort", &[rosc::OscType::Double(0.0)]), OscAction::SetReplyPort(0)));
+        assert!(matches!(resolve_action("/workspace/Blue/udpReplyPort", &[rosc::OscType::Int(65535)]), OscAction::SetReplyPort(65535)));
+        assert!(matches!(resolve_action("/udpReplyPort", &[rosc::OscType::Int(65536)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/udpReplyPort", &[rosc::OscType::Double(1.5)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/udpReplyPort", &[rosc::OscType::String("x".into())]), OscAction::Unmatched));
+        // No argument is the read form: a query, not a command.
+        assert!(matches!(resolve_action("/udpReplyPort", &[]), OscAction::Unmatched));
+        let read_message = query_message("/udpReplyPort");
+        let read = CueQuery::parse(&read_message).unwrap();
+        assert!(matches!(read.kind, CueQueryKind::Sender(SenderQuery::ReplyPort)));
+        assert!(read.is_any_access());
+        let mut write = query_message("/udpReplyPort");
+        write.args.push(rosc::OscType::Int(1));
+        assert!(CueQuery::parse(&write).is_none());
+        assert!(matches!(authorized_action("/udpReplyPort", &[rosc::OscType::Int(9)], false), OscAction::SetReplyPort(9)));
+        assert!(parse_text_message(b"/udpReplyPort 53001").is_some());
+        assert!(parse_text_message(b"/udpReplyPort").is_none());
+        assert!(parse_text_message(b"/udpReplyPort 70000").is_none());
+    }
+
+    #[test]
+    fn udp_reply_port_registry_tracks_resets_and_expires_unless_pinned() {
+        // Port 14/15: other registry tests own 9-13.
+        let peer_addr: SocketAddr = (Ipv4Addr::LOCALHOST, 14).into();
+        let other_addr: SocketAddr = (Ipv4Addr::LOCALHOST, 15).into();
+        assert_eq!(current_reply_port(peer_addr), 14, "default is the sender's own port");
+        set_reply_port(peer_addr, Some(53999));
+        assert_eq!(current_reply_port(peer_addr), 53999);
+        assert_eq!(reply_target(peer_addr), SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 53999));
+        set_reply_port(peer_addr, None);
+        assert_eq!(current_reply_port(peer_addr), 14, "removal resets to the default");
+
+        // Stale entries expire; pinned ones survive.
+        set_reply_port(peer_addr, Some(53999));
+        set_reply_port(other_addr, Some(53998));
+        crate::engine::osc_updates::pin_client(peer_addr, true);
+        let stale = Instant::now().checked_sub(Duration::from_secs(120)).unwrap();
+        if let Ok(mut guard) = REPLY_PORTS.lock() {
+            let map = guard.as_mut().unwrap();
+            map.insert(peer_addr, (53999, stale));
+            map.insert(other_addr, (53998, stale));
+        }
+        assert_eq!(current_reply_port(peer_addr), 53999, "pinned reply ports survive");
+        assert_eq!(current_reply_port(other_addr), 15, "stale reply ports expire to the default");
+        crate::engine::osc_updates::pin_client(peer_addr, false);
+        set_reply_port(peer_addr, None);
+        set_reply_port(other_addr, None);
+    }
+
+    #[test]
+    fn udp_reply_port_redirects_query_replies_to_the_requested_socket() {
+        let (status_tx, statuses) = crossbeam_channel::unbounded();
+        let protocol = Protocol::Osc;
+        // Empty allowlist: /version and the /udpReplyPort read are any-access.
+        let config = OscReceiveConfig { enabled: true, port: 0, ..OscReceiveConfig::default() };
+        let listener = Listener::spawn(
+            protocol, protocol.settings(&config), || Ipv4Addr::LOCALHOST.into(),
+            move |status| { let _ = status_tx.send(status.clone()); },
+            |packet, _allowed, src| {
+                // Mirror the production dispatch for per-sender commands.
+                if let rosc::OscPacket::Message(message) = packet {
+                    match resolve_action(&message.addr, &message.args) {
+                        OscAction::SetReplyPort(port) => apply_reply_port(port, src),
+                        OscAction::Updates(on) => crate::engine::osc_updates::set_subscription(src, on),
+                        OscAction::ClientSession { action } => apply_client_session(action, src),
+                        _ => {}
+                    }
+                }
+            },
+            |query, src| {
+                let data = match &query.kind {
+                    CueQueryKind::Sender(SenderQuery::ReplyPort) => Some(serde_json::json!(current_reply_port(src))),
+                    _ => Some(serde_json::json!("x")),
+                };
+                query.encode_reply(uuid::Uuid::new_v4(), data)
+            },
+        );
+        let OscListenerStatus::Listening { address } = statuses.recv_timeout(Duration::from_secs(2)).unwrap() else {
+            panic!("expected an OSC socket");
+        };
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let reply_sock = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        for socket in [&sender, &reply_sock] {
+            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        }
+        let mut response = [0; 1024];
+        let send = |addr: &str, args: Vec<rosc::OscType>| {
+            let packet = rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
+                addr: addr.into(), args,
+            })).unwrap();
+            sender.send_to(&packet, address).unwrap();
+        };
+        let recv_on = |socket: &UdpSocket, response: &mut [u8; 1024]| -> (String, serde_json::Value) {
+            let (length, _origin) = socket.recv_from(response).unwrap();
+            let (_, rosc::OscPacket::Message(message)) = rosc::decoder::decode_udp(&response[..length]).unwrap() else {
+                panic!("expected a single OSC reply");
+            };
+            let [rosc::OscType::String(json)] = message.args.as_slice() else { panic!("expected JSON data") };
+            (message.addr, serde_json::from_str(json).unwrap())
+        };
+
+        // Point replies at the second socket, then query: the reply lands there.
+        send("/udpReplyPort", vec![rosc::OscType::Int(reply_sock.local_addr().unwrap().port() as i32)]);
+        send("/version", vec![]);
+        let (addr, _json) = recv_on(&reply_sock, &mut response);
+        assert_eq!(addr, "/reply/version");
+        sender.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        assert!(sender.recv_from(&mut response).is_err(), "the sender's own socket gets nothing");
+        sender.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+        // The no-arg read reports the custom port, delivered to the same socket.
+        send("/udpReplyPort", vec![]);
+        let (addr, json) = recv_on(&reply_sock, &mut response);
+        assert_eq!(addr, "/reply/udpReplyPort");
+        assert_eq!(json["data"], reply_sock.local_addr().unwrap().port());
+
+        // `/udpReplyPort 0` restores the default: replies return to the sender.
+        send("/udpReplyPort", vec![rosc::OscType::Int(0)]);
+        send("/version", vec![]);
+        let (addr, _json) = recv_on(&sender, &mut response);
+        assert_eq!(addr, "/reply/version");
+        listener.stop();
     }
 
     #[test]
