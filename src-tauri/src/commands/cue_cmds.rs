@@ -19,7 +19,7 @@ use crate::{
             apply_decoded_audio_to_copy, assign_fresh_ids, assign_fresh_ids_to_copies, collect_decoded_audio,
         },
         traits::Cue,
-        types::{ContinueMode, CueColor, CueState, CueType, GroupMode, PlaylistSecondTrigger, SliceList, PLAY_COUNT_INFINITE},
+        types::{ContinueMode, CueColor, CueId, CueState, CueType, GroupMode, PlaylistSecondTrigger, SliceList, PLAY_COUNT_INFINITE},
         video_cue::VideoCue,
     },
     engine::{
@@ -638,6 +638,31 @@ pub fn add_cue(
     Ok(cue_id.to_string())
 }
 
+/// Create a cue of `cue_type` at the end of the active cue list, with an undo
+/// snapshot. The caller holds the workspace lock (used by OSC `/new`).
+pub(crate) fn create_cue_in_active_list(
+    state: &AppState,
+    ws: &mut Workspace,
+    app_handle: &tauri::AppHandle,
+    cue_type: CueType,
+) -> Result<CueId, String> {
+    let registry = state.registry.lock().map_err(|e| e.to_string())?;
+    let mut cue = registry.create(&cue_type).map_err(|e| e.to_string())?;
+    let cue_id = cue.id();
+    drop(registry);
+    let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
+    state.undo_stack.lock().map_err(|e| e.to_string())?
+        .push_action(cue_list.id, super::undo_cmds::take_snapshot(cue_list));
+    if !cue_list.auto_renumber {
+        cue.set_number(Some(cue_list.next_available_number()));
+    }
+    cue_list.push(cue);
+    ws.mark_modified();
+    let _ = app_handle.emit("cue-list-refresh", ());
+    let _ = app_handle.emit("workspace-modified", serde_json::json!({}));
+    Ok(cue_id)
+}
+
 /// Remove a cue by ID.
 #[tauri::command]
 pub fn remove_cue(
@@ -705,7 +730,7 @@ fn remove_owned_cues(
 
 /// Validate the selected membership before submitting any Stop. Keep cue
 /// ownership through a successful removal so engine voices can be stopped.
-fn apply_cue_removal(
+pub(crate) fn apply_cue_removal(
     ws: &mut Workspace,
     history: &mut UndoHistory,
     workspace_id: Uuid,
@@ -742,7 +767,7 @@ fn apply_cue_removal(
     Ok(true)
 }
 
-fn stop_removed_subtree(cue: &mut dyn Cue, context: &crate::cue::context::CueContext) {
+pub(crate) fn stop_removed_subtree(cue: &mut dyn Cue, context: &crate::cue::context::CueContext) {
     if let Some(children) = cue.child_cues_mut() {
         for child in children {
             stop_removed_subtree(child.as_mut(), context);

@@ -235,6 +235,8 @@ pub(crate) enum NetworkCueAction {
     /// QLab `/cue/{n}/panic [seconds]`: fade out and stop the cue; `Some(0)`
     /// or a second panic while the fade runs hard-stops immediately.
     Panic(Option<f64>),
+    /// QLab `/cue/{n}/delete`: remove the cue from its list (undoable).
+    Delete,
     /// QLab `/cue/{n}/load {seconds}`: arm at a time (negative counts from the end).
     Load(f64),
     Reset,
@@ -288,6 +290,7 @@ impl NetworkCueAction {
                 | NetworkCueAction::SetRate { .. }
                 | NetworkCueAction::SetLevel { .. }
                 | NetworkCueAction::SetVideoProp { .. }
+                | NetworkCueAction::Delete
         )
     }
 }
@@ -359,6 +362,11 @@ pub(crate) fn address_numbered_network_cue(
             result
         }
         NetworkCueAction::SetPause(pause) => network_pause_in_list(&transport.context, cue_list, Some(id), *pause, app_handle),
+        NetworkCueAction::Delete => {
+            let result = delete_cue_locked(state, &mut ws, index, id, app_handle);
+            let _ = app_handle.emit("cue-list-refresh", ());
+            result
+        }
         // QLab `/live` writes drive the running voice and record a temporary
         // override; they never touch saved data and are not undoable.
         NetworkCueAction::SetRate { value, live: true } => {
@@ -379,6 +387,53 @@ pub(crate) fn address_numbered_network_cue(
         write if write.is_write() => apply_write(&mut ws, index, id, write, app_handle),
         _ => Ok(()),
     }
+}
+
+/// QLab `/cue/{n}/delete`: remove the cue (undoable), stopping it first when
+/// running. The caller holds the workspace lock.
+fn delete_cue_locked(
+    state: &AppState,
+    ws: &mut Workspace,
+    index: usize,
+    id: CueId,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    let Some(list) = ws.cue_lists.get(index) else { return Ok(()) };
+    let list_id = list.id;
+    let workspace_id = ws.instance_id;
+    let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
+    let mut history = state.undo_stack.lock().map_err(|e| e.to_string())?;
+    let context = stop_context(state, stop_fade_ms);
+    let result = crate::commands::cue_cmds::apply_cue_removal(
+        ws,
+        &mut history,
+        workspace_id,
+        list_id,
+        &[id],
+        None,
+        |cue| crate::commands::cue_cmds::stop_removed_subtree(cue, &context),
+    );
+    drop(history);
+    let _ = app_handle.emit("workspace-modified", serde_json::json!({}));
+    result.map(|_| ()).map_err(|error| error.to_string())
+}
+
+/// QLab `/new {cue_type}` (optionally workspace-scoped): create a cue of the
+/// given type at the end of the active cue list.
+pub(crate) fn create_network_cue(
+    state: &AppState,
+    app_handle: &tauri::AppHandle,
+    workspace: Option<crate::engine::osc_server::WorkspaceSelector<'_>>,
+    cue_type: CueType,
+) -> Result<(), String> {
+    let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    if let Some(requested) = workspace {
+        if !requested.matches(&ws) {
+            return Ok(());
+        }
+    }
+    crate::commands::cue_cmds::create_cue_in_active_list(state, &mut ws, app_handle, cue_type)?;
+    Ok(())
 }
 
 /// QLab `/cue/{n}/rate/live {number}`: set the running voice's rate and record
@@ -451,6 +506,9 @@ pub(crate) fn address_network_cue_pattern(
             NetworkCueAction::SetPause(pause) => {
                 let list = &mut ws.cue_lists[index];
                 network_pause_in_list(&transport.context, list, Some(id), *pause, app_handle)
+            }
+            NetworkCueAction::Delete => {
+                delete_cue_locked(state, &mut ws, index, id, app_handle)
             }
             NetworkCueAction::SetRate { value, live: true } => {
                 let list = &mut ws.cue_lists[index];

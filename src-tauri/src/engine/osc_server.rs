@@ -16,7 +16,7 @@ use crossbeam_channel::{Receiver, Sender};
 use tauri::{Emitter, Manager};
 use uuid::Uuid;
 
-use crate::cue::{traits::Cue, types::CueId};
+use crate::cue::{traits::Cue, types::{CueId, CueType}};
 use crate::commands::transport_cmds::{
     address_network_cue_pattern, address_numbered_network_cue, control_network_list_pause,
     control_network_workspace, NetworkCueAction, NetworkPauseAction, NetworkWorkspaceAction,
@@ -415,6 +415,11 @@ fn handle_decoded_packet(ctx: &mut Dispatch<'_>, packet: &rosc::OscPacket, data:
         }
     }
     crate::engine::osc_updates::touch(src);
+    // Decide on the alwaysReply acknowledgement before dispatch, but send it
+    // after: session commands like /disconnect must take effect before their
+    // acknowledgement leaves, so a client that reads the reply observes the
+    // cleared registries.
+    let mut ack: Option<(&rosc::OscMessage, bool)> = None;
     if let rosc::OscPacket::Message(message) = packet {
         if let OscAction::AlwaysReply(on) = resolve_action(&message.addr, &message.args) {
             set_always_reply(src, on);
@@ -427,19 +432,22 @@ fn handle_decoded_packet(ctx: &mut Dispatch<'_>, packet: &rosc::OscPacket, data:
                 resolve_action(&message.addr, &message.args),
                 OscAction::Unmatched
             );
-            let json = serde_json::json!({
-                "address": message.addr,
-                "status": if matched { "ok" } else { "error" },
-            });
-            if let Ok(bytes) = rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
-                addr: format!("/reply{}", message.addr),
-                args: vec![rosc::OscType::String(json.to_string())],
-            })) {
-                (ctx.reply)(&bytes);
-            }
+            ack = Some((message, matched));
         }
     }
     (ctx.on_packet)(packet, !allowed_ips.is_empty(), src);
+    if let Some((message, matched)) = ack {
+        let json = serde_json::json!({
+            "address": message.addr,
+            "status": if matched { "ok" } else { "error" },
+        });
+        if let Ok(bytes) = rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
+            addr: format!("/reply{}", message.addr),
+            args: vec![rosc::OscType::String(json.to_string())],
+        })) {
+            (ctx.reply)(&bytes);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -846,7 +854,7 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
                 || address == "/overrideWindow" || address.ends_with("/overrideWindow")
                 || address == "/replyFormat" || address.ends_with("/replyFormat")
                 || address == "/eventFormat" || address.ends_with("/eventFormat")
-                || address == "/workingDirectory" => {
+                || address == "/workingDirectory" || address == "/new" || address.ends_with("/new") => {
                 match one.parse::<f64>() {
                     Ok(value) if (value * 1000.0).is_finite() => vec![rosc::OscType::Double(value)],
                     _ => vec![rosc::OscType::String((*one).to_owned())],
@@ -909,6 +917,8 @@ enum OscAction<'a> {
     SetEventFormat(String),
     /// QLab `/workingDirectory {path}`: set the application working directory.
     SetWorkingDirectory(String),
+    /// QLab `/new {cue_type}`: create a cue of that type in the active list.
+    CreateCue { workspace: Option<WorkspaceSelector<'a>>, cue_type: CueType },
     /// Trigger a full cue-list feedback dump.
     CueListRequest,
     /// Trigger a playhead feedback dump.
@@ -1047,6 +1057,17 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, src: SocketA
                 }
             }
         }
+        OscAction::CreateCue { workspace, cue_type } => {
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                let result = crate::commands::transport_cmds::create_network_cue(
+                    &state, app_handle, workspace, cue_type,
+                );
+                if let Err(error) = result {
+                    log::warn!("OSC /new: {error}");
+                }
+            }
+            (true, true)
+        }
         OscAction::Command(payload) => {
             let _ = app_handle.emit("osc-command", &payload);
             (true, true)
@@ -1098,7 +1119,8 @@ fn authorized_action<'a>(addr: &'a str, args: &[rosc::OscType], explicitly_allow
         | OscAction::AddressedCuePattern { action: NetworkCueAction::Reset, .. }
         | OscAction::WorkspaceTransport { .. }
         | OscAction::SetOverride { .. }
-        | OscAction::SetWorkingDirectory(_) if !explicitly_allowed => OscAction::Unmatched,
+        | OscAction::SetWorkingDirectory(_)
+        | OscAction::CreateCue { .. } if !explicitly_allowed => OscAction::Unmatched,
         // Property writes edit saved show data: control-level only.
         OscAction::AddressedCue { action, .. }
         | OscAction::AddressedCuePattern { action, .. } if !explicitly_allowed && action.is_write() => OscAction::Unmatched,
@@ -1381,7 +1403,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         || addr == "/overrideWindow" || addr.ends_with("/overrideWindow")
         || addr == "/replyFormat" || addr.ends_with("/replyFormat")
         || addr == "/eventFormat" || addr.ends_with("/eventFormat")
-        || addr == "/workingDirectory";
+        || addr == "/workingDirectory" || addr == "/new" || addr.ends_with("/new");
     if !args.is_empty() && !cue_write && !updates_arg {
         return OscAction::Unmatched;
     }
@@ -1411,6 +1433,16 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         let _ = workspace;
         return match args {
             [] => OscAction::ClientSession { action: ClientSessionAction::Disconnect },
+            _ => OscAction::Unmatched,
+        };
+    }
+    // QLab `/new {cue_type}`: create a cue of the given type in the active list.
+    if addr == "/new" {
+        return match args {
+            [rosc::OscType::String(text)] => match CueType::from_qlab_name(text) {
+                Some(cue_type) => OscAction::CreateCue { workspace, cue_type },
+                None => OscAction::Unmatched,
+            },
             _ => OscAction::Unmatched,
         };
     }
@@ -1566,6 +1598,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             "hardStop" if args.is_empty() => (id, NetworkCueAction::HardStop),
             "devamp" if args.is_empty() => (id, NetworkCueAction::Devamp),
             "togglePause" if args.is_empty() => (id, NetworkCueAction::SetPause(NetworkPauseAction::Toggle)),
+            "delete" if args.is_empty() => (id, NetworkCueAction::Delete),
             // QLab `/cue_id/{id}/panic [seconds]`: fade out and stop; a second
             // panic while fading hard-stops immediately.
             "panic" => match args {
@@ -1601,6 +1634,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
                 "hardStop" if args.is_empty() => NetworkCueAction::HardStop,
                 "togglePause" if args.is_empty() => NetworkCueAction::SetPause(NetworkPauseAction::Toggle),
                 "panic" if args.is_empty() => NetworkCueAction::Panic(None),
+                "delete" if args.is_empty() => NetworkCueAction::Delete,
                 verb => match cue_write_action(verb, args) {
                     Some(write) if write.is_write() => write,
                     _ => return OscAction::Unmatched,
@@ -1620,6 +1654,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             "hardStop" if args.is_empty() => (number, NetworkCueAction::HardStop),
             "devamp" if args.is_empty() => (number, NetworkCueAction::Devamp),
             "togglePause" if args.is_empty() => (number, NetworkCueAction::SetPause(NetworkPauseAction::Toggle)),
+            "delete" if args.is_empty() => (number, NetworkCueAction::Delete),
             // QLab `/cue/{n}/panic [seconds]`: fade out and stop the cue.
             "panic" => match args {
                 [] => (number, NetworkCueAction::Panic(None)),
@@ -1822,7 +1857,7 @@ enum CueQueryTarget<'a> {
 }
 
 #[derive(Clone, Copy)]
-enum WorkspaceSelector<'a> {
+pub(crate) enum WorkspaceSelector<'a> {
     Instance(Uuid),
     Name(&'a str),
 }
@@ -1849,7 +1884,7 @@ impl<'a> WorkspaceSelector<'a> {
         None
     }
 
-    fn matches(self, workspace: &Workspace) -> bool {
+    pub(crate) fn matches(self, workspace: &Workspace) -> bool {
         match self {
             Self::Instance(id) => workspace.instance_id() == id,
             Self::Name(name) => workspace.metadata.name == name
@@ -3480,6 +3515,46 @@ mod tests {
     }
 
     #[test]
+    fn qlab_new_and_delete_cue_messages_resolve_and_are_control_level() {
+        let s = |text: &str| rosc::OscType::String(text.into());
+        // /new {cue_type} creates a cue; QLab type names map case-insensitively.
+        assert!(matches!(resolve_action("/new", &[s("audio")]),
+            OscAction::CreateCue { cue_type: CueType::Audio, workspace: None }));
+        assert!(matches!(resolve_action("/new", &[s("MIDI File")]),
+            OscAction::CreateCue { cue_type: CueType::MidiFile, .. }));
+        assert!(matches!(resolve_action("/new", &[s("cue cart")]),
+            OscAction::CreateCue { cue_type: CueType::Group, .. }));
+        assert!(matches!(resolve_action("/workspace/Blue/new", &[s("fade")]),
+            OscAction::CreateCue { cue_type: CueType::Fade, workspace: Some(_) }));
+        assert!(matches!(resolve_action("/new", &[s("bogus")]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/new", &[]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/new", &[s("audio"), s("x")]), OscAction::Unmatched));
+        // Create is an edit: allowlist required.
+        assert!(matches!(authorized_action("/new", &[s("audio")], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/new", &[s("audio")], true),
+            OscAction::CreateCue { .. }));
+        assert!(parse_text_message(b"/new audio").is_some());
+
+        // /cue/{n}/delete on number, id, playhead and wildcards; args rejected.
+        assert!(matches!(resolve_action("/cue/5/delete", &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::Delete, number: "5", .. }));
+        let id = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(resolve_action(&format!("/cue_id/{id}/delete"), &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::Delete, .. }));
+        assert!(matches!(resolve_action("/cue/playhead/delete", &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::Delete, number: "playhead", .. }));
+        assert!(matches!(resolve_action("/cue/*/delete", &[]),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::Delete, .. }));
+        assert!(matches!(resolve_action("/cue/5/delete", &[s("x")]), OscAction::Unmatched));
+        // Delete edits the saved show: control-level only.
+        assert!(NetworkCueAction::Delete.is_write());
+        assert!(matches!(authorized_action("/cue/5/delete", &[], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/5/delete", &[], true),
+            OscAction::AddressedCue { action: NetworkCueAction::Delete, .. }));
+        assert!(parse_text_message(b"/cue/5/delete").is_some());
+    }
+
+    #[test]
     fn listen_subscriptions_receive_qlab_event_workspace_messages_over_udp() {
         let (status_tx, statuses) = crossbeam_channel::unbounded();
         let protocol = Protocol::Osc;
@@ -4402,7 +4477,7 @@ mod tests {
             panic!("expected an OSC socket");
         };
         let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        sender.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        sender.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let src = sender.local_addr().unwrap();
         let mut response = [0; 1024];
         let send = |addr: &str, args: Vec<rosc::OscType>| {

@@ -37,11 +37,27 @@ struct ListenerPrefs {
 }
 
 static LISTENERS: Mutex<Option<HashMap<SocketAddr, (ListenerPrefs, Instant)>>> = Mutex::new(None);
+/// `/eventFormat` values for senders that have not (yet) sent `/listen`;
+/// setting a format alone does not subscribe the client to broadcasts.
+static FORMATS: Mutex<Option<HashMap<SocketAddr, (String, Instant)>>> = Mutex::new(None);
 
 fn prune(guard: &mut HashMap<SocketAddr, (ListenerPrefs, Instant)>) {
     let now = Instant::now();
     guard.retain(|peer, (_, seen)| crate::engine::osc_updates::is_pinned(*peer)
         || now.duration_since(*seen) < LISTENER_TTL);
+}
+
+fn prune_formats(guard: &mut HashMap<SocketAddr, (String, Instant)>) {
+    let now = Instant::now();
+    guard.retain(|peer, (_, seen)| crate::engine::osc_updates::is_pinned(*peer)
+        || now.duration_since(*seen) < LISTENER_TTL);
+}
+
+fn pending_format(addr: SocketAddr) -> Option<String> {
+    let mut guard = FORMATS.lock().ok()?;
+    let map = guard.as_mut()?;
+    prune_formats(map);
+    map.get(&addr).map(|(format, _)| format.clone())
 }
 
 /// `/listen` (all events) or `/listen/{event}` (scoped). The optional detail
@@ -56,6 +72,10 @@ pub fn listen(addr: SocketAddr, event: Option<&str>) {
             (slot, None) => *slot = None,
             (Some(set), Some(event)) => { set.insert(event.to_string()); }
             (slot @ None, Some(event)) => *slot = Some(HashSet::from([event.to_string()])),
+        }
+        // A format set before `/listen` applies once the client subscribes.
+        if entry.0.format.is_none() {
+            entry.0.format = pending_format(addr);
         }
     }
 }
@@ -84,21 +104,38 @@ pub fn ignore(addr: SocketAddr, event: Option<&str>) {
 }
 
 /// `/eventFormat {string}` (empty resets); `None` reads the current format.
+/// Recorded even before `/listen` — the format is not a subscription.
 pub fn set_event_format(addr: SocketAddr, format: Option<String>) {
-    if let Ok(mut guard) = LISTENERS.lock() {
+    let format = format.filter(|f| !f.is_empty());
+    if let Ok(mut guard) = FORMATS.lock() {
         let map = guard.get_or_insert_with(HashMap::new);
-        prune(map);
-        let entry = map.entry(addr).or_insert_with(|| (ListenerPrefs::default(), Instant::now()));
-        entry.1 = Instant::now();
-        entry.0.format = format.filter(|f| !f.is_empty());
+        prune_formats(map);
+        match &format {
+            Some(format) => { map.insert(addr, (format.clone(), Instant::now())); }
+            None => { map.remove(&addr); }
+        }
+    }
+    // Keep an already-subscribed listener's entry in sync.
+    if let Ok(mut guard) = LISTENERS.lock() {
+        if let Some(map) = guard.as_mut() {
+            prune(map);
+            if let Some((prefs, _)) = map.get_mut(&addr) {
+                prefs.format = format;
+            }
+        }
     }
 }
 
 pub fn event_format(addr: SocketAddr) -> Option<String> {
-    let mut guard = LISTENERS.lock().ok()?;
-    let map = guard.as_mut()?;
-    prune(map);
-    map.get(&addr).and_then(|(prefs, _)| prefs.format.clone())
+    if let Ok(mut guard) = LISTENERS.lock() {
+        if let Some(map) = guard.as_mut() {
+            prune(map);
+            if let Some((prefs, _)) = map.get(&addr) {
+                return prefs.format.clone();
+            }
+        }
+    }
+    pending_format(addr)
 }
 
 pub fn has_listeners() -> bool {
@@ -115,9 +152,14 @@ pub fn is_listening(addr: SocketAddr) -> bool {
     map.contains_key(&addr)
 }
 
-/// QLab `/disconnect` also drops broadcast subscriptions.
+/// QLab `/disconnect` also drops broadcast subscriptions and formats.
 pub fn disconnect_client(addr: SocketAddr) {
     if let Ok(mut guard) = LISTENERS.lock() {
+        if let Some(map) = guard.as_mut() {
+            map.remove(&addr);
+        }
+    }
+    if let Ok(mut guard) = FORMATS.lock() {
         if let Some(map) = guard.as_mut() {
             map.remove(&addr);
         }
@@ -247,6 +289,20 @@ mod tests {
     }
 
     #[test]
+    fn event_format_alone_does_not_subscribe() {
+        let addr = peer(41004);
+        set_event_format(addr, Some("/cue/#data#/start".into()));
+        assert!(!is_listening(addr), "a format alone is not a subscription");
+        assert_eq!(event_format(addr), Some("/cue/#data#/start".into()));
+        listen(addr, Some("go"));
+        assert_eq!(event_format(addr), Some("/cue/#data#/start".into()), "pending format merges on listen");
+        set_event_format(addr, None);
+        assert_eq!(event_format(addr), None, "empty resets even for a listener");
+        disconnect_client(addr);
+        assert!(!is_listening(addr));
+    }
+
+    #[test]
     fn event_format_round_trips_and_empty_resets() {
         let addr = peer(41001);
         assert_eq!(event_format(addr), None);
@@ -280,7 +336,10 @@ mod tests {
                 .map(|(addr, _)| *addr)
                 .collect()
         };
-        assert_eq!(selected, vec![addr], "only the go listener matches the go event");
+        // Other parallel tests share the global registry, so assert membership,
+        // not the exact set.
+        assert!(selected.contains(&addr), "the go listener matches the go event");
+        assert!(!selected.contains(&other), "the panicAll listener does not match go");
         ignore(addr, None);
         ignore(other, None);
     }

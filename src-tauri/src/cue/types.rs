@@ -105,6 +105,42 @@ impl CueType {
             CueType::Script => "Script",
         }
     }
+
+    /// Parse a QLab `/new {cue_type}` string ("audio", "midi file", "cue cart",
+    /// ...), case-insensitive. QLab's list/cart types become Group cues.
+    pub fn from_qlab_name(name: &str) -> Option<CueType> {
+        use CueType::*;
+        Some(match name.trim().to_ascii_lowercase().as_str() {
+            "audio" => Audio,
+            "mic" => Mic,
+            "video" => Video,
+            "camera" => Camera,
+            "image" | "still" => Image,
+            "text" => Text,
+            "light" => Light,
+            "fade" => Fade,
+            "network" | "osc" => Osc,
+            "midi" => Midi,
+            "midi file" | "midifile" => MidiFile,
+            "timecode" => Timecode,
+            "group" => Group,
+            "start" => Start,
+            "stop" => Stop,
+            "pause" => Pause,
+            "load" => Load,
+            "reset" => Reset,
+            "devamp" => Devamp,
+            "goto" | "go to" => Goto,
+            "target" => Target,
+            "arm" => Arm,
+            "disarm" => Disarm,
+            "wait" => Wait,
+            "memo" => Memo,
+            "script" => Script,
+            "list" | "cuelist" | "cue list" | "cart" | "cuecart" | "cue cart" => Group,
+            _ => return None,
+        })
+    }
 }
 
 impl std::fmt::Display for CueType {
