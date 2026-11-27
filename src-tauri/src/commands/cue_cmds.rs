@@ -22,7 +22,10 @@ use crate::{
         types::{ContinueMode, CueColor, CueState, CueType, GroupMode, PlaylistSecondTrigger, SliceList, PLAY_COUNT_INFINITE},
         video_cue::VideoCue,
     },
-    engine::audition::AuditionClip,
+    engine::{
+        audition::AuditionClip,
+        cue_effects::CueEffect,
+    },
     show::{
         cue_colors::CueStarts,
         cue_list::{CueList, CueListMode, CueNumberChange},
@@ -1844,13 +1847,66 @@ fn scoped_audition_cue(
     }
     let cue = ws.cue_list_by_id(owner.list_id).and_then(|list| list.get_recursive(&cue_id))
         .ok_or("The cue is no longer in the selected list.")?;
-    if cue.cue_type() != CueType::Audio {
-        return Err("Choose an Audio cue for clip audition.".into());
+    match cue.cue_type() {
+        CueType::Audio | CueType::Video | CueType::Group => {}
+        _ => return Err("Choose an Audio, Video or Group cue for audition.".into()),
     }
     Ok(cue)
 }
 
-/// Monitor a trimmed audio clip independently of cue execution and the live mixer.
+/// Build the monitor clip(s) for an audition target: one Audio or Video cue's
+/// decoded media, or every loaded Audio/Video child of a Group (mixed together
+/// later). Group children keep their own trims, levels and effects.
+fn audition_clips(
+    cue: &dyn Cue, start_ms: Option<u64>, end_ms: Option<u64>, monitor_db: f32, with_fx: bool,
+) -> Result<Vec<(AuditionClip, Vec<CueEffect>)>, String> {
+    fn one_clip(
+        cue: &dyn Cue, start_ms: Option<u64>, end_ms: Option<u64>, monitor_db: f32, with_fx: bool,
+    ) -> Result<(AuditionClip, Vec<CueEffect>), String> {
+        let (samples, channels, sample_rate, _) = cue
+            .extract_decoded_audio()
+            .ok_or("The media has no decoded audio yet. Let it finish loading.")?;
+        let json = cue.serialize();
+        let volume_db = json.get("volume_db").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let effects = if with_fx {
+            (cue as &dyn std::any::Any)
+                .downcast_ref::<AudioCue>()
+                .map(|audio| audio.effects().to_vec())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        Ok((AuditionClip {
+            samples,
+            channels: channels.into(),
+            sample_rate,
+            start_ms: start_ms.or_else(|| json["start_time_ms"].as_u64()).unwrap_or(0),
+            end_ms: end_ms.or_else(|| json["end_time_ms"].as_u64()),
+            gain: (crate::cue::types::db_to_linear(volume_db)
+                * crate::cue::types::db_to_linear(f64::from(monitor_db))) as f32,
+            pan: json["pan"].as_f64().unwrap_or(0.0) as f32,
+        }, effects))
+    }
+    if cue.cue_type() == CueType::Group {
+        let mut clips = Vec::new();
+        for child in cue.child_cues().unwrap_or_default() {
+            if matches!(child.cue_type(), CueType::Audio | CueType::Video) {
+                if let Ok(clip) = one_clip(child.as_ref(), None, None, monitor_db, with_fx) {
+                    clips.push(clip);
+                }
+            }
+        }
+        if clips.is_empty() {
+            return Err("The group has no loaded Audio or Video children to audition.".into());
+        }
+        return Ok(clips);
+    }
+    Ok(vec![one_clip(cue, start_ms, end_ms, monitor_db, with_fx)?])
+}
+
+/// Monitor a trimmed clip independently of cue execution and the live mixer.
+/// Audio and Video cues audition their own decoded media (a video's
+/// soundtrack); a Group auditions its loaded Audio/Video children mixed.
 #[tauri::command]
 pub async fn preview_cue(
     cue_id: String, request_id: Uuid, device_id: String, monitor_db: f32,
@@ -1880,24 +1936,14 @@ pub async fn preview_cue(
 
     let ws = state.workspace.lock().map_err(|e| e.to_string())?;
     let cue = scoped_audition_cue(&ws, owner, id)?;
-    let audio = (cue as &dyn std::any::Any).downcast_ref::<AudioCue>()
-        .ok_or("Choose an Audio cue for clip audition.")?;
-    let (samples, channels, sample_rate, _) = cue.extract_decoded_audio().ok_or("The audio file has not finished loading.")?;
-    let json = cue.serialize();
-    let volume_db = json.get("volume_db").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let clip = AuditionClip {
-        samples, channels: channels.into(), sample_rate,
-        start_ms: start_ms.or_else(|| json["start_time_ms"].as_u64()).unwrap_or(0),
-        end_ms: end_ms.or_else(|| json["end_time_ms"].as_u64()),
-        gain: (crate::cue::types::db_to_linear(volume_db)
-            * crate::cue::types::db_to_linear(f64::from(monitor_db))) as f32,
-        pan: json["pan"].as_f64().unwrap_or(0.0) as f32,
-    };
+    let clips = audition_clips(cue, start_ms, end_ms, monitor_db, audio_fx.unwrap_or(false))?;
     let patches = ws.output_patches.iter().map(|p| p.device_id.as_str());
-    let result = if audio_fx.unwrap_or(false) {
-        state.audio_engine.start_audition_with_effects(request_id, &device_id, patches, clip, audio.effects().to_vec())
+    let result = if clips.len() == 1 {
+        let (clip, effects) = clips.into_iter().next().unwrap();
+        state.audio_engine.start_audition_with_effects(request_id, &device_id, patches, clip, effects)
     } else {
-        state.audio_engine.start_audition(request_id, &device_id, patches, clip)
+        let mixed = crate::engine::audition::mix_clips(&clips)?;
+        state.audio_engine.start_audition(request_id, &device_id, patches, mixed)
     };
     result.map(|id| id.to_string())
 }
@@ -2587,6 +2633,68 @@ mod tests {
         let mut reopened = Workspace::new("Reopened");
         reopened.cue_lists.push(ws.cue_lists.pop().unwrap());
         assert!(scoped_audition_cue(&reopened, owner, id).is_err());
+    }
+
+    #[test]
+    fn audition_accepts_audio_video_and_group_and_mixes_group_children() {
+        use super::{audition_clips, scoped_audition_cue, GroupTimelineOwner};
+        use crate::{
+            cue::{
+                audio_cue::AudioCue, group_cue::GroupCue, memo_cue::MemoCue, traits::Cue,
+                video_cue::VideoCue,
+            },
+            show::{cue_list::CueList, Workspace},
+        };
+        use std::{sync::Arc, time::Duration};
+
+        let preload = |cue: &mut dyn Cue| {
+            cue.accept_preloaded_audio(Arc::new(vec![0.5f32; 4_800]), 1, 48_000, Duration::from_millis(100));
+        };
+
+        let mut ws = Workspace::new("Audition types");
+        let mut list = CueList::new("List");
+        let mut audio = AudioCue::new();
+        preload(&mut audio);
+        let audio_id = audio.id();
+        let mut video = VideoCue::new();
+        preload(&mut video);
+        video.set_runtime_duration(Duration::from_millis(100));
+        let video_id = video.id();
+        let memo = MemoCue::new();
+        let memo_id = memo.id();
+        let mut group = GroupCue::new();
+        let mut child = AudioCue::new();
+        preload(&mut child);
+        group.children.push(Box::new(child));
+        group.children.push(Box::new(MemoCue::new()));
+        let group_id = group.id();
+        list.push(Box::new(audio));
+        list.push(Box::new(video));
+        list.push(Box::new(memo));
+        list.push(Box::new(group));
+        let owner = GroupTimelineOwner { workspace_id: ws.instance_id(), list_id: list.id };
+        ws.cue_lists.push(list);
+
+        assert_eq!(scoped_audition_cue(&ws, owner, audio_id).unwrap().id(), audio_id);
+        assert_eq!(scoped_audition_cue(&ws, owner, video_id).unwrap().id(), video_id);
+        assert_eq!(scoped_audition_cue(&ws, owner, group_id).unwrap().id(), group_id);
+        assert!(scoped_audition_cue(&ws, owner, memo_id).is_err());
+
+        let cue = |id| ws.cue_list_by_id(owner.list_id).unwrap().get_recursive(&id).unwrap();
+        let single = audition_clips(cue(audio_id), None, None, -18.0, false).unwrap();
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].0.channels, 1);
+        assert_eq!(single[0].0.sample_rate, 48_000);
+        let video_clips = audition_clips(cue(video_id), Some(10), None, -18.0, false).unwrap();
+        assert_eq!(video_clips[0].0.start_ms, 10, "explicit trim overrides the cue's own");
+        let group_clips = audition_clips(cue(group_id), None, None, -18.0, false).unwrap();
+        assert_eq!(group_clips.len(), 1, "only the loaded Audio child is mixed in");
+        let mixed = crate::engine::audition::mix_clips(&group_clips).unwrap();
+        assert_eq!((mixed.channels, mixed.sample_rate), (2, 48_000));
+
+        let mut empty = GroupCue::new();
+        empty.children.push(Box::new(MemoCue::new()));
+        assert!(audition_clips(&empty, None, None, -18.0, false).is_err());
     }
 
     #[test]

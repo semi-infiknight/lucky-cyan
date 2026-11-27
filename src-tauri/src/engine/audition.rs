@@ -124,6 +124,69 @@ pub struct Audition {
     child: Child,
 }
 
+/// Render each clip with its own trim, gain, pan and effects to stereo, resample
+/// to a common rate and sum them into one monitor clip. Used to audition a
+/// Group's playable children together, the way QLab previews a group.
+pub(crate) fn mix_clips(clips: &[(AuditionClip, Vec<CueEffect>)]) -> Result<AuditionClip, String> {
+    let Some((first, _)) = clips.first() else {
+        return Err("Nothing to audition.".into());
+    };
+    let rate = clips.iter().map(|(clip, _)| clip.sample_rate).max().unwrap_or(0);
+    if rate == 0 || first.channels == 0 {
+        return Err("Invalid decoded audio.".into());
+    }
+    let mut mixed: Vec<f32> = Vec::new();
+    for (clip, effects) in clips {
+        let frames = clip.frame_range()?;
+        let mut rendered = Vec::new();
+        clip.write_stereo(frames, effects, &mut rendered).map_err(|err| err.to_string())?;
+        let (stereo_bytes, _) = rendered.as_chunks::<4>();
+        let stereo: Vec<f32> = stereo_bytes.iter().map(|bytes| f32::from_ne_bytes(*bytes)).collect();
+        let resampled = resample_stereo(&stereo, clip.sample_rate, rate);
+        // Keep each clip's absolute start offset so trims stay in place.
+        let offset = ((u128::from(clip.start_ms) * u128::from(rate) / 1000) as usize) * 2;
+        let end = offset + resampled.len();
+        if mixed.len() < end {
+            mixed.resize(end, 0.0);
+        }
+        for (dst, src) in mixed[offset..].iter_mut().zip(resampled.iter()) {
+            *dst += src;
+        }
+    }
+    Ok(AuditionClip {
+        samples: Arc::new(mixed),
+        channels: 2,
+        sample_rate: rate,
+        start_ms: 0,
+        end_ms: None,
+        // write_stereo applies the constant-power pan law (sqrt(0.5) per
+        // channel at center); compensate so the summed mix renders at unity.
+        gain: 2f32.sqrt(),
+        pan: 0.0,
+    })
+}
+
+/// Linear-interpolation resample of an interleaved stereo buffer. Monitor-only
+/// and offline, so a simple interpolator is enough.
+fn resample_stereo(input: &[f32], from: u32, to: u32) -> Vec<f32> {
+    if from == to || from == 0 || to == 0 || input.len() < 4 {
+        return input.to_vec();
+    }
+    let frames = input.len() / 2;
+    let out_frames = (((frames as u64) * u64::from(to)) / u64::from(from)).max(1) as usize;
+    let ratio = f64::from(from) / f64::from(to);
+    let mut out = Vec::with_capacity(out_frames * 2);
+    for index in 0..out_frames {
+        let position = index as f64 * ratio;
+        let base = (position as usize).min(frames - 1);
+        let fraction = (position - base as f64) as f32;
+        let next = (base + 1).min(frames - 1);
+        out.push(input[base * 2] * (1.0 - fraction) + input[next * 2] * fraction);
+        out.push(input[base * 2 + 1] * (1.0 - fraction) + input[next * 2 + 1] * fraction);
+    }
+    out
+}
+
 impl Audition {
     pub fn start(node: &str, clip: AuditionClip) -> Result<Self, String> {
         Self::start_with_effects(node, clip, Vec::new())
@@ -271,6 +334,89 @@ mod tests {
         c.start_ms = 0;
         c.channels = 0;
         assert!(c.frame_range().is_err());
+    }
+
+    fn mono_clip(samples: Vec<f32>, sample_rate: u32, gain: f32) -> AuditionClip {
+        AuditionClip {
+            samples: Arc::new(samples), channels: 1, sample_rate,
+            start_ms: 0, end_ms: None, gain, pan: 0.0,
+        }
+    }
+
+    fn rendered_mix(clips: &[(AuditionClip, Vec<CueEffect>)]) -> Vec<f32> {
+        let mixed = mix_clips(clips).unwrap();
+        assert_eq!(mixed.channels, 2);
+        assert!((mixed.gain - 2f32.sqrt()).abs() < 1e-6);
+        // The mix is already interleaved stereo at unity; read it directly so
+        // comparisons against per-clip write_stereo output stay consistent.
+        (*mixed.samples).clone()
+    }
+
+    #[test]
+    fn mix_clips_sums_stereo_clips_at_a_common_rate() {
+        // Two 1 kHz mono clips sum sample-for-sample (each keeps its own pan law).
+        let a = mono_clip(vec![0.5; 10], 1_000, 1.0);
+        let b = mono_clip(vec![0.25; 10], 1_000, 1.0);
+        let ra = rendered(&a, &[]);
+        let rb = rendered(&b, &[]);
+        let mixed = rendered_mix(&[(a, vec![]), (b, vec![])]);
+        assert_eq!(mixed.len(), ra.len());
+        for (m, (x, y)) in mixed.iter().zip(ra.iter().zip(&rb)) {
+            assert!((m - (x + y)).abs() < 1e-6, "{m} != {x} + {y}");
+        }
+
+        // A 1 kHz clip is resampled up to the common 2 kHz rate before summing.
+        let fast = mono_clip(vec![0.5; 20], 2_000, 1.0);
+        let slow = mono_clip(vec![0.25; 10], 1_000, 1.0);
+        let rf = resample_stereo(&rendered(&fast, &[]), 2_000, 2_000);
+        let rs = resample_stereo(&rendered(&slow, &[]), 1_000, 2_000);
+        let mixed = rendered_mix(&[(fast, vec![]), (slow, vec![])]);
+        assert_eq!(mixed.len(), rf.len().max(rs.len()));
+        for (m, (x, y)) in mixed.iter().zip(rf.iter().zip(rs.iter())) {
+            assert!((m - (x + y)).abs() < 1e-6);
+        }
+
+        // Per-clip gain applies before the sum; an empty mix is an error.
+        let quiet = mono_clip(vec![0.5; 10], 1_000, 0.5);
+        let loud = mono_clip(vec![0.25; 10], 1_000, 1.0);
+        let rq = rendered(&quiet, &[]);
+        let rl = rendered(&loud, &[]);
+        let mixed = rendered_mix(&[(quiet, vec![]), (loud, vec![])]);
+        for (m, (x, y)) in mixed.iter().zip(rq.iter().zip(&rl)) {
+            assert!((m - (x + y)).abs() < 1e-6);
+        }
+        assert!(mix_clips(&[]).is_err());
+    }
+
+    #[test]
+    fn mix_clips_applies_each_clips_trim_and_effects() {
+        let sample_rate = 48_000;
+        let tone = |frequency: f32, frames: usize| {
+            (0..frames).map(|n| 0.25 * (std::f32::consts::TAU * frequency * n as f32 / sample_rate as f32).sin()).collect::<Vec<_>>()
+        };
+        // A trimmed clip contributes only its 75–100 ms window on top of a full clip.
+        let full = mono_clip(tone(150.0, 4_800), sample_rate, 1.0);
+        let mut trimmed = mono_clip(tone(150.0, 4_800), sample_rate, 1.0);
+        trimmed.start_ms = 75;
+        trimmed.end_ms = Some(100);
+        let rf = rendered(&full, &[]);
+        let rt = rendered(&trimmed, &[]);
+        let mixed = rendered_mix(&[(full, vec![]), (trimmed, vec![])]);
+        assert_eq!(mixed.len(), 2 * 4_800);
+        for (m, x) in mixed[..2 * 3_600].iter().zip(&rf) {
+            assert!((m - x).abs() < 1e-6, "before the trim window only the full clip plays");
+        }
+        for (m, (x, y)) in mixed[2 * 3_600..].iter().zip(rf[2 * 3_600..].iter().zip(rt.iter())) {
+            assert!((m - (x + y)).abs() < 1e-6, "inside the window both clips play");
+        }
+
+        // Each clip keeps its own effect chain: a high-passed 150 Hz tone is gone.
+        let dry = rendered_mix(&[(mono_clip(tone(150.0, 4_800), sample_rate, 1.0), vec![])]);
+        let wet = rendered_mix(&[(mono_clip(tone(150.0, 4_800), sample_rate, 1.0), vec![high_pass(true, 1_000.0)])]);
+        let rms = |samples: &[f32]| {
+            (samples[2 * 4_000..].iter().map(|s| s * s).sum::<f32>() / (samples.len() - 2 * 4_000) as f32).sqrt()
+        };
+        assert!(rms(&wet) < 0.05 * rms(&dry));
     }
 
     #[test]

@@ -233,12 +233,12 @@ Movement updates one input row on the desk’s control clock. This workflow uses
 3. Listen for one pass of the trimmed phrase. Confirm the house is silent, the playhead stays on the other cue and any follow cue remains in standby. **Stop audition** ends only the monitor pass. Closing the editor, switching clips, changing output routing and panic stop also cancel it. The monitor level resets to −18 dB when the editor reopens. The headphone device selection is remembered locally.
 4. During rehearsal, disconnect the headphones during a second pass. Monitor the house. The audition should end without appearing there. Reconnect the headphones, click **Refresh outputs**, and audition again.
 
-Clip audition uses the decoded source at its original speed with the cue’s volume and pan. Mono feeds both headphone channels. For multichannel files it monitors source channels 1 and 2. Rehearse groups, output maps, cue actions, slice loops and video from the cue list. [QLab 5 Auditioning Cues](https://qlab.app/docs/v5/tools/auditioning-cues/) · [QLab 4 Audition Window](https://qlab.app/docs/v4/tools/the-audition-window/)
+Clip audition uses the decoded source at its original speed with the cue’s volume and pan. Mono feeds both headphone channels. For multichannel files it monitors source channels 1 and 2. A Video cue auditions its decoded soundtrack with its own in/out trims; a Group cue auditions its loaded Audio and Video children mixed together, each with its own trim, level, pan and effects. Rehearse output maps, cue actions and slice loops from the cue list. [QLab 5 Auditioning Cues](https://qlab.app/docs/v5/tools/auditioning-cues/) · [QLab 4 Audition Window](https://qlab.app/docs/v4/tools/the-audition-window/)
 
 ### Audition a cue from Show Mode
 
 1. Park a trimmed File Audio cue at standby in a second cue list. Return to the first list and open **Cue monitor → Audition**.
-2. Choose the cue by list and number, confirm the named headphone output, and select **Audition clip**. Check the clip in headphones and verify the main desk's playhead and the house output on the console.
+2. Choose the cue by list and number — Audio, Video and Group cues are all listed — confirm the named headphone output, and select **Audition clip**. Check the clip in headphones and verify the main desk's playhead and the house output on the console.
 3. Choose **Stop audition** when finished. Selecting another cue or leaving the Audition view also ends the headphone pass.
 
 ### Compare source and cue effects in headphones
