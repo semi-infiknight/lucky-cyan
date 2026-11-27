@@ -72,6 +72,41 @@ pub enum CueType {
     Script,
 }
 
+impl CueType {
+    /// QLab OSC cue-dictionary display name (`"Audio"`, `"MIDI File"`, ...).
+    pub fn qlab_name(&self) -> &'static str {
+        match self {
+            CueType::Audio => "Audio",
+            CueType::Memo => "Memo",
+            CueType::Wait => "Wait",
+            CueType::Group => "Group",
+            CueType::Fade => "Fade",
+            CueType::Stop => "Stop",
+            CueType::Video => "Video",
+            CueType::Image => "Image",
+            CueType::Osc => "Network",
+            CueType::Midi => "MIDI",
+            CueType::MidiFile => "MIDI File",
+            CueType::Light => "Light",
+            CueType::Mic => "Mic",
+            CueType::Timecode => "Timecode",
+            CueType::Text => "Text",
+            CueType::Camera => "Camera",
+            CueType::Devamp => "Devamp",
+            CueType::Start => "Start",
+            CueType::Pause => "Pause",
+            CueType::Resume => "Resume",
+            CueType::Load => "Load",
+            CueType::Reset => "Reset",
+            CueType::Goto => "Go To",
+            CueType::Arm => "Arm",
+            CueType::Disarm => "Disarm",
+            CueType::Target => "Target",
+            CueType::Script => "Script",
+        }
+    }
+}
+
 impl std::fmt::Display for CueType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

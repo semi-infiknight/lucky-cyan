@@ -15,7 +15,7 @@ use crossbeam_channel::{Receiver, Sender};
 use tauri::{Emitter, Manager};
 use uuid::Uuid;
 
-use crate::cue::{traits::Cue, types::{CueId, CueType}};
+use crate::cue::{traits::Cue, types::CueId};
 use crate::commands::transport_cmds::{
     address_network_cue_pattern, address_numbered_network_cue, control_network_list_pause,
     control_network_workspace, NetworkCueAction, NetworkPauseAction, NetworkWorkspaceAction,
@@ -842,7 +842,8 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
                 || address == "/udpKeepAlive" || address.ends_with("/udpKeepAlive")
                 || address == "/udpReplyPort" || address.ends_with("/udpReplyPort")
                 || address == "/overrideWindow" || address.ends_with("/overrideWindow")
-                || address == "/replyFormat" || address.ends_with("/replyFormat") => {
+                || address == "/replyFormat" || address.ends_with("/replyFormat")
+                || address == "/eventFormat" || address.ends_with("/eventFormat") => {
                 match one.parse::<f64>() {
                     Ok(value) if (value * 1000.0).is_finite() => vec![rosc::OscType::Double(value)],
                     _ => vec![rosc::OscType::String((*one).to_owned())],
@@ -899,6 +900,10 @@ enum OscAction<'a> {
     SetOverrideWindow(Option<bool>),
     /// QLab `/replyFormat {string}`: set this sender's reply payload format.
     SetReplyFormat(String),
+    /// QLab show-control broadcast: `/listen[/{event}[/{detail}]]` / `/ignore/...`.
+    Broadcast { listen: bool, event: Option<String> },
+    /// QLab `/eventFormat {string}`: custom show-control broadcast format.
+    SetEventFormat(String),
     /// Trigger a full cue-list feedback dump.
     CueListRequest,
     /// Trigger a playhead feedback dump.
@@ -944,6 +949,7 @@ fn apply_client_session(action: ClientSessionAction, src: SocketAddr) {
         ClientSessionAction::Pin(on) => crate::engine::osc_updates::pin_client(src, on),
         ClientSessionAction::Disconnect => {
             crate::engine::osc_updates::disconnect_client(src);
+            crate::engine::osc_broadcast::disconnect_client(src);
             set_always_reply(src, false);
             set_reply_port(src, None);
             set_reply_format(src, None);
@@ -1013,6 +1019,18 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, src: SocketA
         }
         OscAction::SetReplyFormat(format) => {
             set_reply_format(src, Some(format));
+            (true, false)
+        }
+        OscAction::Broadcast { listen, event } => {
+            if listen {
+                crate::engine::osc_broadcast::listen(src, event.as_deref());
+            } else {
+                crate::engine::osc_broadcast::ignore(src, event.as_deref());
+            }
+            (true, false)
+        }
+        OscAction::SetEventFormat(format) => {
+            crate::engine::osc_broadcast::set_event_format(src, Some(format));
             (true, false)
         }
         OscAction::Command(payload) => {
@@ -1273,7 +1291,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         || addr == "/udpKeepAlive" || addr.ends_with("/udpKeepAlive")
         || addr == "/udpReplyPort" || addr.ends_with("/udpReplyPort")
         || addr == "/overrideWindow" || addr.ends_with("/overrideWindow")
-        || addr == "/replyFormat" || addr.ends_with("/replyFormat");
+        || addr == "/replyFormat" || addr.ends_with("/replyFormat")
+        || addr == "/eventFormat" || addr.ends_with("/eventFormat");
     if !args.is_empty() && !cue_write && !updates_arg {
         return OscAction::Unmatched;
     }
@@ -1313,6 +1332,49 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
                 Some(on) => OscAction::ClientSession { action: ClientSessionAction::Pin(on) },
                 None => OscAction::Unmatched,
             },
+            _ => OscAction::Unmatched,
+        };
+    }
+    // QLab show-control broadcast subscriptions: `/listen`, `/ignore`, and the
+    // scoped `/{command}/{event}[/{detail}]` forms (any access level).
+    if let Some(rest) = addr.strip_prefix("/listen").or_else(|| addr.strip_prefix("/ignore")) {
+        let listen = addr.starts_with("/listen");
+        let path = rest.strip_prefix('/').unwrap_or(rest);
+        if path.is_empty() {
+            let _ = workspace;
+            return match args {
+                [] => OscAction::Broadcast { listen, event: None },
+                _ => OscAction::Unmatched,
+            };
+        }
+        if !args.is_empty() {
+            return OscAction::Unmatched;
+        }
+        // Match the longest known event first so `/listen/cue/start/number`
+        // resolves to the `cue/start` event with the `number` detail.
+        let mut events: Vec<&str> = crate::engine::osc_broadcast::CUE_EVENTS
+            .iter().chain(crate::engine::osc_broadcast::BARE_EVENTS.iter()).copied().collect();
+        events.sort_by_key(|event| std::cmp::Reverse(event.len()));
+        for event in events {
+            if path == event {
+                let _ = workspace;
+                return OscAction::Broadcast { listen, event: Some(event.to_string()) };
+            }
+            if let Some(detail) = path.strip_prefix(event).and_then(|rest| rest.strip_prefix('/')) {
+                if crate::engine::osc_broadcast::is_known_detail(detail) {
+                    let _ = workspace;
+                    return OscAction::Broadcast { listen, event: Some(event.to_string()) };
+                }
+            }
+        }
+        let _ = workspace;
+        return OscAction::Unmatched;
+    }
+    // QLab `/eventFormat {string}`; the no-argument form is the read (a query).
+    if addr == "/eventFormat" {
+        let _ = workspace;
+        return match args {
+            [rosc::OscType::String(format)] => OscAction::SetEventFormat(format.clone()),
             _ => OscAction::Unmatched,
         };
     }
@@ -1360,7 +1422,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
     }
     let transport = match addr {
         "/go" => Some(Transport::Go),
-        "/stop" | "/panic" => Some(Transport::Stop),
+        "/stop" => Some(Transport::Stop),
+        "/panic" => Some(Transport::Panic),
         "/hardStop" => Some(Transport::HardStop),
         "/pause" => Some(Transport::SetPaused(true)),
         "/resume" => Some(Transport::SetPaused(false)),
@@ -1574,39 +1637,6 @@ const MAX_CUE_DICT_DEPTH: usize = 16;
 /// Shared empty flagged set for cues whose owning list cannot be identified.
 static EMPTY_FLAGGED: std::collections::BTreeSet<CueId> = std::collections::BTreeSet::new();
 
-/// QLab's display name for a cue type in cue dictionaries (`"Audio"`, `"MIDI File"`...).
-fn qlab_type_name(cue_type: &CueType) -> &'static str {
-    match cue_type {
-        CueType::Audio => "Audio",
-        CueType::Memo => "Memo",
-        CueType::Wait => "Wait",
-        CueType::Group => "Group",
-        CueType::Fade => "Fade",
-        CueType::Stop => "Stop",
-        CueType::Video => "Video",
-        CueType::Image => "Image",
-        CueType::Osc => "Network",
-        CueType::Midi => "MIDI",
-        CueType::MidiFile => "MIDI File",
-        CueType::Light => "Light",
-        CueType::Mic => "Mic",
-        CueType::Timecode => "Timecode",
-        CueType::Text => "Text",
-        CueType::Camera => "Camera",
-        CueType::Devamp => "Devamp",
-        CueType::Start => "Start",
-        CueType::Pause => "Pause",
-        CueType::Resume => "Resume",
-        CueType::Load => "Load",
-        CueType::Reset => "Reset",
-        CueType::Goto => "Go To",
-        CueType::Arm => "Arm",
-        CueType::Disarm => "Disarm",
-        CueType::Target => "Target",
-        CueType::Script => "Script",
-    }
-}
-
 /// Build QLab's cue dictionary for `/cueLists` entries and `/children` replies.
 /// `rows` counts every emitted cue so huge shows error instead of flooding UDP.
 fn cue_dict(
@@ -1630,7 +1660,7 @@ fn cue_dict(
         "number": cue.number().unwrap_or(""),
         "name": cue.name(),
         "listName": list_name,
-        "type": qlab_type_name(&cue.cue_type()),
+        "type": cue.cue_type().qlab_name(),
         "colorName": cue.color().osc_name(),
         "flagged": flagged.contains(&cue.id()),
         "armed": !cue.is_disabled(),
@@ -1847,6 +1877,8 @@ enum SenderQuery {
     ReplyPort,
     /// QLab `/replyFormat` read form: this sender's current reply format ("" = default).
     ReplyFormat,
+    /// QLab `/eventFormat` read form: this sender's broadcast format ("" = default).
+    EventFormat,
 }
 
 struct CueQuery<'a> {
@@ -1882,6 +1914,7 @@ impl<'a> CueQuery<'a> {
             "forgetMeNot" | "udpKeepAlive" => Some(SenderQuery::Pinned),
             "udpReplyPort" => Some(SenderQuery::ReplyPort),
             "replyFormat" => Some(SenderQuery::ReplyFormat),
+            "eventFormat" => Some(SenderQuery::EventFormat),
             _ => None,
         } {
             return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::Sender(sender) });
@@ -1993,6 +2026,8 @@ impl<'a> CueQuery<'a> {
                 Some(serde_json::json!(current_reply_port(src))),
             CueQueryKind::Sender(SenderQuery::ReplyFormat) =>
                 Some(serde_json::json!(current_reply_format(src).unwrap_or_default())),
+            CueQueryKind::Sender(SenderQuery::EventFormat) =>
+                Some(serde_json::json!(crate::engine::osc_broadcast::event_format(src).unwrap_or_default())),
             CueQueryKind::CueLists => {
                 // QLab shape: an array of cue-list dictionaries, each with a
                 // `cues` array of QLab cue dictionaries (Inkue's `id` key kept).
@@ -2506,7 +2541,7 @@ mod tests {
         for (path, expected) in [
             ("/go", Go),
             ("/stop", Stop),
-            ("/panic", Stop),
+            ("/panic", Panic),
             ("/hardStop", HardStop),
             ("/pause", SetPaused(true)),
             ("/resume", SetPaused(false)),
@@ -2923,6 +2958,146 @@ mod tests {
         assert!(CueQuery::parse(&query_message("/cue/5/preWait/+/1")).is_none());
         assert!(parse_text_message(b"/cue/5/preWait/+ 1").is_some());
         let _ = ContinueMode::AutoFollow; // enum stays queryable
+    }
+
+    #[test]
+    fn qlab_show_control_broadcast_listen_ignore_and_event_format_resolve() {
+        // Plain and scoped listen/ignore forms, any access level.
+        assert!(matches!(resolve_action("/listen", &[]), OscAction::Broadcast { listen: true, event: None }));
+        assert!(matches!(resolve_action("/ignore", &[]), OscAction::Broadcast { listen: false, event: None }));
+        assert!(matches!(resolve_action("/listen/go", &[]),
+            OscAction::Broadcast { listen: true, event: Some(e) } if e == "go"));
+        assert!(matches!(resolve_action("/listen/cue/start/number", &[]),
+            OscAction::Broadcast { listen: true, event: Some(e) } if e == "cue/start"));
+        assert!(matches!(resolve_action("/ignore/panicAll", &[]),
+            OscAction::Broadcast { listen: false, event: Some(e) } if e == "panicAll"));
+        assert!(matches!(authorized_action("/listen", &[], false), OscAction::Broadcast { .. }));
+        // Unknown events/details, extra segments and arguments are rejected.
+        for address in ["/listen/bogus", "/listen/go/bogus", "/listen/go/number/extra", "/listen/go/1", "/ignore"] {
+            if address == "/ignore" { continue; }
+            assert!(matches!(resolve_action(address, &[]), OscAction::Unmatched), "{address}");
+        }
+        assert!(matches!(resolve_action("/listen/go", &[rosc::OscType::Int(1)]), OscAction::Unmatched));
+        assert!(parse_text_message(b"/listen").is_some());
+        assert!(parse_text_message(b"/listen/go").is_some());
+
+        // /eventFormat: one string arg writes (empty resets), no arg is the read query.
+        assert!(matches!(resolve_action("/eventFormat", &[rosc::OscType::String("/cue/#data#/start".into())]),
+            OscAction::SetEventFormat(ref f) if f == "/cue/#data#/start"));
+        assert!(matches!(resolve_action("/eventFormat", &[]), OscAction::Unmatched));
+        let read_message = query_message("/eventFormat");
+        let read = CueQuery::parse(&read_message).unwrap();
+        assert!(matches!(read.kind, CueQueryKind::Sender(SenderQuery::EventFormat)));
+        assert!(read.is_any_access());
+        assert!(parse_text_message(b"/eventFormat /cue/#data#/start").is_some(), "one string arg is fine in plain text");
+        assert!(parse_text_message(b"/eventFormat /cue/#data# /start").is_none(), "plain-text args cannot contain spaces");
+
+        // /panic is now its own transport action (broadcasts panicAll).
+        assert!(matches!(resolve_action("/panic", &[]), OscAction::WorkspaceTransport { action: NetworkWorkspaceAction::Panic, .. }));
+    }
+
+    #[test]
+    fn listen_subscriptions_receive_qlab_event_workspace_messages_over_udp() {
+        let (status_tx, statuses) = crossbeam_channel::unbounded();
+        let protocol = Protocol::Osc;
+        let config = OscReceiveConfig { enabled: true, port: 0, ..OscReceiveConfig::default() };
+        let listener = Listener::spawn(
+            protocol, protocol.settings(&config), || Ipv4Addr::LOCALHOST.into(),
+            move |status| { let _ = status_tx.send(status.clone()); },
+            |packet, _allowed, src| {
+                // Mirror the production dispatch for broadcast subscriptions.
+                if let rosc::OscPacket::Message(message) = packet {
+                    if let OscAction::Broadcast { listen, event } = resolve_action(&message.addr, &message.args) {
+                        if listen {
+                            crate::engine::osc_broadcast::listen(src, event.as_deref());
+                        } else {
+                            crate::engine::osc_broadcast::ignore(src, event.as_deref());
+                        }
+                    }
+                }
+            },
+            |_query, _src| None,
+        );
+        let OscListenerStatus::Listening { address } = statuses.recv_timeout(Duration::from_secs(2)).unwrap() else {
+            panic!("expected an OSC socket");
+        };
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        sender.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let src = sender.local_addr().unwrap();
+        let mut response = [0; 4096];
+        let send = |addr: &str| {
+            sender.send_to(&query_packet(addr), address).unwrap();
+        };
+        let recv = |response: &mut [u8; 4096]| -> rosc::OscMessage {
+            let (length, _origin) = sender.recv_from(response).unwrap();
+            let (_, rosc::OscPacket::Message(message)) = rosc::decoder::decode_udp(&response[..length]).unwrap() else {
+                panic!("expected a single OSC message");
+            };
+            message
+        };
+
+        // Subscribe to all events, then fire a go event with cue arguments.
+        // /listen has no acknowledgement, so fire until the subscription has
+        // registered: a firing before registration sends nothing, so the
+        // first packet received is always the multi-argument form.
+        send("/listen");
+        let workspace_id = uuid::Uuid::new_v4();
+        let mut cue = crate::cue::memo_cue::MemoCue::new();
+        cue.set_number(Some("24".into()));
+        cue.set_name("intro music".into());
+        let cue_id = cue.id();
+        let cue_args = || crate::engine::osc_broadcast::CueEventArgs {
+            number: cue.number().unwrap_or(""),
+            name: cue.name(),
+            unique_id: cue.id(),
+            cue_type: cue.cue_type().qlab_name(),
+        };
+        sender.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let multi = loop {
+            crate::engine::osc_broadcast::broadcast(workspace_id, "go", Some(cue_args()));
+            if let Ok((length, _)) = sender.recv_from(&mut response) {
+                let (_, rosc::OscPacket::Message(message)) = rosc::decoder::decode_udp(&response[..length]).unwrap() else {
+                    panic!("expected a single OSC message");
+                };
+                break message;
+            }
+        };
+        sender.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+        // Default form: the multi-arg message plus each single-argument detail.
+        assert_eq!(multi.addr, "/qlab/event/workspace/go");
+        assert_eq!(multi.args, vec![
+            rosc::OscType::String("24".into()),
+            rosc::OscType::String("intro music".into()),
+            rosc::OscType::String(cue_id.to_string()),
+            rosc::OscType::String("Memo".into()),
+        ]);
+        assert_eq!(recv(&mut response).addr, "/qlab/event/workspace/go/number");
+        assert_eq!(recv(&mut response).addr, "/qlab/event/workspace/go/name");
+        assert_eq!(recv(&mut response).addr, "/qlab/event/workspace/go/uniqueID");
+        let type_msg = recv(&mut response);
+        assert_eq!(type_msg.addr, "/qlab/event/workspace/go/type");
+        assert_eq!(type_msg.args, vec![rosc::OscType::String("Memo".into())]);
+
+        // A bare event (no cue args) arrives without arguments.
+        crate::engine::osc_broadcast::broadcast(workspace_id, "panicAll", None);
+        let bare = recv(&mut response);
+        assert_eq!(bare.addr, "/qlab/event/workspace/panicAll");
+        assert!(bare.args.is_empty());
+
+        // /ignore stops delivery. Keep broadcasting until the socket goes
+        // quiet: once the registry drops this peer no further packets are
+        // sent, so a timeout means /ignore was processed.
+        send("/ignore");
+        sender.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        loop {
+            crate::engine::osc_broadcast::broadcast(workspace_id, "go", None);
+            if sender.recv_from(&mut response).is_err() {
+                break;
+            }
+        }
+        assert!(!crate::engine::osc_broadcast::is_listening(src), "ignored listeners get nothing");
+        listener.stop();
     }
 
     #[test]

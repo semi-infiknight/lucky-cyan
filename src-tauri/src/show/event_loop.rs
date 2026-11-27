@@ -1248,6 +1248,8 @@ fn tick(
             (None, None, None, None)
         };
 
+    crate::engine::osc_broadcast::note_current_workspace(ws.instance_id);
+
     // Push QLab-style `/update/...` messages to `/updates` subscribers.
     if crate::engine::osc_updates::has_subscribers()
         && (update_structure_changed || update_playhead.is_some() || !update_cue_ids.is_empty())

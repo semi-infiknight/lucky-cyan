@@ -48,7 +48,7 @@ Program a show in the cue list or cart. Check the imported report before trustin
 
 ## Workflow tools
 
-Use Find, the inspector, Check Workspace, relink, Show Mode, the mixer and the floating timer. Cue monitor shows standby and active playback across lists, compares stage stills, previews finished stage motion in a thumbnail, and shows saved audio map marks alongside digital peaks from the assigned main-device channels. Stereo file audition can use its own named headphone sink; Audio, Video (soundtrack) and Group cues can be auditioned from the cue monitor, with per-clip effects and group children mixed. Global overrides for DMX output, MIDI in/out, MSC in/out, external network input and timecode input are available from the transport bar's Overrides panel and over OSC (`/overrides/...`); full-resolution output monitoring, input monitors, and separate audio-map windows remain open. [Cue monitor exercise](../programming/README.md#monitor-the-show-from-the-desk) · [Stage snapshot exercise](../video/README.md#check-the-stage-picture-from-the-desk) · [Live desk](../live/README.md)
+Use Find, the inspector, Check Workspace, relink, Show Mode, the mixer and the floating timer. Cue monitor shows standby and active playback across lists, compares stage stills, previews finished stage motion in a thumbnail, and shows saved audio map marks alongside digital peaks from the assigned main-device channels. Stereo file audition can use its own named headphone sink; Audio, Video (soundtrack) and Group cues can be auditioned from the cue monitor, with per-clip effects and group children mixed. Global overrides for all 13 QLab paths (DMX output, MIDI in/out, MSC in/out, SysEx in/out, external and local network in/out, timecode in/out) are available from the transport bar's Overrides panel and over OSC (`/overrides/...`, `/overrideWindow`); full-resolution output monitoring, input monitors, and separate audio-map windows remain open. [Cue monitor exercise](../programming/README.md#monitor-the-show-from-the-desk) · [Stage snapshot exercise](../video/README.md#check-the-stage-picture-from-the-desk) · [Live desk](../live/README.md)
 
 Paste selected groups between existing Audio and Video cues as one undoable edit while transport is idle. [Property paste exercise](../programming/README.md#paste-selected-settings-onto-existing-cues)
 
@@ -103,7 +103,7 @@ Review the source commands and local fixture patch offline before arming a Light
 
 ## Network, MIDI and show control
 
-Use an isolated endpoint for OSC follow markers. The native desk also supports MIDI, timecode, and a trusted hardware remote. Verify each controller and timecode source on the rig. Full remote multiuser workspace editing and the QLab iOS client workflow remain open. [Inkue exercise](../workshops/README.md)
+Use an isolated endpoint for OSC follow markers. The native desk also supports MIDI, timecode, and a trusted hardware remote. Verify each controller and timecode source on the rig. The OSC half of the show-control broadcast contract is covered (`/listen`, `/ignore`, `/eventFormat` pushing `/qlab/event/workspace/...`); the MSC broadcast half remains open. Full remote multiuser workspace editing and the QLab iOS client workflow remain open. [Inkue exercise](../workshops/README.md)
 
 - [Collaboration](https://qlab.app/docs/v5/networking/collaboration/)
 - [QLab Remote](https://qlab.app/docs/v5/networking/qlab-remote/)

@@ -99,6 +99,7 @@ pub(super) fn go_locked(state: &AppState, app_handle: &tauri::AppHandle, ws: &mu
 
     let context = workspace_context(state, ws);
     let mut transport = Transport::new(context);
+    let ws_id = ws.instance_id;
 
     let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
 
@@ -122,7 +123,25 @@ pub(super) fn go_locked(state: &AppState, app_handle: &tauri::AppHandle, ws: &mu
         }
     }
 
+    let playhead_args = cue_list.playhead_cue().map(|cue| (
+        cue.number().unwrap_or("").to_string(),
+        cue.name().to_string(),
+        cue.id(),
+        cue.cue_type().qlab_name().to_string(),
+    ));
+
     let result = transport.go(cue_list).map_err(|e| e.to_string())?;
+
+    if let Some((number, name, id, cue_type)) = playhead_args {
+        if crate::engine::osc_broadcast::has_listeners() {
+            crate::engine::osc_broadcast::broadcast(ws_id, "go", Some(crate::engine::osc_broadcast::CueEventArgs {
+                number: &number,
+                name: &name,
+                unique_id: id,
+                cue_type: &cue_type,
+            }));
+        }
+    }
 
     // Emit state changes for cues stopped by a Stop Cue action.
     for id in &result.stopped {
@@ -488,6 +507,8 @@ pub(crate) enum NetworkWorkspaceAction<'a> {
     GoToCue(&'a str),
     Stop,
     HardStop,
+    /// QLab `/panic`: stops like `/stop` but broadcasts `panicAll`.
+    Panic,
     Reset,
     SetPaused(bool),
     /// QLab `/togglePause`: pause everything running, else resume all.
@@ -558,6 +579,11 @@ pub(crate) fn control_network_workspace<'a>(
             go_locked(state, app_handle, &mut show).map(|_| ())
         }
         Stop | HardStop => stop_locked(state, app_handle, &mut show, action == HardStop),
+        Panic => {
+            let result = stop_locked(state, app_handle, &mut show, false);
+            broadcast_bare_event(&show, "panicAll");
+            result
+        }
         Reset => reset_workspace_locked(state, app_handle, &mut show),
         SetPaused(paused) => pause_all_lists(state, app_handle, &mut show, paused),
         TogglePaused => {
@@ -596,7 +622,26 @@ fn pause_all_lists(
         }
     }
     let _ = app_handle.emit("cue-list-refresh", ());
+    broadcast_bare_event(show, if paused { "pauseAll" } else { "resumeAll" });
     first_error.map_or(Ok(()), |error| Err(error.to_string()))
+}
+
+/// QLab show-control broadcast helpers (`/listen` clients).
+fn broadcast_current_cue_event(event: &str, cue: &dyn crate::cue::traits::Cue) {
+    if crate::engine::osc_broadcast::has_listeners() {
+        crate::engine::osc_broadcast::broadcast_current(event, Some(crate::engine::osc_broadcast::CueEventArgs {
+            number: cue.number().unwrap_or(""),
+            name: cue.name(),
+            unique_id: cue.id(),
+            cue_type: cue.cue_type().qlab_name(),
+        }));
+    }
+}
+
+fn broadcast_bare_event(ws: &Workspace, event: &str) {
+    if crate::engine::osc_broadcast::has_listeners() {
+        crate::engine::osc_broadcast::broadcast(ws.instance_id, event, None);
+    }
 }
 
 pub(crate) fn control_network_list_pause(
@@ -806,11 +851,29 @@ pub(super) fn go_cue_in_list(
         }
     }
 
+    let start_args = cue_list.get_recursive(&id).map(|cue| (
+        cue.number().unwrap_or("").to_string(),
+        cue.name().to_string(),
+        cue.id(),
+        cue.cue_type().qlab_name().to_string(),
+    ));
+
     let result = if preserve_playhead {
         transport.start_independent(cue_list, id)
     } else {
         transport.go_by_id(cue_list, &id)
     }.map_err(|e| e.to_string())?;
+
+    if let Some((number, name, cue_id, cue_type)) = start_args {
+        if crate::engine::osc_broadcast::has_listeners() {
+            crate::engine::osc_broadcast::broadcast_current("cue/start", Some(crate::engine::osc_broadcast::CueEventArgs {
+                number: &number,
+                name: &name,
+                unique_id: cue_id,
+                cue_type: &cue_type,
+            }));
+        }
+    }
 
     for stopped_id in &result.stopped {
         let _ = app_handle.emit(
@@ -882,6 +945,7 @@ fn reset_workspace_locked(
     transport.reset_workspace(&mut show.cue_lists).map_err(|error| error.to_string())?;
     let standby = show.active_cue_list().and_then(|list| list.playhead_cue_id);
     emit_playhead(app_handle, standby);
+    broadcast_bare_event(show, "resetAll");
     Ok(())
 }
 
@@ -947,6 +1011,7 @@ pub(super) fn stop_locked(state: &AppState, app_handle: &tauri::AppHandle, ws: &
             }),
         );
     }
+    broadcast_bare_event(ws, if hard { "hardStopAll" } else { "stopAll" });
     Ok(())
 }
 
@@ -972,6 +1037,9 @@ fn stop_cue_in_list(
     id: uuid::Uuid,
     app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
+    if let Some(cue) = cue_list.get_recursive(&id) {
+        broadcast_current_cue_event("cue/stop", cue);
+    }
     transport.stop_cue(cue_list, &id).map_err(|e| e.to_string())?;
     let _ = app_handle.emit(
         "cue-state-changed",

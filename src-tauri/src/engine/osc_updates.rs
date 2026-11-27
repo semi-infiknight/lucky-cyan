@@ -97,41 +97,52 @@ pub fn push(messages: &[(String, Vec<rosc::OscType>)]) {
     if messages.is_empty() {
         return;
     }
-    let Ok(mut guard) = SUBSCRIBERS.lock() else { return };
-    let Some(map) = guard.as_mut() else { return };
-    let now = Instant::now();
-    map.retain(|peer, seen| is_pinned(*peer) || now.duration_since(*seen) < SUBSCRIBER_TTL);
-    if map.is_empty() {
+    let peers: Vec<SocketAddr> = {
+        let Ok(mut guard) = SUBSCRIBERS.lock() else { return };
+        let Some(map) = guard.as_mut() else { return };
+        let now = Instant::now();
+        map.retain(|peer, seen| is_pinned(*peer) || now.duration_since(*seen) < SUBSCRIBER_TTL);
+        map.keys().copied().collect()
+    };
+    for peer in peers {
+        push_to(peer, messages);
+    }
+}
+
+/// Send messages to one peer: UDP via its reply port, or SLIP-framed over its
+/// TCP connection. Honors the network output overrides. Shared with the OSC
+/// show-control broadcast.
+pub(crate) fn push_to(peer: SocketAddr, messages: &[(String, Vec<rosc::OscType>)]) {
+    if messages.is_empty() {
         return;
     }
     let Ok(socket) = super::net_interface::udp_send_socket() else { return };
+    let overrides = &super::overrides::OVERRIDES;
+    // Honor QLab `/udpReplyPort` for this peer.
+    let target = super::osc_server::reply_target(peer);
+    // QLab network output overrides apply to pushes too.
+    let allowed = if target.ip().is_loopback() {
+        overrides.network_local_output()
+    } else {
+        overrides.network_external_output()
+    };
+    if !allowed {
+        return;
+    }
+    // TCP peers receive the push SLIP-framed on their own connection.
+    let tcp = super::osc_server::tcp_connection(peer);
     for (addr, args) in messages {
         let packet = rosc::OscPacket::Message(rosc::OscMessage { addr: addr.clone(), args: args.clone() });
         let Ok(bytes) = rosc::encoder::encode(&packet) else { continue };
-        let overrides = &super::overrides::OVERRIDES;
-        for peer in map.keys() {
-            // Honor QLab `/udpReplyPort` for this subscriber.
-            let target = super::osc_server::reply_target(*peer);
-            // QLab network output overrides apply to pushes too.
-            let allowed = if target.ip().is_loopback() {
-                overrides.network_local_output()
-            } else {
-                overrides.network_external_output()
-            };
-            if !allowed {
-                continue;
+        if let Some(stream) = &tcp {
+            use std::io::Write;
+            if let Ok(mut socket) = stream.lock() {
+                let _ = socket.write_all(&super::osc_server::slip_encode(&bytes));
+                let _ = socket.flush();
             }
-            // TCP peers receive the push SLIP-framed on their own connection.
-            if let Some(stream) = super::osc_server::tcp_connection(*peer) {
-                use std::io::Write;
-                if let Ok(mut socket) = stream.lock() {
-                    let _ = socket.write_all(&super::osc_server::slip_encode(&bytes));
-                    let _ = socket.flush();
-                }
-                continue;
-            }
-            let _ = socket.send_to(&bytes, target);
+            continue;
         }
+        let _ = socket.send_to(&bytes, target);
     }
 }
 

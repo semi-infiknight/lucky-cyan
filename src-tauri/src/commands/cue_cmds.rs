@@ -1415,6 +1415,19 @@ pub(super) fn set_playhead_in_list(
         "playhead-moved",
         serde_json::json!({ "cue_id": outer_playhead.map(|u| u.to_string()) }),
     );
+    // QLab show-control broadcast: playhead move event with the new standby cue.
+    if let Some(playhead_id) = outer_playhead {
+        if let Some(cue) = cue_list.get_recursive(&playhead_id) {
+            if crate::engine::osc_broadcast::has_listeners() {
+                crate::engine::osc_broadcast::broadcast_current("playhead", Some(crate::engine::osc_broadcast::CueEventArgs {
+                    number: cue.number().unwrap_or(""),
+                    name: cue.name(),
+                    unique_id: cue.id(),
+                    cue_type: cue.cue_type().qlab_name(),
+                }));
+            }
+        }
+    }
     // Only when the target was a nested cue (resolved to a different outer
     // Playhead) refresh cues so the group's inner playhead (active_child_id)
     // updates — top-level clicks don't need the extra round-trip.
