@@ -69,6 +69,7 @@ fn packet_fingerprint(buf: &[u8]) -> u64 {
 /// Configure binary OSC and plain text independently while sharing command dispatch.
 pub struct OscServer {
     osc: Listener,
+    osc_tcp: TcpEndpoint,
     plain_text: Listener,
 }
 
@@ -119,6 +120,7 @@ impl Protocol {
     }
 }
 
+#[derive(Clone)]
 struct ListenerConfig {
     enabled: bool,
     port: u16,
@@ -161,12 +163,28 @@ impl OscServer {
                 move |query, src| handle_query(query, src, &query_handle),
             )
         };
-        Self { osc: spawn(Protocol::Osc), plain_text: spawn(Protocol::PlainText) }
+        let tcp_status_handle = app_handle.clone();
+        let tcp_packet_handle = app_handle.clone();
+        let tcp_query_handle = app_handle.clone();
+        let osc_tcp = TcpEndpoint::spawn(
+            Protocol::Osc.settings(&config),
+            super::net_interface::bind_ip,
+            move |status| { let _ = tcp_status_handle.emit("osc-tcp-listener-status", status); },
+            move |packet, explicitly_allowed, src| handle_packet(packet, explicitly_allowed, src, &tcp_packet_handle),
+            move |query, src| handle_query(query, src, &tcp_query_handle),
+        );
+        Self { osc: spawn(Protocol::Osc), osc_tcp, plain_text: spawn(Protocol::PlainText) }
     }
 
     pub fn reconfigure(&self, config: OscReceiveConfig) {
         self.osc.reconfigure(Protocol::Osc.settings(&config));
+        self.osc_tcp.reconfigure(Protocol::Osc.settings(&config));
         self.plain_text.reconfigure(Protocol::PlainText.settings(&config));
+    }
+
+    /// Status of the OSC TCP accept socket (same port as the UDP listener).
+    pub fn tcp_status(&self) -> Result<OscListenerStatus, String> {
+        self.osc_tcp.status()
     }
 
     fn listener(&self, plain_text: bool) -> &Listener {
@@ -181,9 +199,10 @@ impl OscServer {
         self.listener(plain_text).retry()
     }
 
-    /// Shut down both workers.
+    /// Shut down all workers.
     pub fn stop(&self) {
         self.osc.stop();
+        self.osc_tcp.stop();
         self.plain_text.stop();
     }
 }
@@ -329,60 +348,356 @@ fn server_loop(
                         log::debug!("{label}: ignored malformed or unsupported packet");
                         continue;
                     };
-                    if let rosc::OscPacket::Message(message) = &packet {
-                        if let Some(query) = CueQuery::parse(message) {
-                            // QLab always accepts the app-level queries (/version,
-                            // /workspaces, /overrides reads, /alwaysReply and /updates
-                            // status reads); show-data queries need the allowlist.
-                            if matches!(protocol, Protocol::Osc)
-                                && query.is_single_datagram(data)
-                                && (!config.allowed_ips.is_empty() || query.is_any_access())
-                            {
-                                if let Some(reply) = on_query(query, src) {
-                                    let _ = socket.send_to(&reply, reply_target(src));
-                                }
-                            }
-                            // Query results are unicast and can change between identical requests.
-                            continue;
-                        }
-                    }
-                    let fp = packet_fingerprint(data);
-                    if dedup.is_duplicate(fp) {
-                        log::debug!("{label}: dropped duplicate packet from {src}");
-                        continue;
-                    }
-                    crate::engine::osc_updates::touch(src);
-                    if let rosc::OscPacket::Message(message) = &packet {
-                        if let OscAction::AlwaysReply(on) = resolve_action(&message.addr, &message.args) {
-                            set_always_reply(src, on);
-                        }
-                        touch_always_reply(src);
-                        // Queries already get a unicast reply above; answer every
-                        // other message from an alwaysReply client.
-                        if always_reply_enabled(src) && CueQuery::parse(message).is_none() {
-                            let matched = !matches!(
-                                resolve_action(&message.addr, &message.args),
-                                OscAction::Unmatched
-                            );
-                            let json = serde_json::json!({
-                                "address": message.addr,
-                                "status": if matched { "ok" } else { "error" },
-                            });
-                            if let Ok(bytes) = rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
-                                addr: format!("/reply{}", message.addr),
-                                args: vec![rosc::OscType::String(json.to_string())],
-                            })) {
-                                let _ = socket.send_to(&bytes, reply_target(src));
-                            }
-                        }
-                    }
-                    on_packet(&packet, !config.allowed_ips.is_empty(), src);
+                    let reply = |bytes: &[u8]| { let _ = socket.send_to(bytes, reply_target(src)); };
+                    handle_decoded_packet(&mut Dispatch {
+                        protocol,
+                        allowed_ips: &config.allowed_ips,
+                        src,
+                        dedup: Some(&mut dedup),
+                        reply: &reply,
+                        on_packet: &mut on_packet,
+                        on_query: &mut on_query,
+                        label,
+                    }, &packet, data);
                 }
                 Err(e) if is_timeout(&e) => {}
                 Err(e) => log::warn!("{label}: recv error: {e}"),
             }
         }
     }
+}
+
+/// Shared per-packet dispatch context, used by both the UDP loop and TCP
+/// connections. `reply` sends raw reply packet bytes back to the sender (UDP
+/// datagram or SLIP-framed TCP write); `dedup` is `None` on TCP streams.
+struct Dispatch<'a> {
+    protocol: Protocol,
+    allowed_ips: &'a [String],
+    src: SocketAddr,
+    dedup: Option<&'a mut DedupCache>,
+    reply: &'a dyn Fn(&[u8]),
+    on_packet: &'a mut dyn FnMut(&rosc::OscPacket, bool, SocketAddr),
+    on_query: &'a mut dyn FnMut(CueQuery<'_>, SocketAddr) -> Option<Vec<u8>>,
+    label: &'a str,
+}
+
+/// Shared dispatch for one decoded OSC packet, used by both the UDP loop and
+/// TCP connections.
+fn handle_decoded_packet(ctx: &mut Dispatch<'_>, packet: &rosc::OscPacket, data: &[u8]) {
+    let protocol = ctx.protocol;
+    let allowed_ips = ctx.allowed_ips;
+    let src = ctx.src;
+    let label = ctx.label;
+    if let rosc::OscPacket::Message(message) = packet {
+        if let Some(query) = CueQuery::parse(message) {
+            // QLab always accepts the app-level queries (/version, /workspaces,
+            // /overrides reads, /alwaysReply and /updates status reads);
+            // show-data queries need the allowlist.
+            if matches!(protocol, Protocol::Osc)
+                && query.is_single_datagram(data)
+                && (!allowed_ips.is_empty() || query.is_any_access())
+            {
+                if let Some(bytes) = (ctx.on_query)(query, src) {
+                    (ctx.reply)(&bytes);
+                }
+            }
+            // Query results are unicast and can change between identical requests.
+            return;
+        }
+    }
+    if let Some(dedup) = &mut ctx.dedup {
+        let fp = packet_fingerprint(data);
+        if dedup.is_duplicate(fp) {
+            log::debug!("{label}: dropped duplicate packet from {src}");
+            return;
+        }
+    }
+    crate::engine::osc_updates::touch(src);
+    if let rosc::OscPacket::Message(message) = packet {
+        if let OscAction::AlwaysReply(on) = resolve_action(&message.addr, &message.args) {
+            set_always_reply(src, on);
+        }
+        touch_always_reply(src);
+        // Queries already get a unicast reply above; answer every other
+        // message from an alwaysReply client.
+        if always_reply_enabled(src) && CueQuery::parse(message).is_none() {
+            let matched = !matches!(
+                resolve_action(&message.addr, &message.args),
+                OscAction::Unmatched
+            );
+            let json = serde_json::json!({
+                "address": message.addr,
+                "status": if matched { "ok" } else { "error" },
+            });
+            if let Ok(bytes) = rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
+                addr: format!("/reply{}", message.addr),
+                args: vec![rosc::OscType::String(json.to_string())],
+            })) {
+                (ctx.reply)(&bytes);
+            }
+        }
+    }
+    (ctx.on_packet)(packet, !allowed_ips.is_empty(), src);
+}
+
+// ---------------------------------------------------------------------------
+// TCP transport (QLab serves OSC on TCP 53000 alongside UDP, SLIP-framed)
+// ---------------------------------------------------------------------------
+
+/// RFC 1055 SLIP encode (OSC 1.1 TCP framing): END-delimited, 0xDB escapes.
+pub(crate) fn slip_encode(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() + 4);
+    out.push(0xC0);
+    for &byte in data {
+        match byte {
+            0xC0 => out.extend_from_slice(&[0xDB, 0xDC]),
+            0xDB => out.extend_from_slice(&[0xDB, 0xDD]),
+            _ => out.push(byte),
+        }
+    }
+    out.push(0xC0);
+    out
+}
+
+/// Incremental SLIP decoder: returns each complete END-delimited packet payload.
+struct SlipDecoder {
+    buf: Vec<u8>,
+    escaped: bool,
+}
+
+impl SlipDecoder {
+    fn new() -> Self {
+        Self { buf: Vec::new(), escaped: false }
+    }
+
+    fn feed(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+        let mut packets = Vec::new();
+        for &byte in data {
+            match byte {
+                0xC0 => {
+                    if !self.buf.is_empty() {
+                        packets.push(std::mem::take(&mut self.buf));
+                    }
+                    self.escaped = false;
+                }
+                0xDB => self.escaped = true,
+                _ if self.escaped => {
+                    self.buf.push(match byte {
+                        0xDC => 0xC0,
+                        0xDD => 0xDB,
+                        other => other,
+                    });
+                    self.escaped = false;
+                }
+                _ => self.buf.push(byte),
+            }
+        }
+        packets
+    }
+}
+
+type PacketHandler = Arc<dyn Fn(&rosc::OscPacket, bool, SocketAddr) + Send + Sync>;
+type QueryHandler = Arc<dyn Fn(CueQuery<'_>, SocketAddr) -> Option<Vec<u8>> + Send + Sync>;
+
+/// Live TCP connections by peer address, so `/update/...` pushes can reach them.
+static TCP_CONNECTIONS: Mutex<Option<HashMap<SocketAddr, Arc<Mutex<std::net::TcpStream>>>>> =
+    Mutex::new(None);
+
+/// The TCP stream of a connected OSC peer, if it is one.
+pub(crate) fn tcp_connection(addr: SocketAddr) -> Option<Arc<Mutex<std::net::TcpStream>>> {
+    let guard = TCP_CONNECTIONS.lock().ok()?;
+    guard.as_ref()?.get(&addr).cloned()
+}
+
+/// The TCP accept endpoint for binary OSC (same port as the UDP listener).
+struct TcpEndpoint {
+    commands: Sender<ListenerCommand>,
+    status: Arc<Mutex<OscListenerStatus>>,
+}
+
+impl TcpEndpoint {
+    fn spawn(
+        config: ListenerConfig,
+        bind_ip: impl Fn() -> IpAddr + Send + 'static,
+        mut on_status: impl FnMut(&OscListenerStatus) + Send + 'static,
+        on_packet: impl Fn(&rosc::OscPacket, bool, SocketAddr) + Send + Sync + 'static,
+        on_query: impl Fn(CueQuery<'_>, SocketAddr) -> Option<Vec<u8>> + Send + Sync + 'static,
+    ) -> Self {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let initial = if config.enabled { OscListenerStatus::Binding } else { OscListenerStatus::Disabled };
+        let status = Arc::new(Mutex::new(initial));
+        let shared = status.clone();
+        let on_packet = Arc::new(on_packet);
+        let on_query = Arc::new(on_query);
+        std::thread::Builder::new()
+            .name("inkue-osc-tcp-receiver".into())
+            .spawn(move || tcp_accept_loop(config, rx, bind_ip, move |status| {
+                if let Ok(mut slot) = shared.lock() {
+                    *slot = status.clone();
+                }
+                on_status(&status);
+            }, on_packet, on_query))
+            .expect("Failed to spawn OSC TCP listener thread");
+        Self { commands: tx, status }
+    }
+
+    fn reconfigure(&self, config: ListenerConfig) {
+        let _ = self.commands.send(ListenerCommand::Configure(config));
+    }
+
+    fn stop(&self) {
+        let _ = self.commands.send(ListenerCommand::Stop);
+    }
+
+    fn status(&self) -> Result<OscListenerStatus, String> {
+        self.status.lock().map(|status| status.clone()).map_err(|error| error.to_string())
+    }
+}
+
+fn tcp_accept_loop(
+    mut config: ListenerConfig,
+    commands: Receiver<ListenerCommand>,
+    bind_ip: impl Fn() -> IpAddr,
+    mut on_status: impl FnMut(OscListenerStatus),
+    on_packet: PacketHandler,
+    on_query: QueryHandler,
+) {
+    let shared_config = Arc::new(Mutex::new(config.clone()));
+    let mut listener: Option<std::net::TcpListener> = None;
+    let mut reported_disabled = !config.enabled;
+    loop {
+        match commands.recv_timeout(Duration::from_millis(100)) {
+            Ok(ListenerCommand::Configure(new)) => {
+                let rebind = new.enabled != config.enabled || new.port != config.port;
+                config = new;
+                if let Ok(mut shared) = shared_config.lock() {
+                    *shared = config.clone();
+                }
+                if rebind {
+                    listener = None;
+                    reported_disabled = !config.enabled;
+                }
+            }
+            Ok(ListenerCommand::Retry) => listener = None,
+            Ok(ListenerCommand::Stop) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                on_status(OscListenerStatus::Disabled);
+                return;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+        }
+        if !config.enabled {
+            if listener.is_some() || !reported_disabled {
+                listener = None;
+                reported_disabled = true;
+                on_status(OscListenerStatus::Disabled);
+            }
+            continue;
+        }
+        if listener.is_none() {
+            let bind_addr = SocketAddr::new(bind_ip(), config.port);
+            match std::net::TcpListener::bind(bind_addr) {
+                Ok(bound) => {
+                    let _ = bound.set_nonblocking(true);
+                    let address = bound.local_addr().unwrap_or(bind_addr);
+                    on_status(OscListenerStatus::Listening { address });
+                    listener = Some(bound);
+                }
+                Err(error) => {
+                    on_status(OscListenerStatus::BindFailed { address: bind_addr, error: error.to_string() });
+                    // Retry on the next command tick; do not spin.
+                    match commands.recv_timeout(Duration::from_millis(500)) {
+                        Ok(ListenerCommand::Configure(new)) => {
+                            config = new;
+                            if let Ok(mut shared) = shared_config.lock() { *shared = config.clone(); }
+                        }
+                        Ok(ListenerCommand::Stop) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+                        _ => {}
+                    }
+                    continue;
+                }
+            }
+        }
+        let Some(bound) = &listener else { continue };
+        match bound.accept() {
+            Ok((stream, src)) => {
+                let allowed_ips = shared_config.lock().map(|c| c.allowed_ips.clone()).unwrap_or_default();
+                // Same gates as UDP: allowlist, then the network input overrides.
+                if !is_allowed(&allowed_ips, &src.ip().to_string())
+                    || (!crate::engine::overrides::OVERRIDES.network_external_input() && !src.ip().is_loopback())
+                    || (!crate::engine::overrides::OVERRIDES.network_local_input() && src.ip().is_loopback())
+                {
+                    log::debug!("OSC TCP: refusing connection from {src}");
+                    continue;
+                }
+                let config = shared_config.clone();
+                let on_packet = on_packet.clone();
+                let on_query = on_query.clone();
+                std::thread::Builder::new()
+                    .name(format!("inkue-osc-tcp-{src}"))
+                    .spawn(move || tcp_connection_loop(stream, src, config, on_packet, on_query))
+                    .ok();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => listener = None,
+        }
+    }
+}
+
+fn tcp_connection_loop(
+    mut stream: std::net::TcpStream,
+    src: SocketAddr,
+    config: Arc<Mutex<ListenerConfig>>,
+    on_packet: PacketHandler,
+    on_query: QueryHandler,
+) {
+    // QLab never auto-disconnects TCP clients: pin this peer so the per-sender
+    // registries (updates, alwaysReply, reply port/format) survive indefinitely.
+    crate::engine::osc_updates::pin_client(src, true);
+    let writer = stream.try_clone().ok().map(|s| Arc::new(Mutex::new(s)));
+    if let Some(writer) = &writer {
+        if let Ok(mut guard) = TCP_CONNECTIONS.lock() {
+            guard.get_or_insert_with(HashMap::new).insert(src, writer.clone());
+        }
+    }
+    let reply = |bytes: &[u8]| {
+        if let Some(writer) = &writer {
+            if let Ok(mut socket) = writer.lock() {
+                use std::io::Write;
+                let _ = socket.write_all(&slip_encode(bytes));
+                let _ = socket.flush();
+            }
+        }
+    };
+    let mut slip = SlipDecoder::new();
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match std::io::Read::read(&mut stream, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                for payload in slip.feed(&buf[..n]) {
+                    let Ok((_, packet)) = rosc::decoder::decode_udp(&payload) else { continue };
+                    let allowed_ips = config.lock().map(|c| c.allowed_ips.clone()).unwrap_or_default();
+                    handle_decoded_packet(&mut Dispatch {
+                        protocol: Protocol::Osc,
+                        allowed_ips: &allowed_ips,
+                        src,
+                        dedup: None,
+                        reply: &reply,
+                        on_packet: &mut |p, a, s| on_packet(p, a, s),
+                        on_query: &mut |q, s| on_query(q, s),
+                        label: "OSC TCP",
+                    }, &packet, &payload);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if let Ok(mut guard) = TCP_CONNECTIONS.lock() {
+        if let Some(map) = guard.as_mut() {
+            map.remove(&src);
+        }
+    }
+    apply_client_session(ClientSessionAction::Disconnect, src);
 }
 
 /// Clients that sent `/alwaysReply 1` get a `/reply{addr}` for every message.
@@ -2608,6 +2923,103 @@ mod tests {
         assert!(CueQuery::parse(&query_message("/cue/5/preWait/+/1")).is_none());
         assert!(parse_text_message(b"/cue/5/preWait/+ 1").is_some());
         let _ = ContinueMode::AutoFollow; // enum stays queryable
+    }
+
+    #[test]
+    fn slip_codec_round_trips_and_decodes_split_feeds() {
+        let payloads: Vec<Vec<u8>> = vec![
+            b"/version".to_vec(),
+            vec![0xC0, 0xDB, 0x00, 0xFF, 0xC0, 0xDB],
+            query_packet("/cue/1/number"),
+        ];
+        let mut wire = Vec::new();
+        for payload in &payloads {
+            wire.extend_from_slice(&slip_encode(payload));
+        }
+        // Every byte of the escape alphabet survives the round trip.
+        assert!(wire.windows(2).any(|w| w == [0xDB, 0xDC]));
+        assert!(wire.windows(2).any(|w| w == [0xDB, 0xDD]));
+        let mut decoder = SlipDecoder::new();
+        let mut got = Vec::new();
+        for chunk in wire.chunks(3) {
+            got.extend(decoder.feed(chunk));
+        }
+        assert_eq!(got, payloads);
+    }
+
+    #[test]
+    fn osc_tcp_endpoint_answers_queries_and_always_reply_over_slip() {
+        use std::io::{Read, Write};
+        let (status_tx, statuses) = crossbeam_channel::unbounded();
+        let (packet_tx, packets) = crossbeam_channel::unbounded();
+        let config = ListenerConfig { enabled: true, port: 0, allowed_ips: vec![] };
+        let endpoint = TcpEndpoint::spawn(
+            config,
+            || Ipv4Addr::LOCALHOST.into(),
+            move |status| { let _ = status_tx.send(status.clone()); },
+            move |packet, _allowed, _src| { let _ = packet_tx.send(packet.clone()); },
+            |query, _src| query.encode_reply_formatted(uuid::Uuid::new_v4(), Some(serde_json::json!("ok-data")), None),
+        );
+        let OscListenerStatus::Listening { address } = statuses.recv_timeout(Duration::from_secs(2)).unwrap() else {
+            panic!("expected a TCP listener");
+        };
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let peer = stream.local_addr().unwrap();
+        let send = |stream: &mut std::net::TcpStream, packet: &[u8]| {
+            stream.write_all(&slip_encode(packet)).unwrap();
+        };
+        let recv = |stream: &mut std::net::TcpStream| -> rosc::OscMessage {
+            let mut decoder = SlipDecoder::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0, "connection closed");
+                if let Some(payload) = decoder.feed(&buf[..n]).into_iter().next() {
+                    let (_, rosc::OscPacket::Message(message)) = rosc::decoder::decode_udp(&payload).unwrap() else {
+                        panic!("expected a single OSC message");
+                    };
+                    return message;
+                }
+            }
+        };
+
+        // An app-level query over TCP gets a SLIP-framed reply on the same connection.
+        send(&mut stream, &query_packet("/version"));
+        let reply = recv(&mut stream);
+        assert_eq!(reply.addr, "/reply/version");
+        let [rosc::OscType::String(json)] = reply.args.as_slice() else { panic!("expected JSON data") };
+        assert_eq!(serde_json::from_str::<serde_json::Value>(json).unwrap()["data"], "ok-data");
+
+        // alwaysReply works over TCP and commands still reach on_packet.
+        send(&mut stream, &rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
+            addr: "/alwaysReply".into(),
+            args: vec![rosc::OscType::Int(1)],
+        })).unwrap());
+        assert_eq!(recv(&mut stream).addr, "/reply/alwaysReply");
+        send(&mut stream, &rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
+            addr: "/thump".into(),
+            args: vec![],
+        })).unwrap());
+        assert_eq!(recv(&mut stream).addr, "/reply/thump");
+        // Both commands reach on_packet, in order: /alwaysReply then /thump.
+        let first = packets.recv_timeout(Duration::from_secs(2)).unwrap();
+        let second = packets.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(first, rosc::OscPacket::Message(ref m) if m.addr == "/alwaysReply"));
+        assert!(matches!(second, rosc::OscPacket::Message(ref m) if m.addr == "/thump"));
+
+        // The peer is pinned while connected (QLab never expires TCP clients)...
+        assert!(crate::engine::osc_updates::is_pinned(peer));
+        assert!(tcp_connection(peer).is_some());
+        // ...and fully disconnected when the stream closes.
+        drop(stream);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while tcp_connection(peer).is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(tcp_connection(peer).is_none(), "the connection is unregistered on close");
+        assert!(!crate::engine::osc_updates::is_pinned(peer), "the pin is released on close");
+        endpoint.stop();
     }
 
     #[test]

@@ -121,6 +121,15 @@ pub fn push(messages: &[(String, Vec<rosc::OscType>)]) {
             if !allowed {
                 continue;
             }
+            // TCP peers receive the push SLIP-framed on their own connection.
+            if let Some(stream) = super::osc_server::tcp_connection(*peer) {
+                use std::io::Write;
+                if let Ok(mut socket) = stream.lock() {
+                    let _ = socket.write_all(&super::osc_server::slip_encode(&bytes));
+                    let _ = socket.flush();
+                }
+                continue;
+            }
             let _ = socket.send_to(&bytes, target);
         }
     }
