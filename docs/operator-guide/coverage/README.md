@@ -103,7 +103,7 @@ Review the source commands and local fixture patch offline before arming a Light
 
 ## Network, MIDI and show control
 
-Use an isolated endpoint for OSC follow markers. The native desk also supports MIDI, timecode, and a trusted hardware remote. Verify each controller and timecode source on the rig. The OSC half of the show-control broadcast contract is covered (`/listen`, `/ignore`, `/eventFormat` pushing `/qlab/event/workspace/...`); the MSC broadcast half remains open. Full remote multiuser workspace editing and the QLab iOS client workflow remain open. [Inkue exercise](../workshops/README.md)
+Use an isolated endpoint for OSC follow markers. The native desk also supports MIDI, timecode, and a trusted hardware remote. Verify each controller and timecode source on the rig. Both halves of the show-control broadcast contract are covered: OSC (`/listen`, `/ignore`, `/eventFormat` pushing `/qlab/event/workspace/...`) and MSC (`MSC GO {cue number}` on GO, `ALL_OFF` on Stop/HardStop/Panic All, `RESET` on Reset All, to per-workspace destinations configured under Preferences → Network). Full remote multiuser workspace editing and the QLab iOS client workflow remain open. [Inkue exercise](../workshops/README.md)
 
 - [Collaboration](https://qlab.app/docs/v5/networking/collaboration/)
 - [QLab Remote](https://qlab.app/docs/v5/networking/qlab-remote/)

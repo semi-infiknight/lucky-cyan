@@ -1380,10 +1380,26 @@ export const DEFAULT_DISPLAY_PREFS: Pick<DisplayPreferences, "theme" | "cue_colo
   cue_color_style: "stripe",
 };
 
+export interface MscBroadcastDestination {
+  /** MIDI output port name (QLab's "MIDI patch"). */
+  port_name: string;
+  /** MSC command format (e.g. 48 = Lighting (General)). */
+  command_format: number;
+  /** Individual device ID 0..=111, or 127 for the all-call address. */
+  device_id: number;
+}
+
+export interface MidiPreferences {
+  /** QLab's MSC Broadcast tab checkbox. */
+  msc_broadcast_enabled: boolean;
+  msc_broadcast_destinations: MscBroadcastDestination[];
+}
+
 export interface AppPreferences {
   audio: AudioPreferences;
   general: GeneralPreferences;
   network: Record<string, never>;
+  midi: MidiPreferences;
   display: DisplayPreferences;
 }
 

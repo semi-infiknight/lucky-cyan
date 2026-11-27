@@ -332,6 +332,20 @@ impl Default for OscReceiveConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkPreferences {}
 
+/// MIDI preferences saved with the workspace (QLab's per-workspace MIDI
+/// settings). Currently holds the MSC show-control broadcast configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MidiPreferences {
+    /// QLab's MSC Broadcast tab checkbox: send MSC show-control broadcast
+    /// messages on GO / Stop All / HardStop All / Panic All / Reset All.
+    #[serde(default)]
+    pub msc_broadcast_enabled: bool,
+    /// MSC broadcast destinations (MIDI output port + command format +
+    /// device ID), like QLab's per-workspace destination list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub msc_broadcast_destinations: Vec<crate::cue::msc::MscBroadcastDestination>,
+}
+
 /// Machine-level network interface selection — stored in `network.json`,
 /// not in the workspace file, because it describes the physical machine.
 ///
@@ -480,12 +494,32 @@ pub struct AppPreferences {
     #[serde(default)]
     pub network: NetworkPreferences,
     #[serde(default)]
+    pub midi: MidiPreferences,
+    #[serde(default)]
     pub display: DisplayPreferences,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn msc_broadcast_preferences_default_off_and_round_trip() {
+        let legacy: AppPreferences = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.midi.msc_broadcast_enabled);
+        assert!(legacy.midi.msc_broadcast_destinations.is_empty());
+        let authored = MidiPreferences {
+            msc_broadcast_enabled: true,
+            msc_broadcast_destinations: vec![crate::cue::msc::MscBroadcastDestination {
+                port_name: "IAC Bus 1".into(),
+                command_format: 48,
+                device_id: 127,
+            }],
+        };
+        let value = serde_json::to_value(&authored).unwrap();
+        let reopened: MidiPreferences = serde_json::from_value(value).unwrap();
+        assert_eq!(reopened, authored);
+    }
 
     #[test]
     fn combined_transport_action_is_opt_in_and_saved_with_the_workspace_preferences() {

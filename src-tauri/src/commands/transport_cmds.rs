@@ -100,6 +100,7 @@ pub(super) fn go_locked(state: &AppState, app_handle: &tauri::AppHandle, ws: &mu
     let context = workspace_context(state, ws);
     let mut transport = Transport::new(context);
     let ws_id = ws.instance_id;
+    let msc_prefs = ws.preferences.midi.clone();
 
     let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
 
@@ -133,6 +134,8 @@ pub(super) fn go_locked(state: &AppState, app_handle: &tauri::AppHandle, ws: &mu
     let result = transport.go(cue_list).map_err(|e| e.to_string())?;
 
     if let Some((number, name, id, cue_type)) = playhead_args {
+        // QLab MSC broadcast: GO reports the cue number of the cue which ran.
+        crate::engine::msc_broadcast::broadcast(&msc_prefs, crate::cue::msc::MscCommand::Go, &number);
         if crate::engine::osc_broadcast::has_listeners() {
             crate::engine::osc_broadcast::broadcast(ws_id, "go", Some(crate::engine::osc_broadcast::CueEventArgs {
                 number: &number,
@@ -582,6 +585,7 @@ pub(crate) fn control_network_workspace<'a>(
         Panic => {
             let result = stop_locked(state, app_handle, &mut show, false);
             broadcast_bare_event(&show, "panicAll");
+            broadcast_msc(&show, crate::cue::msc::MscCommand::AllOff, "");
             result
         }
         Reset => reset_workspace_locked(state, app_handle, &mut show),
@@ -642,6 +646,11 @@ fn broadcast_bare_event(ws: &Workspace, event: &str) {
     if crate::engine::osc_broadcast::has_listeners() {
         crate::engine::osc_broadcast::broadcast(ws.instance_id, event, None);
     }
+}
+
+/// QLab MSC show-control broadcast (workspace MIDI → MSC Broadcast destinations).
+fn broadcast_msc(ws: &Workspace, command: crate::cue::msc::MscCommand, q_number: &str) {
+    crate::engine::msc_broadcast::broadcast(&ws.preferences.midi, command, q_number);
 }
 
 pub(crate) fn control_network_list_pause(
@@ -946,6 +955,7 @@ fn reset_workspace_locked(
     let standby = show.active_cue_list().and_then(|list| list.playhead_cue_id);
     emit_playhead(app_handle, standby);
     broadcast_bare_event(show, "resetAll");
+    broadcast_msc(show, crate::cue::msc::MscCommand::Reset, "");
     Ok(())
 }
 
@@ -1012,6 +1022,8 @@ pub(super) fn stop_locked(state: &AppState, app_handle: &tauri::AppHandle, ws: &
         );
     }
     broadcast_bare_event(ws, if hard { "hardStopAll" } else { "stopAll" });
+    // QLab MSC broadcast: Stop All and HardStop All both send ALL_OFF.
+    broadcast_msc(ws, crate::cue::msc::MscCommand::AllOff, "");
     Ok(())
 }
 

@@ -38,6 +38,7 @@ pub mod osc_patch;
 pub mod osc_server;
 pub mod osc_broadcast;
 pub mod osc_updates;
+pub mod msc_broadcast;
 pub mod overrides;
 pub mod output_engine;
 mod output_meter;

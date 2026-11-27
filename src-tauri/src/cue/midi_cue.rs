@@ -115,8 +115,10 @@ impl MidiMessage {
         let d1 = self.data1 & 0x7F;
         let d2 = self.data2 & 0x7F;
         Ok(match self.message_type {
+            // Broadcast form: MSC messages may use the all-call device ID 127
+            // (cue destinations are constrained to 0..=111 at import/UI time).
             MidiMessageType::Msc => self.msc.as_ref().ok_or_else(|| anyhow::anyhow!("Missing MSC settings"))?
-                .to_bytes().map_err(anyhow::Error::msg)?,
+                .to_broadcast_bytes().map_err(anyhow::Error::msg)?,
             MidiMessageType::Sysex => sysex_bytes(self.sysex.as_deref().unwrap_or_default())?,
             MidiMessageType::NoteOff       => vec![0x80 | ch, d1, d2],
             MidiMessageType::NoteOn        => vec![0x90 | ch, d1, d2],
@@ -236,9 +238,16 @@ pub fn send_midi_messages(messages: &[MidiMessage]) -> Result<()> {
         }
     };
     for (msg, bytes) in messages.iter().zip(encoded) {
-        // QLab's sysexOutput override: drop SysEx (0xF0...) messages only.
-        if bytes.first() == Some(&0xF0) && !crate::engine::overrides::OVERRIDES.sysex_output() {
-            log::debug!("MIDI: dropping SysEx message while the sysex output override is off");
+        // QLab's output overrides gate by message kind, not by wire bytes:
+        // sysexOutput drops SysEx cues, mscOutput drops MSC messages (both
+        // are 0xF0-framed on the wire).
+        let blocked = match msg.message_type {
+            MidiMessageType::Sysex => !crate::engine::overrides::OVERRIDES.sysex_output(),
+            MidiMessageType::Msc => !crate::engine::overrides::OVERRIDES.msc_output(),
+            _ => false,
+        };
+        if blocked {
+            log::debug!("MIDI: dropping {:?} message while its output override is off", msg.message_type);
             continue;
         }
         let ports = midi_out.ports();

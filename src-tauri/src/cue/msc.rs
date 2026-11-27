@@ -1,7 +1,7 @@
 //! Addressed MIDI Show Control 1.1 transport commands.
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum MscCommand {
@@ -129,9 +129,34 @@ pub struct MscMessage {
     pub q_path: String,
 }
 
+/// One MSC show-control broadcast destination (QLab's Workspace Settings →
+/// MIDI → MSC Broadcast tab): a MIDI output port plus the command format and
+/// device ID stamped onto every broadcast message sent to it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MscBroadcastDestination {
+    /// MIDI output port name (QLab's "MIDI patch").
+    pub port_name: String,
+    /// MSC command format (e.g. 48 = Lighting (General)).
+    pub command_format: u8,
+    /// Individual device ID 0..=111, or 127 for the all-call address.
+    pub device_id: u8,
+}
+
 impl MscMessage {
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
-        if self.device_id > 0x6f {
+        self.encode(false)
+    }
+
+    /// Broadcast form: also accepts the all-call device ID 127.
+    pub(crate) fn to_broadcast_bytes(&self) -> Result<Vec<u8>, String> {
+        self.encode(true)
+    }
+
+    fn encode(&self, allow_all_call: bool) -> Result<Vec<u8>, String> {
+        // Cue form: individual IDs 0..=111. Broadcast form: 0..=127, where
+        // 127 is the MSC all-call address.
+        let max_device = if allow_all_call { 0x7f } else { 0x6f };
+        if self.device_id > max_device {
             return Err("MSC needs an individual device ID from 0 to 111.".into());
         }
         // Numeric command formats defined in the QLab parameter reference.
@@ -344,5 +369,35 @@ mod tests {
         assert_eq!(msg.to_bytes().unwrap().len(), 128);
         msg.q_number.push('1');
         assert!(msg.to_bytes().is_err());
+    }
+
+    #[test]
+    fn broadcast_encoding_allows_the_all_call_device_id() {
+        let msg = MscMessage {
+            device_id: 127,
+            command_format: 48,
+            command: MscCommand::AllOff,
+            q_number: String::new(),
+            q_list: String::new(),
+            q_path: String::new(),
+        };
+        assert!(msg.to_bytes().is_err(), "cue form still rejects all-call");
+        assert_eq!(
+            msg.to_broadcast_bytes().unwrap(),
+            [0xf0, 0x7f, 127, 2, 48, 0x08, 0xf7]
+        );
+        let go = MscMessage {
+            device_id: 127,
+            command_format: 48,
+            command: MscCommand::Go,
+            q_number: "24".into(),
+            q_list: String::new(),
+            q_path: String::new(),
+        };
+        assert_eq!(
+            go.to_broadcast_bytes().unwrap(),
+            [0xf0, 0x7f, 127, 2, 48, 0x01, b'2', b'4', 0xf7]
+        );
+        assert!(MscMessage { device_id: 128, ..example() }.to_broadcast_bytes().is_err());
     }
 }

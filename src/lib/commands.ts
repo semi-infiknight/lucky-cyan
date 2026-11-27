@@ -44,6 +44,7 @@ import type {
   GroupTimelineOwner,
   HealthAlert,
   ImportReport,
+  MidiPreferences,
   InputPatch,
   LogLine,
   MidiTrigger,
@@ -508,6 +509,8 @@ export const updateAudioPreferences = (prefs: AudioPreferences) =>
   invoke<void>("update_audio_preferences", { prefs });
 export const updateGeneralPreferences = (prefs: GeneralPreferences) =>
   invoke<void>("update_general_preferences", { prefs });
+export const updateMidiPreferences = (prefs: MidiPreferences) =>
+  invoke<void>("update_midi_preferences", { prefs });
 export const updateDisplayPreferences = (prefs: DisplayPreferences) =>
   invoke<void>("update_display_preferences", { prefs });
 export async function listAudioDevices(backend?: string): Promise<DeviceInfo[]> {

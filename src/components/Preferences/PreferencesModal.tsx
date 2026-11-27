@@ -38,6 +38,7 @@ import { InputPatchesPanel } from "../InputPatches/InputPatchesPanel";
 import { OutputPatchesPanel } from "../OutputPatches/OutputPatchesPanel";
 import { TcPreferences } from "../Timecode/TcPreferences";
 import { MidiTriggerPreferences } from "./MidiTriggerPreferences";
+import { MscBroadcastSection } from "./MscBroadcastSection";
 import { NetworkInterfaceSection } from "./NetworkInterfaceSection";
 import { OutputsSection } from "./OutputsSection";
 import { ProjectorToolsSection } from "./ProjectorToolsSection";
@@ -1505,6 +1506,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
                     />
                     <TcPreferences />
                     <MidiTriggerPreferences />
+                    <MscBroadcastSection />
                   </>
                 )}
               </>

@@ -103,7 +103,7 @@ use commands::{
         list_audio_devices, list_system_fonts, open_preferences_window, preview_output_timer,
         set_output_screen, set_output_transform, show_test_pattern, test_audio_device,
         update_audio_preferences, update_display_preferences,
-        update_general_preferences, update_machine_audio_config,
+        update_general_preferences, update_machine_audio_config, update_midi_preferences,
     },
     transport_cmds::{
         go, go_cue, fire_cue_hotkey, set_cue_hotkey, arm_wall_clock_trigger, set_wall_clock_trigger,
@@ -732,6 +732,7 @@ pub fn run() {
             open_preferences_window,
             update_audio_preferences,
             update_general_preferences,
+            update_midi_preferences,
             update_display_preferences,
             list_audio_devices,
             list_system_fonts,

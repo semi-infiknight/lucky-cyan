@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
     engine::device_manager::DeviceInfo,
-    preferences::{AppPreferences, AudioPreferences, DisplayPreferences, GeneralPreferences, MachineAudioConfig},
+    preferences::{AppPreferences, AudioPreferences, DisplayPreferences, GeneralPreferences, MachineAudioConfig, MidiPreferences},
     state::AppState,
 };
 
@@ -161,6 +161,23 @@ pub fn update_general_preferences(
     ws.preferences.general = prefs;
     // Keep each cue list's runtime auto-renumber flag in sync with the pref.
     ws.sync_auto_renumber();
+    ws.mark_modified();
+    drop(ws);
+    let _ = app_handle.emit("preferences-applied", ());
+    let _ = app_handle.emit("workspace-modified", serde_json::json!({}));
+    Ok(())
+}
+
+/// Overwrite the MIDI section of preferences (MSC show-control broadcast
+/// destinations) and mark the workspace modified.
+#[tauri::command]
+pub fn update_midi_preferences(
+    prefs: MidiPreferences,
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    ws.preferences.midi = prefs;
     ws.mark_modified();
     drop(ws);
     let _ = app_handle.emit("preferences-applied", ());
