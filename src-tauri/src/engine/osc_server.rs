@@ -436,7 +436,15 @@ fn handle_decoded_packet(ctx: &mut Dispatch<'_>, packet: &rosc::OscPacket, data:
         }
     }
     (ctx.on_packet)(packet, !allowed_ips.is_empty(), src);
-    if let Some((message, matched)) = ack {
+    // An action that produces reply data (e.g. `/new` returns the new cue's
+    // unique ID) answers with the full envelope instead of the bare ack.
+    let action_reply = ACTION_REPLY.with(|cell| cell.borrow_mut().take());
+    if let Some((address, workspace_id, data)) = action_reply {
+        let format = current_reply_format(src);
+        if let Some(bytes) = encode_reply_packet(&address, workspace_id, Some(data), format.as_deref()) {
+            (ctx.reply)(&bytes);
+        }
+    } else if let Some((message, matched)) = ack {
         let json = serde_json::json!({
             "address": message.addr,
             "status": if matched { "ok" } else { "error" },
@@ -918,7 +926,7 @@ enum OscAction<'a> {
     /// QLab `/workingDirectory {path}`: set the application working directory.
     SetWorkingDirectory(String),
     /// QLab `/new {cue_type}`: create a cue of that type in the active list.
-    CreateCue { workspace: Option<WorkspaceSelector<'a>>, cue_type: CueType },
+    CreateCue { workspace: Option<WorkspaceSelector<'a>>, cue_type: CueType, cue_id: Option<String> },
     /// Trigger a full cue-list feedback dump.
     CueListRequest,
     /// Trigger a playhead feedback dump.
@@ -1057,13 +1065,23 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, src: SocketA
                 }
             }
         }
-        OscAction::CreateCue { workspace, cue_type } => {
+        OscAction::CreateCue { workspace, cue_type, cue_id } => {
             if let Some(state) = app_handle.try_state::<AppState>() {
-                let result = crate::commands::transport_cmds::create_network_cue(
-                    &state, app_handle, workspace, cue_type,
-                );
-                if let Err(error) = result {
-                    log::warn!("OSC /new: {error}");
+                let instance = state.workspace.lock().ok().map(|ws| ws.instance_id()).unwrap_or_default();
+                match crate::commands::transport_cmds::create_network_cue(
+                    &state, app_handle, workspace, cue_type, cue_id,
+                ) {
+                    // QLab `/new` replies with the new cue's unique ID.
+                    Ok(Some(id)) => ACTION_REPLY.with(|cell| {
+                        *cell.borrow_mut() = Some((msg.addr.clone(), instance, serde_json::json!(id.to_string())));
+                    }),
+                    Ok(None) => {}
+                    Err(error) => {
+                        log::warn!("OSC /new: {error}");
+                        ACTION_REPLY.with(|cell| {
+                            *cell.borrow_mut() = Some((msg.addr.clone(), instance, serde_json::Value::Null));
+                        });
+                    }
                 }
             }
             (true, true)
@@ -1474,13 +1492,30 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             _ => OscAction::Unmatched,
         };
     }
-    // QLab `/new {cue_type}`: create a cue of the given type in the active list.
+    // QLab `/new {cue_type} [{cue_ID} [{cart_row} {cart_column}]]`: create a
+    // cue of the given type in the active list.  The optional cue ID must be a
+    // UUID; cart row/column are accepted for dictionary compatibility but
+    // ignored (Inkue lists and carts are linear, not gridded).
     if addr == "/new" {
+        let with_id = |text: &rosc::OscType, id: &rosc::OscType| match (text, id) {
+            (rosc::OscType::String(text), rosc::OscType::String(id)) => {
+                match (CueType::from_qlab_name(text), hyphenated_query_id(id)) {
+                    (Some(cue_type), Some(_)) =>
+                        Some(OscAction::CreateCue { workspace, cue_type, cue_id: Some(id.clone()) }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
         return match args {
             [rosc::OscType::String(text)] => match CueType::from_qlab_name(text) {
-                Some(cue_type) => OscAction::CreateCue { workspace, cue_type },
+                Some(cue_type) => OscAction::CreateCue { workspace, cue_type, cue_id: None },
                 None => OscAction::Unmatched,
             },
+            [text, id] => with_id(text, id).unwrap_or(OscAction::Unmatched),
+            [text, id, row, col] if numeric_arg(std::slice::from_ref(row)).is_some()
+                && numeric_arg(std::slice::from_ref(col)).is_some() =>
+                with_id(text, id).unwrap_or(OscAction::Unmatched),
             _ => OscAction::Unmatched,
         };
     }
@@ -2538,16 +2573,36 @@ impl<'a> CueQuery<'a> {
         data: Option<serde_json::Value>,
         format: Option<&str>,
     ) -> Option<Vec<u8>> {
-        let status = if data.is_some() { "ok" } else { "error" };
-        let payload = match format {
-            Some(format) if !format.is_empty() => format_reply(format, workspace_id, self.address, status, &data),
-            _ => serde_json::json!({ "workspace_id": workspace_id, "address": self.address, "status": status, "data": data }).to_string(),
-        };
-        rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
-            addr: format!("/reply{}", self.address),
-            args: vec![rosc::OscType::String(payload)],
-        })).ok()
+        encode_reply_packet(self.address, workspace_id, data, format)
     }
+}
+
+/// QLab reply envelope: `/reply{address}` with a JSON string argument holding
+/// `workspace_id`, `address`, `status` and `data` (or the sender's
+/// `/replyFormat` template with `#workspace_id#`/`#address#`/`#status#`/`#data#`).
+fn encode_reply_packet(
+    address: &str,
+    workspace_id: Uuid,
+    data: Option<serde_json::Value>,
+    format: Option<&str>,
+) -> Option<Vec<u8>> {
+    let status = if data.is_some() { "ok" } else { "error" };
+    let payload = match format {
+        Some(format) if !format.is_empty() => format_reply(format, workspace_id, address, status, &data),
+        _ => serde_json::json!({ "workspace_id": workspace_id, "address": address, "status": status, "data": data }).to_string(),
+    };
+    rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
+        addr: format!("/reply{}", address),
+        args: vec![rosc::OscType::String(payload)],
+    })).ok()
+}
+
+thread_local! {
+    /// Reply payload produced by an action message (QLab `/new` returns the new
+    /// cue's unique ID).  Set by the packet handler and sent by
+    /// `handle_decoded_packet`, which runs synchronously on the listener thread.
+    static ACTION_REPLY: std::cell::RefCell<Option<(String, Uuid, serde_json::Value)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn hyphenated_query_id(id: &str) -> Option<Uuid> {
@@ -3771,16 +3826,26 @@ mod tests {
         let s = |text: &str| rosc::OscType::String(text.into());
         // /new {cue_type} creates a cue; QLab type names map case-insensitively.
         assert!(matches!(resolve_action("/new", &[s("audio")]),
-            OscAction::CreateCue { cue_type: CueType::Audio, workspace: None }));
+            OscAction::CreateCue { cue_type: CueType::Audio, workspace: None, cue_id: None }));
         assert!(matches!(resolve_action("/new", &[s("MIDI File")]),
             OscAction::CreateCue { cue_type: CueType::MidiFile, .. }));
         assert!(matches!(resolve_action("/new", &[s("cue cart")]),
             OscAction::CreateCue { cue_type: CueType::Group, .. }));
         assert!(matches!(resolve_action("/workspace/Blue/new", &[s("fade")]),
-            OscAction::CreateCue { cue_type: CueType::Fade, workspace: Some(_) }));
+            OscAction::CreateCue { cue_type: CueType::Fade, workspace: Some(_), .. }));
         assert!(matches!(resolve_action("/new", &[s("bogus")]), OscAction::Unmatched));
         assert!(matches!(resolve_action("/new", &[]), OscAction::Unmatched));
         assert!(matches!(resolve_action("/new", &[s("audio"), s("x")]), OscAction::Unmatched));
+        // QLab `/new {type} {cue_ID} [{cart_row} {cart_column}]`: the cue ID must
+        // be a UUID; cart row/column numbers are accepted but ignored.
+        let id = Uuid::new_v4().to_string();
+        assert!(matches!(resolve_action("/new", &[s("audio"), s(&id)]),
+            OscAction::CreateCue { cue_type: CueType::Audio, cue_id: Some(ref got), .. } if got == &id));
+        assert!(matches!(resolve_action("/new", &[s("memo"), s(&id), rosc::OscType::Int(2), rosc::OscType::Int(3)]),
+            OscAction::CreateCue { cue_type: CueType::Memo, cue_id: Some(ref got), .. } if got == &id));
+        assert!(matches!(resolve_action("/new", &[s("audio"), s(&id), rosc::OscType::Int(2)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/new", &[s("audio"), s(&id), s("2"), s("3")]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/new", &[s("audio"), rosc::OscType::Int(1)]), OscAction::Unmatched));
         // Create is an edit: allowlist required.
         assert!(matches!(authorized_action("/new", &[s("audio")], false), OscAction::Unmatched));
         assert!(matches!(authorized_action("/new", &[s("audio")], true),

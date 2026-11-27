@@ -645,9 +645,16 @@ pub(crate) fn create_cue_in_active_list(
     ws: &mut Workspace,
     app_handle: &tauri::AppHandle,
     cue_type: CueType,
+    requested_id: Option<Uuid>,
 ) -> Result<CueId, String> {
     let registry = state.registry.lock().map_err(|e| e.to_string())?;
     let mut cue = registry.create(&cue_type).map_err(|e| e.to_string())?;
+    if let Some(id) = requested_id {
+        // QLab `/new {cue_type} {cue_ID}`: adopt the requested unique ID.
+        let mut json = cue.serialize();
+        json["id"] = serde_json::json!(id);
+        cue = registry.from_json(json).map_err(|e| e.to_string())?;
+    }
     let cue_id = cue.id();
     drop(registry);
     let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;

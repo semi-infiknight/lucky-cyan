@@ -436,20 +436,28 @@ fn delete_cue_locked(
 
 /// QLab `/new {cue_type}` (optionally workspace-scoped): create a cue of the
 /// given type at the end of the active cue list.
+/// QLab `/new {cue_type} [{cue_ID}]`: create a cue in the active list and
+/// return its unique ID (sent back as the reply's `data`).  `Ok(None)` means
+/// the workspace selector did not match, so no reply is owed.
 pub(crate) fn create_network_cue(
     state: &AppState,
     app_handle: &tauri::AppHandle,
     workspace: Option<crate::engine::osc_server::WorkspaceSelector<'_>>,
     cue_type: CueType,
-) -> Result<(), String> {
+    cue_id: Option<String>,
+) -> Result<Option<CueId>, String> {
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
     if let Some(requested) = workspace {
         if !requested.matches(&ws) {
-            return Ok(());
+            return Ok(None);
         }
     }
-    crate::commands::cue_cmds::create_cue_in_active_list(state, &mut ws, app_handle, cue_type)?;
-    Ok(())
+    let requested_id = match cue_id {
+        Some(text) => Some(text.parse::<Uuid>().map_err(|_| format!("Invalid cue ID: {text}"))?),
+        None => None,
+    };
+    let id = crate::commands::cue_cmds::create_cue_in_active_list(state, &mut ws, app_handle, cue_type, requested_id)?;
+    Ok(Some(id))
 }
 
 /// QLab `/cue/{n}/rate/live {number}`: set the running voice's rate and record

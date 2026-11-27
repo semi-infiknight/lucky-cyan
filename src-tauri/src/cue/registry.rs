@@ -122,6 +122,20 @@ mod tests {
     }
 
     #[test]
+    fn from_json_adopts_an_overridden_unique_id() {
+        // QLab `/new {cue_type} {cue_ID}` assigns the requested unique ID by
+        // rewriting the serialized `id` before deserializing.
+        let mut registry = CueRegistry::new();
+        registry.register(CueType::Memo, Box::new(MemoCueFactory));
+        let cue = registry.create(&CueType::Memo).expect("should create memo cue");
+        let mut json = cue.serialize();
+        let requested = uuid::Uuid::new_v4();
+        json["id"] = serde_json::json!(requested);
+        let deserialized = registry.from_json(json).expect("should deserialize");
+        assert_eq!(deserialized.id(), requested);
+    }
+
+    #[test]
     fn register_and_create_audio() {
         let mut registry = CueRegistry::new();
         registry.register(CueType::Audio, Box::new(AudioCueFactory));
