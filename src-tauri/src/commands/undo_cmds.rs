@@ -210,7 +210,7 @@ pub fn apply_history(
     Ok(true)
 }
 
-fn change_history(
+pub(crate) fn change_history(
     state: &AppState,
     handle: &tauri::AppHandle,
     direction: HistoryDirection,

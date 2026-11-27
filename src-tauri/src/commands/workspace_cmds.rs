@@ -146,9 +146,28 @@ impl CapturedSave {
 
 #[tauri::command(async)]
 pub fn save_workspace(path: String, owner: SaveOwner, state: State<'_, AppState>) -> Result<(), String> {
+    save_workspace_to(&state, PathBuf::from(path), owner)
+}
+
+/// QLab `/save` over OSC: write the open workspace to its current file.
+pub(crate) fn save_current_workspace(state: &AppState) -> Result<(), String> {
+    let (path, owner) = {
+        let ws = state.workspace.lock().map_err(|e| e.to_string())?;
+        let path = ws.file_path.clone().ok_or("Workspace has no file yet; use Save As first")?;
+        let owner = SaveOwner {
+            instance_id: ws.instance_id,
+            revision: ws.revision,
+            file_path: ws.file_path.clone(),
+        };
+        (path, owner)
+    };
+    save_workspace_to(state, path, owner)
+}
+
+pub(crate) fn save_workspace_to(state: &AppState, path: PathBuf, owner: SaveOwner) -> Result<(), String> {
     let captured = {
         let ws = state.workspace.lock().map_err(|e| e.to_string())?;
-        CapturedSave::capture(&ws, owner, PathBuf::from(path))?
+        CapturedSave::capture(&ws, owner, path)?
     };
     let _order = crate::revisions::SAVE_ORDER.lock().unwrap_or_else(|e| e.into_inner());
     let origin = crate::revisions::absolute_target(&captured.target);

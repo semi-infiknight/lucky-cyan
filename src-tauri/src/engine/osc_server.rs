@@ -1049,7 +1049,11 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         "/hardStop" => Some(Transport::HardStop),
         "/pause" => Some(Transport::SetPaused(true)),
         "/resume" => Some(Transport::SetPaused(false)),
+        "/togglePause" => Some(Transport::TogglePaused),
         "/reset" => Some(Transport::Reset),
+        "/save" => Some(Transport::Save),
+        "/undo" => Some(Transport::Undo),
+        "/redo" => Some(Transport::Redo),
         _ => None,
     };
     if let Some(action) = transport {
@@ -2499,6 +2503,27 @@ mod tests {
         assert!(CueQuery::parse(&query_message("/cue/5/preWait/+/1")).is_none());
         assert!(parse_text_message(b"/cue/5/preWait/+ 1").is_some());
         let _ = ContinueMode::AutoFollow; // enum stays queryable
+    }
+
+    #[test]
+    fn qlab_workspace_save_undo_redo_and_toggle_pause_are_control_level_transport() {
+        use NetworkWorkspaceAction as Transport;
+        for (address, expected) in [
+            ("/save", Transport::Save),
+            ("/undo", Transport::Undo),
+            ("/redo", Transport::Redo),
+            ("/togglePause", Transport::TogglePaused),
+        ] {
+            assert!(matches!(resolve_action(address, &[]), OscAction::WorkspaceTransport { action, .. } if action == expected), "{address}");
+            assert!(matches!(resolve_action(&format!("/workspace/Blue{address}"), &[]),
+                OscAction::WorkspaceTransport { action, .. } if action == expected), "scoped {address}");
+            // Control-level like the other workspace transport verbs.
+            assert!(matches!(authorized_action(address, &[], false), OscAction::Unmatched), "{address}");
+            assert!(matches!(authorized_action(address, &[], true), OscAction::WorkspaceTransport { .. }), "{address}");
+            // No arguments allowed; plain text works.
+            assert!(matches!(resolve_action(address, &[rosc::OscType::Int(1)]), OscAction::Unmatched), "{address}");
+            assert!(parse_text_message(address.as_bytes()).is_some(), "{address}");
+        }
     }
 
     #[test]

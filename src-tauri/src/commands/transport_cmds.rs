@@ -490,6 +490,13 @@ pub(crate) enum NetworkWorkspaceAction<'a> {
     HardStop,
     Reset,
     SetPaused(bool),
+    /// QLab `/togglePause`: pause everything running, else resume all.
+    TogglePaused,
+    /// QLab `/save`: write the open workspace to its current file.
+    Save,
+    /// QLab `/undo` / `/redo`.
+    Undo,
+    Redo,
     Step { forward: bool, sequence: bool },
     ClearStandby,
 }
@@ -515,6 +522,24 @@ pub(crate) fn control_network_workspace<'a>(
     matches_workspace: impl FnOnce(&Workspace) -> bool,
 ) -> Result<(), String> {
     use NetworkWorkspaceAction::*;
+    // Save/Undo/Redo lock the workspace themselves, so run them without holding it.
+    if matches!(action, Save | Undo | Redo) {
+        let matches = {
+            let show = state.workspace.lock().map_err(|error| error.to_string())?;
+            matches_workspace(&show)
+        };
+        if !matches {
+            return Ok(());
+        }
+        return match action {
+            Save => super::workspace_cmds::save_current_workspace(state),
+            Undo => super::undo_cmds::change_history(
+                state, app_handle, crate::show::undo_stack::HistoryDirection::Undo),
+            Redo => super::undo_cmds::change_history(
+                state, app_handle, crate::show::undo_stack::HistoryDirection::Redo),
+            _ => unreachable!(),
+        };
+    }
     let mut show = state.workspace.lock().map_err(|error| error.to_string())?;
     if !matches_workspace(&show) {
         return Ok(());
@@ -534,16 +559,10 @@ pub(crate) fn control_network_workspace<'a>(
         }
         Stop | HardStop => stop_locked(state, app_handle, &mut show, action == HardStop),
         Reset => reset_workspace_locked(state, app_handle, &mut show),
-        SetPaused(paused) => {
-            let context = workspace_context(state, &show);
-            let mut first_error = None;
-            for list in &mut show.cue_lists {
-                if let Err(error) = crate::show::cue_list_window::set_list_paused(list, &context, paused) {
-                    first_error.get_or_insert(error);
-                }
-            }
-            let _ = app_handle.emit("cue-list-refresh", ());
-            first_error.map_or(Ok(()), |error| Err(error.to_string()))
+        SetPaused(paused) => pause_all_lists(state, app_handle, &mut show, paused),
+        TogglePaused => {
+            let any_running = show.cue_lists.iter().any(|list| list.cues.iter().any(|cue| cue.is_running()));
+            pause_all_lists(state, app_handle, &mut show, !any_running)
         }
         Step { forward, sequence } => {
             let Some(list) = show.active_cue_list_mut() else { return Ok(()) };
@@ -556,7 +575,28 @@ pub(crate) fn control_network_workspace<'a>(
             let Some(list) = show.active_cue_list_mut().filter(|list| !list.independent_pads()) else { return Ok(()) };
             super::cue_cmds::set_playhead_in_list(list, None, app_handle)
         }
+        // Handled before the workspace lock is taken, above.
+        Save | Undo | Redo => Ok(()),
     }
+}
+
+/// Pause or resume every cue list in the workspace (QLab `/pause`, `/resume`,
+/// `/togglePause` at workspace level).
+fn pause_all_lists(
+    state: &AppState,
+    app_handle: &tauri::AppHandle,
+    show: &mut Workspace,
+    paused: bool,
+) -> Result<(), String> {
+    let context = workspace_context(state, show);
+    let mut first_error = None;
+    for list in &mut show.cue_lists {
+        if let Err(error) = crate::show::cue_list_window::set_list_paused(list, &context, paused) {
+            first_error.get_or_insert(error);
+        }
+    }
+    let _ = app_handle.emit("cue-list-refresh", ());
+    first_error.map_or(Ok(()), |error| Err(error.to_string()))
 }
 
 pub(crate) fn control_network_list_pause(
