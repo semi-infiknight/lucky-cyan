@@ -800,6 +800,12 @@ enum CueQueryProperty {
     UniqueId,
     Running,
     Paused,
+    QName,
+    Armed,
+    ContinueMode,
+    PreWait,
+    Duration,
+    CueType,
 }
 
 #[derive(Clone, Copy)]
@@ -909,6 +915,12 @@ impl<'a> CueQuery<'a> {
             "uniqueID" => CueQueryProperty::UniqueId,
             "isRunning" => CueQueryProperty::Running,
             "isPaused" => CueQueryProperty::Paused,
+            "qName" => CueQueryProperty::QName,
+            "armed" => CueQueryProperty::Armed,
+            "continueMode" => CueQueryProperty::ContinueMode,
+            "preWait" => CueQueryProperty::PreWait,
+            "duration" => CueQueryProperty::Duration,
+            "qType" => CueQueryProperty::CueType,
             _ => return None,
         };
         let target = match kind {
@@ -964,6 +976,16 @@ impl<'a> CueQuery<'a> {
             CueQueryProperty::UniqueId => Some(serde_json::Value::String(cue.id().to_string())),
             CueQueryProperty::Running => Some(serde_json::Value::Bool(cue.is_running())),
             CueQueryProperty::Paused => Some(serde_json::Value::Bool(cue.is_paused())),
+            CueQueryProperty::QName => (cue.name().len() <= MAX_CUE_ADDRESS_NUMBER_BYTES)
+                .then(|| serde_json::Value::String(cue.name().to_owned())),
+            CueQueryProperty::Armed => Some(serde_json::Value::Bool(!cue.is_disabled())),
+            CueQueryProperty::ContinueMode => serde_json::to_value(cue.continue_mode()).ok(),
+            CueQueryProperty::PreWait => Some(serde_json::Value::from(cue.pre_wait().as_secs_f64())),
+            CueQueryProperty::Duration => Some(match cue.duration() {
+                Some(duration) => serde_json::Value::from(duration.as_secs_f64()),
+                None => serde_json::Value::Null,
+            }),
+            CueQueryProperty::CueType => serde_json::to_value(cue.cue_type()).ok(),
         }
     }
 
@@ -1066,6 +1088,34 @@ mod tests {
         assert!(CueQuery::parse(&query_message(&oversized)).is_none());
         let oversized = format!("/workspace/{}/cue/101/number", "a".repeat(MAX_WORKSPACE_SELECTOR_BYTES + 1));
         assert!(CueQuery::parse(&query_message(&oversized)).is_none());
+    }
+
+    #[test]
+    fn queries_read_qlab_cue_properties_from_the_active_list() {
+        use crate::cue::{memo_cue::MemoCue, traits::Cue, types::ContinueMode};
+
+        let mut workspace = Workspace::new("QueryProps");
+        let mut cue = MemoCue::new();
+        cue.set_number(Some("42".into()));
+        cue.set_name("LX warmup".into());
+        cue.set_disabled(true);
+        cue.set_pre_wait(std::time::Duration::from_secs(3));
+        cue.set_continue_mode(ContinueMode::AutoFollow);
+        let id = cue.id();
+        workspace.active_cue_list_mut().unwrap().push(Box::new(cue));
+
+        let read = |address: &str| {
+            CueQuery::parse(&query_message(address)).unwrap().read(&workspace)
+        };
+        assert_eq!(read("/cue/42/qName"), Some("LX warmup".into()));
+        assert_eq!(read("/cue/42/armed"), Some(false.into()));
+        assert_eq!(read("/cue/42/continueMode"), Some("auto_follow".into()));
+        assert_eq!(read("/cue/42/preWait"), Some(3.0.into()));
+        assert_eq!(read("/cue/42/qType"), Some("memo".into()));
+        assert_eq!(read("/cue/42/duration"), Some(serde_json::Value::Null));
+        assert_eq!(read(&format!("/cue_id/{id}/isRunning")), Some(false.into()));
+        assert!(CueQuery::parse(&query_message("/cue/42/level")).is_none(), "write-only properties stay unmatched");
+        assert!(CueQuery::parse(&query_message("/cue/42/qName/extra")).is_none());
     }
 
     #[test]
