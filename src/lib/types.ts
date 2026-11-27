@@ -1270,6 +1270,8 @@ export interface GeneralPreferences {
   double_go_protection_ms: number;
   confirm_before_delete: boolean;
   auto_scroll_to_playhead: boolean;
+  /** QLab "always audition": GO previews on the audition output instead of starting. */
+  always_audition: boolean;
   cue_row_height: CueRowHeight;
   /** When true, reordering cues rewrites all numbers to position; when false
    * (default), numbers are stable and resequencing is an explicit action. */
@@ -1282,6 +1284,7 @@ export const DEFAULT_GENERAL_PREFS: GeneralPreferences = {
   double_go_protection_ms: 500,
   confirm_before_delete: false,
   auto_scroll_to_playhead: true,
+  always_audition: false,
   cue_row_height: "normal",
   auto_renumber_on_reorder: false,
 };

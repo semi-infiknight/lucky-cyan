@@ -227,6 +227,12 @@ pub struct GeneralPreferences {
     #[serde(default = "GeneralPreferences::default_auto_scroll_to_playhead")]
     pub auto_scroll_to_playhead: bool,
 
+    /// QLab "always audition": when true, workspace GO (`/go`, `/go/{n}`)
+    /// previews the playhead/numbered cue on the audition output instead of
+    /// starting it in the show.
+    #[serde(default)]
+    pub always_audition: bool,
+
     /// Height of each row in the cue list table.
     #[serde(default)]
     pub cue_row_height: CueRowHeight,
@@ -253,6 +259,7 @@ impl Default for GeneralPreferences {
             show_hard_stop_blackout: false,
             confirm_before_delete: false,
             auto_scroll_to_playhead: Self::default_auto_scroll_to_playhead(),
+            always_audition: false,
             cue_row_height: CueRowHeight::default(),
             auto_renumber_on_reorder: false,
         }

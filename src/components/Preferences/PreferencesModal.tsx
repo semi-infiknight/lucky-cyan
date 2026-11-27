@@ -447,6 +447,17 @@ function GeneralContent({ prefs, onChange }: {
             style={{ accentColor: "var(--wc-accent)", width: 14, height: 14 }}
           />
         </Row>
+        <Row label="Always Audition">
+          <input
+            type="checkbox"
+            checked={prefs.always_audition}
+            onChange={(e) => onChange({ ...prefs, always_audition: e.target.checked })}
+            style={{ accentColor: "var(--wc-accent)", width: 14, height: 14 }}
+          />
+          <span style={{ fontSize: 11, color: "var(--wc-text-faint)" }}>
+            GO previews the standby cue on the audition output (OSC /alwaysAudition)
+          </span>
+        </Row>
         <Row label="Auto-Renumber on Reorder">
           <input
             type="checkbox"

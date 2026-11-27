@@ -808,6 +808,9 @@ pub(crate) enum NetworkWorkspaceAction<'a> {
     SetPaused(bool),
     /// QLab `/togglePause`: pause everything running, else resume all.
     TogglePaused,
+    /// QLab `/alwaysAudition {bool}`: when on, workspace GO previews the
+    /// playhead cue on the audition output instead of starting it.
+    SetAlwaysAudition(bool),
     /// QLab `/save`: write the open workspace to its current file.
     Save,
     /// QLab `/undo` / `/redo`.
@@ -875,8 +878,23 @@ pub(crate) fn control_network_workspace<'a>(
         return Ok(());
     }
     match action {
+        Go if show.preferences.general.always_audition => {
+            // QLab "always audition": GO previews standby on the audition output.
+            if let Some((list_id, id)) = audition_target(&show, &NetworkWorkspaceAction::AuditionGo) {
+                drop(show);
+                audition_network_cue(app_handle, list_id, id);
+            }
+            Ok(())
+        }
         Go => go_locked(state, app_handle, &mut show).map(|_| ()),
         GoToCue(number) => {
+            if show.preferences.general.always_audition {
+                if let Some((list_id, id)) = audition_target(&show, &NetworkWorkspaceAction::AuditionGoToCue(number)) {
+                    drop(show);
+                    audition_network_cue(app_handle, list_id, id);
+                }
+                return Ok(());
+            }
             let Some((list_id, id)) = go_to_cue_target(&show, number) else { return Ok(()) };
             show.switch_active_list(list_id);
             let list = show
@@ -886,6 +904,12 @@ pub(crate) fn control_network_workspace<'a>(
                 .ok_or("No active cue list")?;
             super::cue_cmds::set_playhead_in_list(list, Some(id), app_handle)?;
             go_locked(state, app_handle, &mut show).map(|_| ())
+        }
+        SetAlwaysAudition(on) => {
+            show.preferences.general.always_audition = on;
+            show.mark_modified();
+            let _ = app_handle.emit("workspace-modified", serde_json::json!({}));
+            Ok(())
         }
         AuditionGo | AuditionGoToCue(..) => {
             if let Some((list_id, id)) = audition_target(&show, &action) {

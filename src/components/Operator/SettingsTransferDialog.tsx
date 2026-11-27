@@ -12,6 +12,7 @@ const labels: Record<Key, string> = {
   default_fade_out_ms: "Default audio stop fade",
   confirm_before_delete: "Confirm before deleting cues",
   auto_scroll_to_playhead: "Scroll to playhead",
+  always_audition: "Always audition (GO previews on the audition output)",
   cue_row_height: "Cue row height",
   cue_color_style: "Cue color display",
   theme: "Desk theme",

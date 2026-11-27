@@ -862,7 +862,8 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
                 || address == "/overrideWindow" || address.ends_with("/overrideWindow")
                 || address == "/replyFormat" || address.ends_with("/replyFormat")
                 || address == "/eventFormat" || address.ends_with("/eventFormat")
-                || address == "/workingDirectory" || address == "/new" || address.ends_with("/new") => {
+                || address == "/workingDirectory" || address == "/new" || address.ends_with("/new")
+                || address == "/alwaysAudition" || address.ends_with("/alwaysAudition") => {
                 match one.parse::<f64>() {
                     Ok(value) if (value * 1000.0).is_finite() => vec![rosc::OscType::Double(value)],
                     _ => vec![rosc::OscType::String((*one).to_owned())],
@@ -1466,7 +1467,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         || addr == "/overrideWindow" || addr.ends_with("/overrideWindow")
         || addr == "/replyFormat" || addr.ends_with("/replyFormat")
         || addr == "/eventFormat" || addr.ends_with("/eventFormat")
-        || addr == "/workingDirectory" || addr == "/new" || addr.ends_with("/new");
+        || addr == "/workingDirectory" || addr == "/new" || addr.ends_with("/new")
+        || addr == "/alwaysAudition" || addr.ends_with("/alwaysAudition");
     if !args.is_empty() && !cue_write && !updates_arg {
         return OscAction::Unmatched;
     }
@@ -1628,6 +1630,18 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             OscAction::WorkspaceTransport { workspace, action: Transport::GoToCue(number) }
         } else {
             OscAction::Unmatched
+        };
+    }
+    // QLab `/alwaysAudition {bool}`: workspace setting; the no-arg read is
+    // parsed as a query instead.
+    if addr == "/alwaysAudition" {
+        return match args {
+            [one] => match qlab_bool(one) {
+                Some(on) =>
+                    OscAction::WorkspaceTransport { workspace, action: Transport::SetAlwaysAudition(on) },
+                None => OscAction::Unmatched,
+            },
+            _ => OscAction::Unmatched,
         };
     }
     // QLab-style `/auditionGo/{cue_number}`: audition the numbered cue on the
@@ -2113,6 +2127,9 @@ enum CueQueryKind<'a> {
     CueLists,
     /// QLab `/cueList/{list_id}/playbackPosition`: the standby cue ID, or null.
     CueListPlaybackPosition(Uuid),
+    /// QLab `/alwaysAudition` (workspace setting, optionally scoped): whether
+    /// workspace GO previews on the audition output.
+    AlwaysAudition,
     /// QLab app-level queries (never workspace-scoped, always accepted).
     App(AppQueryKind),
     /// QLab per-sender status reads: `/alwaysReply` and `/updates` without an argument.
@@ -2240,7 +2257,10 @@ impl<'a> CueQuery<'a> {
         } {
             return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::Sender(sender) });
         }
-        // Workspace-level queries next: `/cueLists`, `/cueList/{id}/playbackPosition`.
+        // Workspace-level queries next: `/cueLists`, `/alwaysAudition`, `/cueList/{id}/playbackPosition`.
+        if path == "alwaysAudition" {
+            return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::AlwaysAudition });
+        }
         if path == "cueLists" {
             return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::CueLists });
         }
@@ -2410,6 +2430,8 @@ impl<'a> CueQuery<'a> {
                 Some(serde_json::json!(current_reply_format(src).unwrap_or_default())),
             CueQueryKind::Sender(SenderQuery::EventFormat) =>
                 Some(serde_json::json!(crate::engine::osc_broadcast::event_format(src).unwrap_or_default())),
+            CueQueryKind::AlwaysAudition =>
+                Some(serde_json::Value::Bool(workspace.preferences.general.always_audition)),
             CueQueryKind::CueLists => {
                 // QLab shape: an array of cue-list dictionaries, each with a
                 // `cues` array of QLab cue dictionaries (Inkue's `id` key kept).
@@ -3147,6 +3169,35 @@ mod tests {
         // No playhead: /auditionGo has no target.
         workspace.active_cue_list_mut().unwrap().set_playhead(None).unwrap();
         assert_eq!(target(&workspace, &AuditionGo), None);
+    }
+
+    #[test]
+    fn qlab_always_audition_setting_parses_as_gated_write_and_reads_as_query() {
+        use NetworkWorkspaceAction::*;
+        // Write form: one boolean, workspace-scoped or not; allowlist required.
+        assert!(matches!(authorized_action("/alwaysAudition", &[], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/alwaysAudition", &[rosc::OscType::Int(1)], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/alwaysAudition", &[rosc::OscType::Int(1)], true),
+            OscAction::WorkspaceTransport { workspace: None, action } if action == SetAlwaysAudition(true)));
+        assert!(matches!(authorized_action("/alwaysAudition", &[rosc::OscType::String("no".into())], true),
+            OscAction::WorkspaceTransport { workspace: None, action } if action == SetAlwaysAudition(false)));
+        assert!(matches!(authorized_action("/alwaysAudition", &[rosc::OscType::Int(1), rosc::OscType::Int(2)], true), OscAction::Unmatched));
+        let workspace = Workspace::new("Blue");
+        assert!(matches!(authorized_action("/workspace/Blue/alwaysAudition", &[rosc::OscType::Bool(true)], true),
+            OscAction::WorkspaceTransport { workspace: Some(selector), action }
+            if action == SetAlwaysAudition(true) && selector.matches(&workspace)));
+        // No-arg read parses as a workspace query and answers the flag.
+        let message = query_message("/alwaysAudition");
+        let query = CueQuery::parse(&message).unwrap();
+        assert!(matches!(query.kind, CueQueryKind::AlwaysAudition));
+        assert_eq!(query.read(&workspace, peer(), 0).unwrap(), serde_json::json!(false));
+        let mut workspace = workspace;
+        workspace.preferences.general.always_audition = true;
+        let message = query_message("/alwaysAudition");
+        assert_eq!(
+            CueQuery::parse(&message).unwrap().read(&workspace, peer(), 0).unwrap(),
+            serde_json::json!(true)
+        );
     }
 
     #[test]
