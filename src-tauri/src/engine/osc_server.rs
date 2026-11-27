@@ -1296,6 +1296,19 @@ fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueActi
         Some((core, "toggle")) => (core, true),
         _ => (verb, false),
     };
+    // QLab `/cue/{n}/infiniteLoop {bool}` (or `toggle` / `/toggle`).
+    if verb == "infiniteLoop" {
+        return match args {
+            [] if toggle_suffix => Some(NetworkCueAction::SetInfiniteLoop(None)),
+            [] => None,
+            [one] if !toggle_suffix => match one {
+                rosc::OscType::String(text) if text.eq_ignore_ascii_case("toggle") =>
+                    Some(NetworkCueAction::SetInfiniteLoop(None)),
+                other => qlab_bool(other).map(|on| NetworkCueAction::SetInfiniteLoop(Some(on))),
+            },
+            _ => None,
+        };
+    }
     if verb == "flagged" {
         return match args {
             [] if toggle_suffix => Some(NetworkCueAction::SetFlagged(None)),
@@ -1393,7 +1406,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             matches!(core, "preWait" | "postWait" | "armed" | "qName" | "continueMode"
                 | "notes" | "colorName" | "flagged" | "load" | "panic" | "rate" | "level"
                 | "opacity" | "layer" | "blendMode" | "saturation" | "scale" | "rotation"
-                | "translateX" | "translateY")
+                | "translateX" | "translateY" | "infiniteLoop")
         });
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
@@ -1847,6 +1860,8 @@ enum CueQueryProperty {
     Level { row: u32, col: u32, live: bool },
     /// QLab video-cue property read (`/cue/{n}/opacity[/live]`, ...).
     Video { prop: VideoProp, live: bool },
+    /// QLab `/cue/{n}/infiniteLoop`: bool loop flag of a media cue.
+    InfiniteLoop,
 }
 
 #[derive(Clone, Copy)]
@@ -2183,6 +2198,7 @@ impl<'a> CueQuery<'a> {
             "translateX/live" => CueQueryProperty::Video { prop: VideoProp::PanX, live: true },
             "translateY" => CueQueryProperty::Video { prop: VideoProp::PanY, live: false },
             "translateY/live" => CueQueryProperty::Video { prop: VideoProp::PanY, live: true },
+            "infiniteLoop" => CueQueryProperty::InfiniteLoop,
             property if property.starts_with("level/") => {
                 let (rest, live) = match property.strip_suffix("/live") {
                     Some(core) => (core, true),
@@ -2415,6 +2431,8 @@ impl<'a> CueQuery<'a> {
                 };
                 Some(value.unwrap_or(serde_json::Value::Null))
             }
+            CueQueryProperty::InfiniteLoop =>
+                Some(cue.infinite_loop().map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null)),
         }
     }
 
@@ -3552,6 +3570,47 @@ mod tests {
         assert!(matches!(authorized_action("/cue/5/delete", &[], true),
             OscAction::AddressedCue { action: NetworkCueAction::Delete, .. }));
         assert!(parse_text_message(b"/cue/5/delete").is_some());
+    }
+
+    #[test]
+    fn qlab_infinite_loop_read_write_and_toggle_like_qlab() {
+        use crate::cue::audio_cue::AudioCue;
+        let b = |on: bool| rosc::OscType::Bool(on);
+        let s = |text: &str| rosc::OscType::String(text.into());
+        assert!(matches!(resolve_action("/cue/5/infiniteLoop", &[b(true)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetInfiniteLoop(Some(true)), .. }));
+        assert!(matches!(resolve_action("/cue/5/infiniteLoop", &[rosc::OscType::Int(0)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetInfiniteLoop(Some(false)), .. }));
+        assert!(matches!(resolve_action("/cue/5/infiniteLoop", &[s("toggle")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetInfiniteLoop(None), .. }));
+        assert!(matches!(resolve_action("/cue/5/infiniteLoop/toggle", &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetInfiniteLoop(None), .. }));
+        assert!(matches!(resolve_action("/cue/5/infiniteLoop", &[]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/infiniteLoop", &[b(true), b(false)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/*/infiniteLoop", &[b(true)]),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::SetInfiniteLoop(Some(true)), .. }));
+        assert!(NetworkCueAction::SetInfiniteLoop(None).is_write());
+        assert!(matches!(authorized_action("/cue/5/infiniteLoop", &[b(true)], false), OscAction::Unmatched));
+        assert!(parse_text_message(b"/cue/5/infiniteLoop 1").is_some());
+
+        // Query reads the cue's loop flag; null on cue types without looping.
+        let mut workspace = Workspace::new("Loops");
+        let mut cue = AudioCue::new();
+        cue.set_number(Some("3".into()));
+        cue.set_infinite_loop(true);
+        workspace.active_cue_list_mut().unwrap().push(Box::new(cue));
+        let src: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let msg = query_message("/cue/3/infiniteLoop");
+        let read = CueQuery::parse(&msg).unwrap();
+        assert!(matches!(read.kind, CueQueryKind::Cue { property: CueQueryProperty::InfiniteLoop, .. }));
+        assert_eq!(read.read(&workspace, src, 53000), Some(serde_json::json!(true)));
+        let mut memo_workspace = Workspace::new("Memo");
+        let mut memo = crate::cue::memo_cue::MemoCue::new();
+        memo.set_number(Some("1".into()));
+        memo_workspace.active_cue_list_mut().unwrap().push(Box::new(memo));
+        let memo_msg = query_message("/cue/1/infiniteLoop");
+        assert_eq!(CueQuery::parse(&memo_msg).unwrap().read(&memo_workspace, src, 53000),
+            Some(serde_json::Value::Null));
     }
 
     #[test]

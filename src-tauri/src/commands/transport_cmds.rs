@@ -237,6 +237,8 @@ pub(crate) enum NetworkCueAction {
     Panic(Option<f64>),
     /// QLab `/cue/{n}/delete`: remove the cue from its list (undoable).
     Delete,
+    /// QLab `/cue/{n}/infiniteLoop {bool}`; `None` toggles.
+    SetInfiniteLoop(Option<bool>),
     /// QLab `/cue/{n}/load {seconds}`: arm at a time (negative counts from the end).
     Load(f64),
     Reset,
@@ -291,6 +293,7 @@ impl NetworkCueAction {
                 | NetworkCueAction::SetLevel { .. }
                 | NetworkCueAction::SetVideoProp { .. }
                 | NetworkCueAction::Delete
+                | NetworkCueAction::SetInfiniteLoop(_)
         )
     }
 }
@@ -614,6 +617,13 @@ fn write_edit(action: &NetworkCueAction) -> Option<CueEdit<'_>> {
         NetworkCueAction::SetLevel { row, col, db, live: false } => {
             let (row, col, db) = (*row, *col, *db);
             Some(Box::new(move |cue| cue.set_level(row as usize, col as usize, db)))
+        }
+        NetworkCueAction::SetInfiniteLoop(on) => {
+            let on = *on;
+            Some(Box::new(move |cue| {
+                let next = on.unwrap_or_else(|| !cue.infinite_loop().unwrap_or(false));
+                cue.set_infinite_loop(next);
+            }))
         }
         NetworkCueAction::SetVideoProp { prop, value, live: false } => {
             let (prop, value) = (*prop, value.clone());

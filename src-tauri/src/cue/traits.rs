@@ -552,6 +552,10 @@ pub trait Cue: Send + std::any::Any {
 
     // QLab OSC video-cue properties (`/cue/{n}/opacity|layer|blendMode|
     // saturation|scale|rotation|translateX|translateY`, saved and `/live`).
+    /// QLab `/cue/{n}/infiniteLoop` (bool); `None` when the cue type cannot loop.
+    fn infinite_loop(&self) -> Option<bool> { None }
+    fn set_infinite_loop(&mut self, _on: bool) {}
+
     /// On-screen voice of a visual cue, when playing (for live writes).
     fn visual_voice_id(&self) -> Option<crate::engine::ring_command::VoiceId> { None }
     fn video_style(&self) -> Option<crate::engine::output_engine::LayerStyle> { None }

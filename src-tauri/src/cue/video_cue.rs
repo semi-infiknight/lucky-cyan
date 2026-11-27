@@ -659,6 +659,10 @@ impl Cue for VideoCue {
         matrix[row][col] = db;
     }
     fn level_mirror_mono(&self) -> bool { self.matrix_mirror_mono }
+    fn infinite_loop(&self) -> Option<bool> { Some(self.loop_count == crate::cue::types::PLAY_COUNT_INFINITE) }
+    fn set_infinite_loop(&mut self, on: bool) {
+        self.loop_count = if on { crate::cue::types::PLAY_COUNT_INFINITE } else { 0 };
+    }
     fn visual_voice_id(&self) -> Option<VoiceId> { self.active_voice_id }
     fn video_style(&self) -> Option<LayerStyle> { Some(self.layer_style) }
     fn set_video_style(&mut self, style: LayerStyle) { self.layer_style = style; }

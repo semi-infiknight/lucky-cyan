@@ -629,6 +629,10 @@ impl Cue for AudioCue {
     fn id(&self) -> CueId { self.id }
     fn cue_type(&self) -> CueType { CueType::Audio }
     fn rate(&self) -> Option<f64> { Some(self.rate) }
+    fn infinite_loop(&self) -> Option<bool> { Some(self.loop_count == super::types::PLAY_COUNT_INFINITE) }
+    fn set_infinite_loop(&mut self, on: bool) {
+        self.loop_count = if on { super::types::PLAY_COUNT_INFINITE } else { 0 };
+    }
     fn set_rate(&mut self, rate: f64) { self.rate = rate; }
     fn level(&self, row: usize, col: usize) -> Option<f64> {
         self.level_matrix.as_ref()?.get(row)?.get(col).copied()
