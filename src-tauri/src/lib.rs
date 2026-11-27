@@ -101,8 +101,8 @@ use commands::{
         clear_test_pattern, get_asio_output_pairs, get_available_backends,
         get_machine_audio_config, get_output_screen, get_output_transform, get_preferences,
         list_audio_devices, list_system_fonts, open_preferences_window, preview_output_timer,
-        set_output_screen, set_output_transform, show_test_pattern, test_audio_device,
-        update_audio_preferences, update_display_preferences,
+        set_audition_device, set_output_screen, set_output_transform, show_test_pattern,
+        test_audio_device, update_audio_preferences, update_display_preferences,
         update_general_preferences, update_machine_audio_config, update_midi_preferences,
     },
     transport_cmds::{
@@ -734,6 +734,7 @@ pub fn run() {
             update_general_preferences,
             update_midi_preferences,
             update_display_preferences,
+            set_audition_device,
             list_audio_devices,
             list_system_fonts,
             preview_output_timer,

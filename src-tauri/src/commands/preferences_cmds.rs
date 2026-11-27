@@ -133,6 +133,18 @@ pub fn update_machine_audio_config(
     Ok(())
 }
 
+/// Persist only the dedicated audition (headphone) output to audio.json.
+/// Unlike `update_machine_audio_config` this never restarts the audio engine,
+/// so it is safe to call mid-show when the operator swaps headphones — and it
+/// is the device OSC `/auditionGo` plays through.
+#[tauri::command]
+pub fn set_audition_device(device_id: Option<String>, device_name: Option<String>) -> Result<(), String> {
+    let mut config = crate::machine_config::load();
+    config.audition_device_id = device_id;
+    config.audition_device_name = device_name;
+    crate::machine_config::save(&config).map_err(|e| e.to_string())
+}
+
 /// Overwrite the show-specific audio defaults (volume, fade) in the workspace.
 /// Does not restart the engine — use `update_machine_audio_config` for hardware changes.
 #[tauri::command]

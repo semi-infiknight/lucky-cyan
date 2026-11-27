@@ -255,6 +255,26 @@ function AudioContent({
           )}
         </Row>
 
+        <Row label="Audition Output">
+          <Select
+            style={selectStyle}
+            value={machineConfig.audition_device_id ?? ""}
+            onChange={(e) => {
+              const id = e.target.value || null;
+              const name = id ? (devices.find((d) => d.id === id)?.name ?? null) : null;
+              onMachineConfigChange({ ...machineConfig, audition_device_id: id, audition_device_name: name });
+            }}
+          >
+            <option value="">— Not configured —</option>
+            {devices.map((d) => (
+              <option key={d.id} value={d.id}>{d.name}</option>
+            ))}
+          </Select>
+          <span style={{ fontSize: 11, color: "var(--wc-text-faint)" }}>
+            OSC /auditionGo plays here
+          </span>
+        </Row>
+
         {isAsio && (
           <Row label="Output Pair">
             <Select

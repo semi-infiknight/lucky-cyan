@@ -1563,8 +1563,18 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             OscAction::Unmatched
         };
     }
+    // QLab-style `/auditionGo/{cue_number}`: audition the numbered cue on the
+    // dedicated monitor output without moving the playhead.
+    if let Some(number) = addr.strip_prefix("/auditionGo/") {
+        return if literal_cue_number(number) {
+            OscAction::WorkspaceTransport { workspace, action: Transport::AuditionGoToCue(number) }
+        } else {
+            OscAction::Unmatched
+        };
+    }
     let transport = match addr {
         "/go" => Some(Transport::Go),
+        "/auditionGo" => Some(Transport::AuditionGo),
         "/stop" => Some(Transport::Stop),
         "/panic" => Some(Transport::Panic),
         "/hardStop" => Some(Transport::HardStop),
@@ -2843,6 +2853,7 @@ mod tests {
         let workspace = Workspace::new("Blue");
         for (path, expected) in [
             ("/go", Go),
+            ("/auditionGo", AuditionGo),
             ("/stop", Stop),
             ("/panic", Panic),
             ("/hardStop", HardStop),
@@ -2937,6 +2948,58 @@ mod tests {
         let mut transport = Transport::new(context);
         let result = transport.go(list).unwrap();
         assert_eq!(result.triggered, [second_id]);
+    }
+
+    #[test]
+    fn qlab_audition_go_maps_to_a_gated_workspace_transport_and_resolves_the_target() {
+        use crate::cue::wait_cue::WaitCue;
+        use NetworkWorkspaceAction::*;
+
+        assert!(matches!(authorized_action("/auditionGo", &[], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/auditionGo", &[rosc::OscType::Int(1)], true), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/auditionGo/202.1", &[], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/auditionGo/*", &[], true), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/auditionGo/", &[], true), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/auditionGo", &[], true),
+            OscAction::WorkspaceTransport { workspace: None, action } if action == AuditionGo));
+        assert!(matches!(authorized_action("/auditionGo/202.1", &[], true),
+            OscAction::WorkspaceTransport { workspace: None, action } if action == AuditionGoToCue("202.1")));
+        let workspace = Workspace::new("Blue");
+        let scoped = "/workspace/Blue/auditionGo";
+        assert!(matches!(authorized_action(scoped, &[], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action(scoped, &[], true),
+            OscAction::WorkspaceTransport { workspace: Some(selector), action }
+            if action == AuditionGo && selector.matches(&workspace)));
+        let scoped_numbered = "/workspace/Blue/auditionGo/202.1";
+        assert!(matches!(authorized_action(scoped_numbered, &[], true),
+            OscAction::WorkspaceTransport { workspace: Some(selector), action }
+            if action == AuditionGoToCue("202.1") && selector.matches(&workspace)));
+
+        // Target resolution: playhead cue for /auditionGo, numbered cue for the
+        // numbered form, None for unknown numbers and non-audition actions.
+        let mut workspace = Workspace::new("Blue");
+        let active_list = workspace.active_cue_list_id;
+        let mut first = WaitCue::new();
+        first.set_number(Some("101".into()));
+        let first_id = first.id();
+        let mut second = WaitCue::new();
+        second.set_number(Some("202.1".into()));
+        let second_id = second.id();
+        let active = workspace.active_cue_list_mut().unwrap();
+        active.auto_renumber = false;
+        active.push(Box::new(first));
+        active.set_playhead(Some(first_id)).unwrap();
+        active.push(Box::new(second));
+
+        let target = crate::commands::transport_cmds::audition_target;
+        assert_eq!(target(&workspace, &AuditionGo), Some((active_list, first_id)));
+        assert_eq!(target(&workspace, &AuditionGoToCue("202.1")), Some((active_list, second_id)));
+        assert_eq!(target(&workspace, &AuditionGoToCue("nope")), None);
+        assert_eq!(target(&workspace, &Go), None);
+
+        // No playhead: /auditionGo has no target.
+        workspace.active_cue_list_mut().unwrap().set_playhead(None).unwrap();
+        assert_eq!(target(&workspace, &AuditionGo), None);
     }
 
     #[test]

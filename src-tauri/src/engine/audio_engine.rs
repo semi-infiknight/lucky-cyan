@@ -2108,6 +2108,8 @@ fn open_aux_stream(
         device_id: Some(device_id.to_string()),
         device_name: None,
         input_device_id: None,
+        audition_device_id: None,
+        audition_device_name: None,
         buffer_size,
         asio_out_pair: 0,
     };

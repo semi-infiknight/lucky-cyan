@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  auditionRunning, getMachineAudioConfig, getOutputPatches, listAudioDevices, previewCue, stopPreview,
+  auditionRunning, getMachineAudioConfig, getOutputPatches, listAudioDevices, previewCue, setAuditionDevice,
+  stopPreview,
 } from "../../lib/commands";
 import type { DeviceInfo, GroupTimelineOwner } from "../../lib/types";
 
@@ -38,6 +39,8 @@ export function AudioAudition({ cueId, owner }: { cueId: string; owner?: GroupTi
         const assigned = new Set([main.device_id, ...patches.map(p => p.device_id)]);
         const choices = outputs.filter(output => output.id.startsWith("pw:") && !assigned.has(output.id));
         setDevices(choices);
+        const seed = localStorage.getItem(outputKey) ?? main.audition_device_id ?? "";
+        if (seed && choices.some(c => c.id === seed)) setDevice(seed);
         if (!main.device_id?.startsWith("pw:")) {
           setMessage("Select a named PipeWire show output in Audio Preferences.");
         } else if (!choices.length) {
@@ -100,7 +103,13 @@ export function AudioAudition({ cueId, owner }: { cueId: string; owner?: GroupTi
     <div role="group" aria-label="Clip audition" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, padding: "6px 12px", fontSize: 12 }}>
       <label>Headphone output{" "}
         <select value={selected} disabled={loading || pending || !!playing}
-          onChange={event => { setDevice(event.target.value); localStorage.setItem(outputKey, event.target.value); }}>
+          onChange={event => {
+            const id = event.target.value;
+            setDevice(id);
+            localStorage.setItem(outputKey, id);
+            const name = id ? devices.find(d => d.id === id)?.name ?? null : null;
+            void setAuditionDevice(id || null, name).catch(() => {});
+          }}>
           <option value="">{loading ? "Loading outputs…" : "Choose output…"}</option>
           {devices.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
         </select>

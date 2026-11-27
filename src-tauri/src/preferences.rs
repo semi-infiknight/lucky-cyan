@@ -104,6 +104,17 @@ pub struct MachineAudioConfig {
     #[serde(default)]
     pub input_device_id: Option<String>,
 
+    /// Dedicated monitor ("audition") output used by the cue-monitor preview
+    /// and OSC `/auditionGo`.  `None` = not configured.  The system default is
+    /// deliberately NOT used: the audition node must be a named output that is
+    /// distinct from the show output and every output patch.
+    #[serde(default)]
+    pub audition_device_id: Option<String>,
+
+    /// Human-readable name of the audition output, captured at selection time.
+    #[serde(default)]
+    pub audition_device_name: Option<String>,
+
     /// Output buffer size in samples.
     /// Only applied for WASAPI Exclusive; ignored in Shared mode (Windows
     /// controls the period) and ASIO mode (driver controls its own buffer).
@@ -127,6 +138,8 @@ impl Default for MachineAudioConfig {
             device_id: None,
             device_name: None,
             input_device_id: None,
+            audition_device_id: None,
+            audition_device_name: None,
             buffer_size: Self::default_buffer_size(),
             asio_out_pair: 0,
         }

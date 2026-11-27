@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
 
 use crate::{
@@ -747,6 +747,12 @@ pub(crate) enum NetworkWorkspaceAction<'a> {
     Go,
     /// QLab `/go/{cue_number}`: park the playhead on the numbered cue, then GO.
     GoToCue(&'a str),
+    /// QLab `/auditionGo`: preview the playhead cue on the dedicated audition
+    /// output without starting it in the show or moving the playhead.
+    AuditionGo,
+    /// QLab-style `/auditionGo/{cue_number}`: audition the numbered cue
+    /// (resolved like `/go/{n}`) without moving the playhead.
+    AuditionGoToCue(&'a str),
     Stop,
     HardStop,
     /// QLab `/panic`: stops like `/stop` but broadcasts `panicAll`.
@@ -776,6 +782,20 @@ pub(crate) fn go_to_cue_target(show: &Workspace, number: &str) -> Option<(Uuid, 
         return Some(first);
     }
     None
+}
+
+/// Resolve an `/auditionGo` target to (list, cue): the playhead cue of the
+/// active list, or the numbered cue for `/auditionGo/{n}`.  The playhead is
+/// not moved — auditioning previews a cue on the monitor output only.
+pub(crate) fn audition_target(show: &Workspace, action: &NetworkWorkspaceAction) -> Option<(Uuid, CueId)> {
+    match action {
+        NetworkWorkspaceAction::AuditionGo => {
+            let list = show.active_cue_list()?;
+            list.playhead_cue_id.map(|id| (show.active_cue_list_id, id))
+        }
+        NetworkWorkspaceAction::AuditionGoToCue(number) => go_to_cue_target(show, number),
+        _ => None,
+    }
 }
 
 pub(crate) fn control_network_workspace<'a>(
@@ -820,6 +840,13 @@ pub(crate) fn control_network_workspace<'a>(
             super::cue_cmds::set_playhead_in_list(list, Some(id), app_handle)?;
             go_locked(state, app_handle, &mut show).map(|_| ())
         }
+        AuditionGo | AuditionGoToCue(..) => {
+            if let Some((list_id, id)) = audition_target(&show, &action) {
+                drop(show);
+                audition_network_cue(app_handle, list_id, id);
+            }
+            Ok(())
+        }
         Stop | HardStop => stop_locked(state, app_handle, &mut show, action == HardStop),
         Panic => {
             let result = stop_locked(state, app_handle, &mut show, false);
@@ -847,6 +874,57 @@ pub(crate) fn control_network_workspace<'a>(
         // Handled before the workspace lock is taken, above.
         Save | Undo | Redo => Ok(()),
     }
+}
+
+/// QLab `/auditionGo`: preview a cue on the dedicated audition output.
+///
+/// Spawned off the OSC receive thread; the workspace lock is held only to
+/// resolve the cue, build the monitor clips and snapshot the patches.  Once
+/// the audition voice is playing, `auditionGo` is broadcast with the cue's
+/// number/name/uniqueID/type.  The playhead is not moved.
+pub(crate) fn audition_network_cue(app_handle: &tauri::AppHandle, list_id: Uuid, cue_id: CueId) {
+    let handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = run_audition_go(&handle, list_id, cue_id).await {
+            log::warn!("Network /auditionGo: {error}");
+        }
+    });
+}
+
+async fn run_audition_go(app_handle: &tauri::AppHandle, list_id: Uuid, cue_id: CueId) -> Result<(), String> {
+    let state = app_handle.state::<AppState>();
+    let device = crate::machine_config::load().audition_device_id.ok_or(
+        "Set a dedicated audition output in Preferences → Audio (or the cue monitor) before using /auditionGo.",
+    )?;
+    let request_id = Uuid::new_v4();
+    let (clips, patches) = {
+        let ws = state.workspace.lock().map_err(|e| e.to_string())?;
+        let owner = super::cue_cmds::GroupTimelineOwner { workspace_id: ws.instance_id(), list_id };
+        let cue = super::cue_cmds::scoped_audition_cue(&ws, owner, cue_id)?;
+        let clips = super::cue_cmds::audition_clips(cue, None, None, 0.0, true)?;
+        let patches = ws.output_patches.iter().map(|p| p.device_id.clone()).collect::<Vec<_>>();
+        (clips, patches)
+    };
+    state.audio_engine.reserve_audition(request_id)?;
+    let target = device.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::engine::device_manager::run_bounded(std::time::Duration::from_secs(1), move || {
+            crate::engine::device_manager::check_audition_output(&target)
+        }).unwrap_or_else(|| Err("The PipeWire output check timed out. Refresh outputs and retry.".into()))
+    }).await.map_err(|e| e.to_string())??;
+    let result = if clips.len() == 1 {
+        let (clip, effects) = clips.into_iter().next().unwrap();
+        state.audio_engine.start_audition_with_effects(request_id, &device, patches.iter().map(String::as_str), clip, effects)
+    } else {
+        let mixed = crate::engine::audition::mix_clips(&clips)?;
+        state.audio_engine.start_audition(request_id, &device, patches.iter().map(String::as_str), mixed)
+    };
+    result.map(|_| ())?;
+    let ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    if let Some(cue) = ws.cue_list_by_id(list_id).and_then(|list| list.get_recursive(&cue_id)) {
+        broadcast_current_cue_event("auditionGo", cue);
+    }
+    Ok(())
 }
 
 /// Pause or resume every cue list in the workspace (QLab `/pause`, `/resume`,

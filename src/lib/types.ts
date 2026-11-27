@@ -1234,6 +1234,10 @@ export interface MachineAudioConfig {
   device_name: string | null;
   /** Selected audio input device for Mic Cues. null = system default input. */
   input_device_id: string | null;
+  /** Dedicated audition/monitor output (OSC /auditionGo, cue monitor). null = not configured. */
+  audition_device_id: string | null;
+  /** Friendly name of the audition output, captured at selection time. */
+  audition_device_name: string | null;
   /** Samples. Only applied for WASAPI Exclusive. */
   buffer_size: number;
   /** ASIO output pair index (0 = Out 1-2, 1 = Out 3-4, …). */
@@ -1245,6 +1249,8 @@ export const DEFAULT_MACHINE_AUDIO_CONFIG: MachineAudioConfig = {
   device_id: null,
   device_name: null,
   input_device_id: null,
+  audition_device_id: null,
+  audition_device_name: null,
   buffer_size: 256,
   asio_out_pair: 0,
 };

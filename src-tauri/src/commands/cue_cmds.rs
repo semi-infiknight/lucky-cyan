@@ -285,8 +285,8 @@ fn timeline_slice_guides_follow_trim_rate_repeats_and_indefinite_vamps() {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupTimelineOwner {
-    workspace_id: Uuid,
-    list_id: Uuid,
+    pub(crate) workspace_id: Uuid,
+    pub(crate) list_id: Uuid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1877,7 +1877,7 @@ pub fn set_audio_file(
 // Waveform preview (plays a temporary voice without touching cue state)
 // ---------------------------------------------------------------------------
 
-fn scoped_audition_cue(
+pub(crate) fn scoped_audition_cue(
     ws: &crate::show::Workspace, owner: GroupTimelineOwner, cue_id: Uuid,
 ) -> Result<&dyn Cue, String> {
     if ws.instance_id() != owner.workspace_id {
@@ -1895,7 +1895,7 @@ fn scoped_audition_cue(
 /// Build the monitor clip(s) for an audition target: one Audio or Video cue's
 /// decoded media, or every loaded Audio/Video child of a Group (mixed together
 /// later). Group children keep their own trims, levels and effects.
-fn audition_clips(
+pub(crate) fn audition_clips(
     cue: &dyn Cue, start_ms: Option<u64>, end_ms: Option<u64>, monitor_db: f32, with_fx: bool,
 ) -> Result<Vec<(AuditionClip, Vec<CueEffect>)>, String> {
     fn one_clip(

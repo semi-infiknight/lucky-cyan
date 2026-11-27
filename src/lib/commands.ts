@@ -505,6 +505,8 @@ export const getMachineAudioConfig = () =>
   invoke<MachineAudioConfig>("get_machine_audio_config");
 export const updateMachineAudioConfig = (config: MachineAudioConfig) =>
   invoke<void>("update_machine_audio_config", { config });
+export const setAuditionDevice = (deviceId: string | null, deviceName: string | null) =>
+  invoke<void>("set_audition_device", { deviceId, deviceName });
 export const updateAudioPreferences = (prefs: AudioPreferences) =>
   invoke<void>("update_audio_preferences", { prefs });
 export const updateGeneralPreferences = (prefs: GeneralPreferences) =>
