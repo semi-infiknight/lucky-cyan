@@ -15,7 +15,7 @@ use crossbeam_channel::{Receiver, Sender};
 use tauri::{Emitter, Manager};
 use uuid::Uuid;
 
-use crate::cue::{traits::Cue, types::CueId};
+use crate::cue::{traits::Cue, types::{CueId, CueType}};
 use crate::commands::transport_cmds::{
     address_network_cue_pattern, address_numbered_network_cue, control_network_list_pause,
     control_network_workspace, NetworkCueAction, NetworkPauseAction, NetworkWorkspaceAction,
@@ -1254,6 +1254,74 @@ const MAX_SCOPED_ROWS: usize = 4_096;
 /// QLab `/cue/{n}/notes` read/write cap, so a huge note cannot blow up a UDP reply.
 const MAX_NOTES_QUERY_BYTES: usize = 8_192;
 const MAX_NOTES_WRITE_BYTES: usize = 8_192;
+/// Recursion cap for cue-dictionary `cues` children.
+const MAX_CUE_DICT_DEPTH: usize = 16;
+/// Shared empty flagged set for cues whose owning list cannot be identified.
+static EMPTY_FLAGGED: std::collections::BTreeSet<CueId> = std::collections::BTreeSet::new();
+
+/// QLab's display name for a cue type in cue dictionaries (`"Audio"`, `"MIDI File"`...).
+fn qlab_type_name(cue_type: &CueType) -> &'static str {
+    match cue_type {
+        CueType::Audio => "Audio",
+        CueType::Memo => "Memo",
+        CueType::Wait => "Wait",
+        CueType::Group => "Group",
+        CueType::Fade => "Fade",
+        CueType::Stop => "Stop",
+        CueType::Video => "Video",
+        CueType::Image => "Image",
+        CueType::Osc => "Network",
+        CueType::Midi => "MIDI",
+        CueType::MidiFile => "MIDI File",
+        CueType::Light => "Light",
+        CueType::Mic => "Mic",
+        CueType::Timecode => "Timecode",
+        CueType::Text => "Text",
+        CueType::Camera => "Camera",
+        CueType::Devamp => "Devamp",
+        CueType::Start => "Start",
+        CueType::Pause => "Pause",
+        CueType::Resume => "Resume",
+        CueType::Load => "Load",
+        CueType::Reset => "Reset",
+        CueType::Goto => "Go To",
+        CueType::Arm => "Arm",
+        CueType::Disarm => "Disarm",
+        CueType::Target => "Target",
+        CueType::Script => "Script",
+    }
+}
+
+/// Build QLab's cue dictionary for `/cueLists` entries and `/children` replies.
+/// `rows` counts every emitted cue so huge shows error instead of flooding UDP.
+fn cue_dict(
+    cue: &dyn Cue,
+    list_name: &str,
+    flagged: &std::collections::BTreeSet<CueId>,
+    rows: &mut usize,
+    depth: usize,
+) -> serde_json::Value {
+    *rows += 1;
+    let children = if depth < MAX_CUE_DICT_DEPTH {
+        cue.child_cues().map(|children| children.iter()
+            .map(|child| cue_dict(child.as_ref(), list_name, flagged, rows, depth + 1))
+            .collect::<Vec<_>>())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    serde_json::json!({
+        "uniqueID": cue.id().to_string(),
+        "number": cue.number().unwrap_or(""),
+        "name": cue.name(),
+        "listName": list_name,
+        "type": qlab_type_name(&cue.cue_type()),
+        "colorName": cue.color().osc_name(),
+        "flagged": flagged.contains(&cue.id()),
+        "armed": !cue.is_disabled(),
+        "cues": children,
+    })
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CueQueryProperty {
@@ -1273,6 +1341,8 @@ enum CueQueryProperty {
     ColorName,
     /// QLab `/cue/{n}/flagged` (bool; a cue-list property).
     Flagged,
+    /// QLab `/cue/{n}/children`: array of QLab cue dictionaries for group children.
+    Children,
 }
 
 #[derive(Clone, Copy)]
@@ -1532,6 +1602,7 @@ impl<'a> CueQuery<'a> {
             "notes" => CueQueryProperty::Notes,
             "colorName" => CueQueryProperty::ColorName,
             "flagged" => CueQueryProperty::Flagged,
+            "children" => CueQueryProperty::Children,
             _ => return None,
         };
         let target = match kind {
@@ -1607,12 +1678,29 @@ impl<'a> CueQuery<'a> {
                 Some(serde_json::json!(current_reply_port(src))),
             CueQueryKind::Sender(SenderQuery::ReplyFormat) =>
                 Some(serde_json::json!(current_reply_format(src).unwrap_or_default())),
-            CueQueryKind::CueLists => Some(serde_json::Value::Array(
-                workspace.cue_lists.iter().map(|list| serde_json::json!({
-                    "id": list.id.to_string(),
-                    "name": list.name,
-                })).collect(),
-            )),
+            CueQueryKind::CueLists => {
+                // QLab shape: an array of cue-list dictionaries, each with a
+                // `cues` array of QLab cue dictionaries (Inkue's `id` key kept).
+                let mut rows = 0usize;
+                let lists = workspace.cue_lists.iter().map(|list| {
+                    let cues = list.cues.iter()
+                        .map(|cue| cue_dict(cue.as_ref(), &list.name, &list.flagged_cues, &mut rows, 0))
+                        .collect::<Vec<_>>();
+                    serde_json::json!({
+                        "id": list.id.to_string(),
+                        "uniqueID": list.id.to_string(),
+                        "number": "",
+                        "name": list.name,
+                        "listName": list.name,
+                        "type": "Cue List",
+                        "colorName": "none",
+                        "flagged": false,
+                        "armed": true,
+                        "cues": cues,
+                    })
+                }).collect::<Vec<_>>();
+                (rows <= MAX_SCOPED_ROWS).then_some(serde_json::Value::Array(lists))
+            }
             CueQueryKind::CueListPlaybackPosition(list_id) => {
                 let list = workspace.cue_lists.iter().find(|list| list.id == *list_id)?;
                 Some(match list.playhead_cue_id {
@@ -1675,6 +1763,23 @@ impl<'a> CueQuery<'a> {
             CueQueryProperty::Flagged => Some(serde_json::Value::Bool(
                 workspace.cue_lists.iter().any(|list| list.flagged_cues.contains(&cue.id())),
             )),
+            CueQueryProperty::Children => {
+                let flagged = workspace.cue_lists.iter()
+                    .find(|list| list.get_recursive(&cue.id()).is_some())
+                    .map(|list| &list.flagged_cues);
+                let list_name = workspace.active_cue_list()
+                    .map(|list| list.name.clone())
+                    .unwrap_or_default();
+                let Some(children) = cue.child_cues() else {
+                    return Some(serde_json::Value::Array(Vec::new()));
+                };
+                let mut rows = 0usize;
+                let dicts = children.iter()
+                    .map(|child| cue_dict(child.as_ref(), &list_name,
+                        flagged.unwrap_or(&EMPTY_FLAGGED), &mut rows, 1))
+                    .collect::<Vec<_>>();
+                (rows <= MAX_SCOPED_ROWS).then_some(serde_json::Value::Array(dicts))
+            }
         }
     }
 
@@ -2503,6 +2608,68 @@ mod tests {
         assert!(CueQuery::parse(&query_message("/cue/5/preWait/+/1")).is_none());
         assert!(parse_text_message(b"/cue/5/preWait/+ 1").is_some());
         let _ = ContinueMode::AutoFollow; // enum stays queryable
+    }
+
+    #[test]
+    fn qlab_cue_dictionaries_and_children_queries_match_the_qlab_shape() {
+        use crate::cue::{group_cue::GroupCue, memo_cue::MemoCue, wait_cue::WaitCue};
+        let mut workspace = Workspace::new("Dict reads");
+        let mut child = MemoCue::new();
+        child.set_number(Some("2.1".into()));
+        child.set_name("child memo".into());
+        let child_id = child.id();
+        let mut group = GroupCue::new();
+        group.set_number(Some("2".into()));
+        group.set_name("scene".into());
+        group.children.push(Box::new(child));
+        let group_id = group.id();
+        let mut wait = WaitCue::new();
+        wait.set_number(Some("3".into()));
+        let wait_id = wait.id();
+        let list = workspace.active_cue_list_mut().unwrap();
+        list.push(Box::new(group));
+        list.push(Box::new(wait));
+        list.flagged_cues.insert(group_id);
+
+        let read = |address: &str, workspace: &Workspace| {
+            let message = query_message(address);
+            CueQuery::parse(&message).unwrap().read(workspace, peer(), 0)
+        };
+        // /cueLists carries QLab cue-list dictionaries with nested cue dicts.
+        let lists = read("/cueLists", &workspace).unwrap();
+        let lists = lists.as_array().unwrap();
+        assert_eq!(lists.len(), 1);
+        let list = &lists[0];
+        assert_eq!(list["uniqueID"], list["id"]);
+        assert_eq!(list["type"], "Cue List");
+        assert_eq!(list["listName"], "Cue List 1");
+        let cues = list["cues"].as_array().unwrap();
+        assert_eq!(cues.len(), 2);
+        let group_dict = &cues[0];
+        assert_eq!(group_dict["number"], "2");
+        assert_eq!(group_dict["name"], "scene");
+        assert_eq!(group_dict["type"], "Group");
+        assert_eq!(group_dict["flagged"], true);
+        assert_eq!(group_dict["armed"], true);
+        assert!(group_dict["colorName"].is_string(), "groups carry their palette color");
+        assert_eq!(group_dict["uniqueID"], group_id.to_string());
+        assert_eq!(group_dict["cues"].as_array().unwrap().len(), 1);
+        assert_eq!(group_dict["cues"][0]["number"], "2.1");
+        assert_eq!(group_dict["cues"][0]["type"], "Memo");
+        assert_eq!(cues[1]["type"], "Wait");
+        assert_eq!(cues[1]["cues"].as_array().unwrap().len(), 0);
+
+        // /cue/{n}/children and /cue_id/{id}/children return child dicts.
+        let children = read("/cue/2/children", &workspace).unwrap();
+        let children = children.as_array().unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0]["uniqueID"], child_id.to_string());
+        assert_eq!(children[0]["listName"], "Cue List 1");
+        let by_id = read(&format!("/cue_id/{wait_id}/children"), &workspace).unwrap();
+        assert_eq!(by_id.as_array().unwrap().len(), 0, "a plain cue has no children");
+        // children is a query, not a writable verb.
+        assert!(matches!(resolve_action("/cue/2/children", &[rosc::OscType::Int(1)]), OscAction::Unmatched));
+        assert!(parse_text_message(b"/cue/2/children").is_none(), "reads are binary-OSC only");
     }
 
     #[test]
