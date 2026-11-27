@@ -1197,6 +1197,17 @@ impl AudioEngine {
         self.play_voice(voice)
     }
 
+    /// Live playback-rate change on a playing voice (QLab `/live` OSC writes).
+    pub fn set_voice_rate(&self, voice_id: VoiceId, rate: f32) -> Result<()> {
+        self.with_voice(voice_id, |voice| voice.inner.set_rate(rate))
+            .ok_or_else(|| anyhow::anyhow!("voice {voice_id:?} is not running"))
+    }
+
+    /// Current live rate of a playing voice, when it is running.
+    pub fn voice_rate(&self, voice_id: VoiceId) -> Option<f32> {
+        self.with_voice(voice_id, |voice| voice.inner.rate())
+    }
+
     /// Set a single crosspoint on a playing voice (live matrix editing).
     pub fn set_voice_crosspoint(
         &self,

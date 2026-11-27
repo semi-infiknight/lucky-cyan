@@ -96,6 +96,10 @@ pub struct AudioCue {
     pub source_channel_names: Vec<String>,
     pub matrix_mirror_mono: bool,
     pub point_mix: Option<super::point_mix::PointMix>,
+    /// Live overrides from OSC `/live` writes — runtime only, never saved and
+    /// cleared on reset (QLab "temporary properties").
+    live_rate: Option<f64>,
+    live_levels: Vec<(u32, u32, f64)>,
 
     is_disabled: bool,
 
@@ -180,6 +184,8 @@ impl AudioCue {
             source_channel_names: Vec::new(),
             matrix_mirror_mono: true,
             point_mix: None,
+            live_rate: None,
+            live_levels: Vec::new(),
             is_disabled: false,
             decoded_samples: None,
             decoded_channels: 2,
@@ -622,6 +628,33 @@ impl Cue for AudioCue {
 
     fn id(&self) -> CueId { self.id }
     fn cue_type(&self) -> CueType { CueType::Audio }
+    fn rate(&self) -> Option<f64> { Some(self.rate) }
+    fn set_rate(&mut self, rate: f64) { self.rate = rate; }
+    fn level(&self, row: usize, col: usize) -> Option<f64> {
+        self.level_matrix.as_ref()?.get(row)?.get(col).copied()
+    }
+    fn set_level(&mut self, row: usize, col: usize, db: f64) {
+        let matrix = self.level_matrix.get_or_insert_with(Vec::new);
+        while matrix.len() <= row { matrix.push(Vec::new()); }
+        while matrix[row].len() <= col { matrix[row].push(0.0); }
+        matrix[row][col] = db;
+    }
+    fn live_rate(&self) -> Option<f64> { self.live_rate }
+    fn set_live_rate(&mut self, rate: Option<f64>) { self.live_rate = rate; }
+    fn live_level(&self, row: usize, col: usize) -> Option<f64> {
+        self.live_levels.iter()
+            .find(|(r, c, _)| *r == row as u32 && *c == col as u32)
+            .map(|(_, _, db)| *db)
+    }
+    fn set_live_level(&mut self, row: usize, col: usize, db: Option<f64>) {
+        self.live_levels.retain(|(r, c, _)| !(*r == row as u32 && *c == col as u32));
+        if let Some(db) = db {
+            self.live_levels.push((row as u32, col as u32, db));
+        }
+    }
+    fn clear_live_levels(&mut self) { self.live_levels.clear(); }
+    fn media_voice_id(&self) -> Option<VoiceId> { self.voice_id() }
+    fn level_mirror_mono(&self) -> bool { self.matrix_mirror_mono }
     fn has_prepared_media(&self) -> bool { self.prepared.is_some() }
     fn source_channel_names_mut(&mut self) -> Option<&mut Vec<String>> { Some(&mut self.source_channel_names) }
     fn output_patch_id(&self) -> Option<uuid::Uuid> { self.output_patch_id }

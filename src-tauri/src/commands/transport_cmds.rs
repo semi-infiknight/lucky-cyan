@@ -232,6 +232,12 @@ pub(crate) enum NetworkCueAction {
     /// QLab `/cue/{n}/flagged {bool}`; `None` toggles (the `toggle` argument or
     /// `/toggle` suffix). Flagging lives on the owning cue list, not the cue.
     SetFlagged(Option<bool>),
+    /// QLab `/cue/{n}/rate {number}` (or `/rate/live {number}`): saved or live
+    /// playback rate of a media cue.
+    SetRate { value: f64, live: bool },
+    /// QLab `/cue/{n}/level/{row}/{col} {db}` (or `/live` form): saved or live
+    /// crosspoint level of a media cue.
+    SetLevel { row: u32, col: u32, db: f64, live: bool },
     /// QLab 5.5 `/cue/{n}/preWait/+ {delta}` (or `/preWait/+/1`): add delta seconds.
     AdjustPreWait(f64),
     /// QLab 5.5 `/cue/{n}/postWait/- {delta}`: subtract delta seconds.
@@ -255,6 +261,8 @@ impl NetworkCueAction {
                 | NetworkCueAction::AdjustPreWait(_)
                 | NetworkCueAction::AdjustPostWait(_)
                 | NetworkCueAction::AdjustContinueMode(_)
+                | NetworkCueAction::SetRate { .. }
+                | NetworkCueAction::SetLevel { .. }
         )
     }
 }
@@ -326,8 +334,52 @@ pub(crate) fn address_numbered_network_cue(
             result
         }
         NetworkCueAction::SetPause(pause) => network_pause_in_list(&transport.context, cue_list, Some(id), *pause, app_handle),
+        // QLab `/live` writes drive the running voice and record a temporary
+        // override; they never touch saved data and are not undoable.
+        NetworkCueAction::SetRate { value, live: true } => {
+            apply_live_rate(transport.context.audio_engine.as_ref(), cue_list, id, *value);
+            let _ = app_handle.emit("cue-list-refresh", ());
+            Ok(())
+        }
+        NetworkCueAction::SetLevel { row, col, db, live: true } => {
+            apply_live_level(transport.context.audio_engine.as_ref(), cue_list, id, *row, *col, *db);
+            let _ = app_handle.emit("cue-list-refresh", ());
+            Ok(())
+        }
         write if write.is_write() => apply_write(&mut ws, index, id, write, app_handle),
         _ => Ok(()),
+    }
+}
+
+/// QLab `/cue/{n}/rate/live {number}`: set the running voice's rate and record
+/// the temporary override on the cue (cleared on reset).
+fn apply_live_rate(audio_engine: &dyn crate::engine::engine_traits::AudioEngineApi, cue_list: &mut CueList, id: CueId, rate: f64) {
+    let Some(cue) = cue_list.get_mut_recursive(&id) else { return };
+    cue.set_live_rate(Some(rate));
+    if let Some(voice) = cue.media_voice_id() {
+        if let Err(error) = audio_engine.set_voice_rate(voice, rate as f32) {
+            log::debug!("OSC live rate on cue {id}: {error}");
+        }
+    }
+}
+
+/// QLab `/cue/{n}/level/{row}/{col}/live {db}`: set the running voice's
+/// crosspoint and record the temporary override on the cue.
+fn apply_live_level(
+    audio_engine: &dyn crate::engine::engine_traits::AudioEngineApi,
+    cue_list: &mut CueList,
+    id: CueId,
+    row: u32,
+    col: u32,
+    db: f64,
+) {
+    let Some(cue) = cue_list.get_mut_recursive(&id) else { return };
+    cue.set_live_level(row as usize, col as usize, Some(db));
+    if let Some(voice) = cue.media_voice_id() {
+        let gain = crate::cue::types::db_to_linear(db) as f32;
+        if let Err(error) = audio_engine.set_voice_crosspoint(voice, row as u8, col as u8, gain, cue.level_mirror_mono()) {
+            log::debug!("OSC live level on cue {id}: {error}");
+        }
     }
 }
 
@@ -369,6 +421,16 @@ pub(crate) fn address_network_cue_pattern(
             NetworkCueAction::SetPause(pause) => {
                 let list = &mut ws.cue_lists[index];
                 network_pause_in_list(&transport.context, list, Some(id), *pause, app_handle)
+            }
+            NetworkCueAction::SetRate { value, live: true } => {
+                let list = &mut ws.cue_lists[index];
+                apply_live_rate(transport.context.audio_engine.as_ref(), list, id, *value);
+                Ok(())
+            }
+            NetworkCueAction::SetLevel { row, col, db, live: true } => {
+                let list = &mut ws.cue_lists[index];
+                apply_live_level(transport.context.audio_engine.as_ref(), list, id, *row, *col, *db);
+                Ok(())
             }
             write if write.is_write() => {
                 match write_edit(write) {
@@ -451,6 +513,14 @@ fn write_edit(action: &NetworkCueAction) -> Option<CueEdit<'_>> {
                 let mode = cue.continue_mode().cycled(steps);
                 cue.set_continue_mode(mode);
             }))
+        }
+        NetworkCueAction::SetRate { value, live: false } => {
+            let value = *value;
+            Some(Box::new(move |cue| cue.set_rate(value)))
+        }
+        NetworkCueAction::SetLevel { row, col, db, live: false } => {
+            let (row, col, db) = (*row, *col, *db);
+            Some(Box::new(move |cue| cue.set_level(row as usize, col as usize, db)))
         }
         _ => None,
     }

@@ -196,6 +196,15 @@ impl Cue for MicCue {
 
     fn id(&self) -> CueId { self.id }
     fn cue_type(&self) -> CueType { CueType::Mic }
+    fn level(&self, row: usize, col: usize) -> Option<f64> {
+        self.level_matrix.as_ref()?.get(row)?.get(col).copied()
+    }
+    fn set_level(&mut self, row: usize, col: usize, db: f64) {
+        let matrix = self.level_matrix.get_or_insert_with(Vec::new);
+        while matrix.len() <= row { matrix.push(Vec::new()); }
+        while matrix[row].len() <= col { matrix[row].push(0.0); }
+        matrix[row][col] = db;
+    }
     fn output_patch_id(&self) -> Option<Uuid> { self.output_patch_id }
     fn name(&self) -> &str { &self.name }
     fn set_name(&mut self, name: String) { self.name = name; }

@@ -1198,6 +1198,38 @@ fn qlab_literal_cue_number(number: &str) -> bool {
 /// `/cue/{n}/armed 0`, ... take exactly one argument, except the boolean
 /// `toggle` forms (`/cue/{n}/flagged/toggle`) which take none.
 fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueAction> {
+    // QLab `/live` form: "live" is always the last address segment
+    // (`/cue/5/opacity/+/live 10` works, `/live/+` does not).
+    let (verb, live) = match verb.strip_suffix("/live") {
+        Some(core) => (core, true),
+        None => (verb, false),
+    };
+    // Media-cue properties: `/cue/{n}/rate {number}` and
+    // `/cue/{n}/level/{row}/{col} {db}` (each also in `/live` form).
+    if verb == "rate" {
+        return match args {
+            [one] => numeric_arg(std::slice::from_ref(one))
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .map(|value| NetworkCueAction::SetRate { value, live }),
+            _ => None,
+        };
+    }
+    if let Some(rest) = verb.strip_prefix("level/") {
+        let mut parts = rest.split('/');
+        let (Some(row), Some(col), None) = (parts.next(), parts.next(), parts.next()) else {
+            return None;
+        };
+        let (Ok(row), Ok(col)) = (row.parse::<u32>(), col.parse::<u32>()) else { return None };
+        if row >= 128 || col >= 128 {
+            return None;
+        }
+        return match args {
+            [one] => numeric_arg(std::slice::from_ref(one))
+                .filter(|db| db.is_finite())
+                .map(|db| NetworkCueAction::SetLevel { row, col, db, live }),
+            _ => None,
+        };
+    }
     let (verb, toggle_suffix) = match verb.split_once('/') {
         Some((core, "toggle")) => (core, true),
         _ => (verb, false),
@@ -1297,7 +1329,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         .is_some_and(|(_, verb)| {
             let core = verb.split('/').next().unwrap_or(verb);
             matches!(core, "preWait" | "postWait" | "armed" | "qName" | "continueMode"
-                | "notes" | "colorName" | "flagged" | "load" | "panic")
+                | "notes" | "colorName" | "flagged" | "load" | "panic" | "rate" | "level")
         });
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
@@ -1732,6 +1764,10 @@ enum CueQueryProperty {
     Flagged,
     /// QLab `/cue/{n}/children`: array of QLab cue dictionaries for group children.
     Children,
+    /// QLab `/cue/{n}/rate[/live]`: playback rate (media cues).
+    Rate { live: bool },
+    /// QLab `/cue/{n}/level/{row}/{col}[/live]`: crosspoint level in dB.
+    Level { row: u32, col: u32, live: bool },
 }
 
 #[derive(Clone, Copy)]
@@ -2050,6 +2086,23 @@ impl<'a> CueQuery<'a> {
             "colorName" => CueQueryProperty::ColorName,
             "flagged" => CueQueryProperty::Flagged,
             "children" => CueQueryProperty::Children,
+            "rate" => CueQueryProperty::Rate { live: false },
+            "rate/live" => CueQueryProperty::Rate { live: true },
+            property if property.starts_with("level/") => {
+                let (rest, live) = match property.strip_suffix("/live") {
+                    Some(core) => (core, true),
+                    None => (property, false),
+                };
+                let mut parts = rest.strip_prefix("level/")?.split('/');
+                let (Some(row), Some(col), None) = (parts.next(), parts.next(), parts.next()) else {
+                    return None;
+                };
+                let (Ok(row), Ok(col)) = (row.parse::<u32>(), col.parse::<u32>()) else { return None };
+                if row >= 128 || col >= 128 {
+                    return None;
+                }
+                CueQueryProperty::Level { row, col, live }
+            }
             _ => return None,
         };
         let target = match kind {
@@ -2240,6 +2293,16 @@ impl<'a> CueQuery<'a> {
                         flagged.unwrap_or(&EMPTY_FLAGGED), &mut rows, 1))
                     .collect::<Vec<_>>();
                 (rows <= MAX_SCOPED_ROWS).then_some(serde_json::Value::Array(dicts))
+            }
+            CueQueryProperty::Rate { live } => {
+                let value = if live { cue.live_rate().or_else(|| cue.rate()) } else { cue.rate() };
+                Some(value.map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null))
+            }
+            CueQueryProperty::Level { row, col, live } => {
+                let (row, col) = (row as usize, col as usize);
+                let value = if live { cue.live_level(row, col).or_else(|| cue.level(row, col)) }
+                    else { cue.level(row, col) };
+                Some(value.map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null))
             }
         }
     }
@@ -3172,6 +3235,91 @@ mod tests {
         let home = set_working_directory("~").unwrap();
         assert!(home.is_dir());
         let _ = set_working_directory(dir.to_str().unwrap());
+    }
+
+    #[test]
+    fn qlab_media_cue_rate_and_level_saved_and_live_forms_resolve_and_read() {
+        use crate::cue::audio_cue::AudioCue;
+        let d = |v: f64| rosc::OscType::Double(v);
+        // Saved and /live writes by number, by id, and on playhead.
+        assert!(matches!(resolve_action("/cue/5/rate", &[d(1.5)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetRate { value, live: false }, number: "5", .. } if value == 1.5));
+        assert!(matches!(resolve_action("/cue/5/rate/live", &[d(2.0)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetRate { value, live: true }, .. } if value == 2.0));
+        assert!(matches!(resolve_action("/cue/5/level/0/1", &[d(-6.0)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetLevel { row: 0, col: 1, db, live: false }, .. } if db == -6.0));
+        assert!(matches!(resolve_action("/cue/5/level/2/3/live", &[rosc::OscType::Int(-12)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetLevel { row: 2, col: 3, db, live: true }, .. } if db == -12.0));
+        let id = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(resolve_action(&format!("/cue_id/{id}/rate"), &[d(0.5)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetRate { value, .. }, .. } if value == 0.5));
+        assert!(matches!(resolve_action("/cue/playhead/level/1/0", &[d(0.0)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetLevel { row: 1, col: 0, .. }, number: "playhead", .. }));
+        // Invalid forms stay unmatched: non-positive rate, bare rate write,
+        // malformed level paths, out-of-range indices, extra segments.
+        for (address, args) in [
+            ("/cue/5/rate", &[d(0.0)][..]),
+            ("/cue/5/rate", &[d(-1.0)][..]),
+            ("/cue/5/rate", &[][..]),
+            ("/cue/5/rate", &[d(1.0), d(2.0)][..]),
+            ("/cue/5/level/0", &[d(0.0)][..]),
+            ("/cue/5/level/0/1/2", &[d(0.0)][..]),
+            ("/cue/5/level/x/1", &[d(0.0)][..]),
+            ("/cue/5/level/200/1", &[d(0.0)][..]),
+            ("/cue/5/level/0/1/live/extra", &[d(0.0)][..]),
+            ("/cue/5/level/0/1", &[][..]),
+        ] {
+            assert!(matches!(resolve_action(address, args), OscAction::Unmatched), "{address} {args:?}");
+        }
+        // Wildcards accept the property writes (control-level), never reads.
+        assert!(matches!(resolve_action("/cue/*/rate", &[d(1.0)]),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::SetRate { .. }, .. }));
+        assert!(matches!(resolve_action("/cue/*/level/0/0", &[d(0.0)]),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::SetLevel { .. }, .. }));
+        assert!(matches!(resolve_action("/cue/*/rate", &[]), OscAction::Unmatched));
+        // Property writes need the allowlist (control level), live included.
+        assert!(matches!(authorized_action("/cue/5/rate", &[d(1.0)], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/5/level/0/0", &[d(0.0)], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/5/rate/live", &[d(1.0)], true),
+            OscAction::AddressedCue { action: NetworkCueAction::SetRate { live: true, .. }, .. }));
+        assert!(NetworkCueAction::SetRate { value: 1.0, live: true }.is_write());
+        assert!(parse_text_message(b"/cue/5/level/0/1 -6").is_some());
+        assert!(parse_text_message(b"/cue/5/rate 1.5").is_some());
+
+        // Queries: saved and /live reads resolve and return the cue's values.
+        let mut workspace = Workspace::new("Levels");
+        let mut cue = AudioCue::new();
+        cue.set_number(Some("7".into()));
+        cue.set_rate(1.25);
+        cue.set_level(0, 1, -6.0);
+        workspace.active_cue_list_mut().unwrap().push(Box::new(cue));
+        let src: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let read = |address: &str| {
+            let message = query_message(address);
+            CueQuery::parse(&message).unwrap().read(&workspace, src, 53000)
+        };
+        assert_eq!(read("/cue/7/rate"), Some(serde_json::json!(1.25)));
+        assert_eq!(read("/cue/7/rate/live"), Some(serde_json::json!(1.25)));
+        assert_eq!(read("/cue/7/level/0/1"), Some(serde_json::json!(-6.0)));
+        assert_eq!(read("/cue/7/level/1/1"), Some(serde_json::Value::Null), "unset crosspoint reads null");
+        assert_eq!(read("/cue/7/level/1/1/live"), Some(serde_json::Value::Null));
+        let rate_msg = query_message("/cue/7/rate/live");
+        let rate_q = CueQuery::parse(&rate_msg).unwrap();
+        assert!(matches!(rate_q.kind, CueQueryKind::Cue { property: CueQueryProperty::Rate { live: true }, .. }));
+        let level_msg = query_message("/cue/7/level/0/1/live");
+        let level_q = CueQuery::parse(&level_msg).unwrap();
+        assert!(matches!(level_q.kind, CueQueryKind::Cue {
+            property: CueQueryProperty::Level { row: 0, col: 1, live: true }, .. }));
+        assert!(CueQuery::parse(&query_message("/cue/7/level/0")).is_none());
+        assert!(CueQuery::parse(&query_message("/cue/7/level/0/1/2")).is_none());
+        // Non-media cues report null for rate/level.
+        let mut memo_workspace = Workspace::new("Memo");
+        let mut memo = crate::cue::memo_cue::MemoCue::new();
+        memo.set_number(Some("1".into()));
+        memo_workspace.active_cue_list_mut().unwrap().push(Box::new(memo));
+        let memo_msg = query_message("/cue/1/rate");
+        let memo_read = CueQuery::parse(&memo_msg).unwrap().read(&memo_workspace, src, 53000);
+        assert_eq!(memo_read, Some(serde_json::Value::Null));
     }
 
     #[test]

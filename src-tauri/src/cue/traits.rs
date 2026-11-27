@@ -527,8 +527,33 @@ pub trait Cue: Send + std::any::Any {
     fn set_temporary_target(&mut self, _id: Option<CueId>) {}
     fn temporary_target(&self) -> Option<CueId> { None }
 
+    // QLab OSC media-cue properties: saved playback rate and crosspoint level
+    // matrix (`/cue/{n}/rate`, `/cue/{n}/level/{row}/{col}`), plus the `/live`
+    // overrides that drive a running voice without touching saved data.
+    /// Saved playback rate (1.0 = normal); `None` when the cue type has none.
+    fn rate(&self) -> Option<f64> { None }
+    fn set_rate(&mut self, _rate: f64) {}
+    /// Saved crosspoint level in dB at `[row][col]`; `None` when unset or the
+    /// cue type has no level matrix.
+    fn level(&self, _row: usize, _col: usize) -> Option<f64> { None }
+    fn set_level(&mut self, _row: usize, _col: usize, _db: f64) {}
+    /// Live rate override from an OSC `/live` write (cleared on reset).
+    fn live_rate(&self) -> Option<f64> { None }
+    fn set_live_rate(&mut self, _rate: Option<f64>) {}
+    /// Live level override in dB from an OSC `/live` write (cleared on reset).
+    fn live_level(&self, _row: usize, _col: usize) -> Option<f64> { None }
+    fn set_live_level(&mut self, _row: usize, _col: usize, _db: Option<f64>) {}
+    /// Clear every live level override (on reset).
+    fn clear_live_levels(&mut self) {}
+    /// Running engine voice of this cue, when playing (for live writes).
+    fn media_voice_id(&self) -> Option<crate::engine::ring_command::VoiceId> { None }
+    /// Crosspoint mono-mirroring flag used when building the live matrix.
+    fn level_mirror_mono(&self) -> bool { false }
+
     fn clear_temporary_targets(&mut self) {
         self.set_temporary_target(None);
+        self.set_live_rate(None);
+        self.clear_live_levels();
         if let Some(children) = self.child_cues_mut() {
             for child in children { child.clear_temporary_targets(); }
         }

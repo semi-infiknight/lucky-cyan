@@ -53,6 +53,16 @@ pub trait AudioEngineApi: Send + Sync {
     /// Return the exact physical route captured when a strict File Audio voice was admitted.
     fn named_voice_output(&self, _voice: VoiceId) -> Option<super::device_manager::NamedOutput> { None }
     fn set_voice_pan(&self, voice_id: VoiceId, pan: f32) -> Result<()>;
+    /// Live playback rate on a playing voice (QLab `/live` OSC writes).
+    fn set_voice_rate(&self, _voice_id: VoiceId, _rate: f32) -> Result<()> {
+        Err(anyhow::anyhow!("live voice rate unsupported by this engine"))
+    }
+    /// Current live rate of a playing voice, when it is running.
+    fn voice_rate(&self, _voice_id: VoiceId) -> Option<f32> { None }
+    /// Set a single crosspoint on a playing voice (live matrix editing).
+    fn set_voice_crosspoint(&self, _voice_id: VoiceId, _input: u8, _output: u8, _gain: f32, _mirror_mono: bool) -> Result<()> {
+        Err(anyhow::anyhow!("live crosspoint unsupported by this engine"))
+    }
     /// Live crosspoint routing; `None` returns the voice to pan routing.
     fn set_voice_level_matrix(
         &self,
@@ -140,6 +150,15 @@ impl AudioEngineApi for AudioEngine {
     }
     fn set_voice_pan(&self, voice_id: VoiceId, pan: f32) -> Result<()> {
         AudioEngine::set_voice_pan(self, voice_id, pan)
+    }
+    fn set_voice_rate(&self, voice_id: VoiceId, rate: f32) -> Result<()> {
+        AudioEngine::set_voice_rate(self, voice_id, rate)
+    }
+    fn voice_rate(&self, voice_id: VoiceId) -> Option<f32> {
+        AudioEngine::voice_rate(self, voice_id)
+    }
+    fn set_voice_crosspoint(&self, voice_id: VoiceId, input: u8, output: u8, gain: f32, mirror_mono: bool) -> Result<()> {
+        AudioEngine::set_voice_crosspoint(self, voice_id, input, output, gain, mirror_mono)
     }
     fn set_voice_level_matrix(
         &self,
