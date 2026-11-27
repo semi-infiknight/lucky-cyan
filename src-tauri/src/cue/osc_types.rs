@@ -35,6 +35,79 @@ pub struct OscMessage {
 }
 
 impl OscMessage {
+    /// QLab OSC-query tokens: a `#/cue/...#` span in the address or in a
+    /// string argument is replaced at send time with the query's live result.
+    /// A string argument that is exactly one token keeps the result's type
+    /// (string/number/bool); anything else is substituted as text.
+    pub fn resolve_query_tokens(&self, workspace: &crate::show::Workspace) -> OscMessage {
+        fn render_text(value: &serde_json::Value) -> String {
+            match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() { i.to_string() } else { n.to_string() }
+                }
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            }
+        }
+        fn substitute(text: &str, workspace: &crate::show::Workspace) -> String {
+            let mut out = String::with_capacity(text.len());
+            let mut rest = text;
+            while let Some(start) = rest.find('#') {
+                out.push_str(&rest[..start]);
+                let Some(end) = rest[start + 1..].find('#') else {
+                    out.push_str(&rest[start..]);
+                    return out;
+                };
+                let inner = &rest[start + 1..start + 1 + end];
+                rest = &rest[start + 1 + end + 1..];
+                if inner.starts_with('/') {
+                    match crate::engine::osc_server::resolve_query_token(workspace, inner) {
+                        Some(value) => out.push_str(&render_text(&value)),
+                        None => {
+                            out.push('#');
+                            out.push_str(inner);
+                            out.push('#');
+                        }
+                    }
+                } else {
+                    out.push('#');
+                    out.push_str(inner);
+                    out.push('#');
+                }
+            }
+            out.push_str(rest);
+            out
+        }
+        fn resolve_arg(arg: &OscArg, workspace: &crate::show::Workspace) -> OscArg {
+            let OscArg::Str(text) = arg else { return arg.clone() };
+            let trimmed = text.trim();
+            if trimmed.starts_with('#') && trimmed.ends_with('#') && trimmed.len() > 2 {
+                let inner = &trimmed[1..trimmed.len() - 1];
+                if inner.starts_with('/') && !inner.contains('#') {
+                    if let Some(value) = crate::engine::osc_server::resolve_query_token(workspace, inner) {
+                        return match value {
+                            serde_json::Value::String(s) => OscArg::Str(s),
+                            serde_json::Value::Number(n) =>
+                                OscArg::Float(n.as_f64().unwrap_or(0.0) as f32),
+                            serde_json::Value::Bool(b) => OscArg::Bool(b),
+                            serde_json::Value::Null => OscArg::Str(String::new()),
+                            other => OscArg::Str(other.to_string()),
+                        };
+                    }
+                }
+            }
+            OscArg::Str(substitute(text, workspace))
+        }
+        OscMessage {
+            patch_id: self.patch_id,
+            address: substitute(&self.address, workspace),
+            args: self.args.iter().map(|a| resolve_arg(a, workspace)).collect(),
+            raw: self.raw.clone(),
+        }
+    }
+
     pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
         let bytes = match &self.raw {
             Some(RawDatagram::Text(text)) => text.as_bytes().to_vec(),
@@ -192,5 +265,41 @@ mod tests {
         }
         msg.raw = Some(RawDatagram::Hex("fZ".into()));
         assert!(msg.encode().is_err());
+    }
+
+    #[test]
+    fn query_tokens_in_address_and_args_resolve_against_the_workspace() {
+        use crate::cue::traits::Cue;
+        use crate::cue::wait_cue::WaitCue;
+        use crate::show::Workspace;
+
+        let mut workspace = Workspace::new("Blue");
+        let mut standby = WaitCue::new();
+        standby.set_number(Some("101".into()));
+        standby.set_pre_wait(std::time::Duration::from_millis(2500));
+        let standby_id = standby.id();
+        workspace.active_cue_list_mut().unwrap().push(Box::new(standby));
+        workspace.active_cue_list_mut().unwrap().set_playhead(Some(standby_id)).unwrap();
+
+        let msg = OscMessage {
+            patch_id: Uuid::nil(),
+            address: "/qlab/event/#/cue/101/number#".into(),
+            args: vec![
+                OscArg::Str("#/cue/101/number#".into()),
+                OscArg::Str("#/cue/101/preWait#".into()),
+                OscArg::Str("cue #/cue/101/number# end".into()),
+                OscArg::Str("#/cue/999/number#".into()),
+                OscArg::Int(7),
+            ],
+            raw: None,
+        };
+        let resolved = msg.resolve_query_tokens(&workspace);
+        assert_eq!(resolved.address, "/qlab/event/101");
+        assert!(matches!(&resolved.args[0], OscArg::Str(s) if s == "101"));
+        assert!(matches!(&resolved.args[1], OscArg::Float(f) if (*f - 2.5).abs() < 1e-6));
+        assert!(matches!(&resolved.args[2], OscArg::Str(s) if s == "cue 101 end"));
+        // Unknown queries keep the token text so the failure is visible on the wire.
+        assert!(matches!(&resolved.args[3], OscArg::Str(s) if s == "#/cue/999/number#"));
+        assert!(matches!(&resolved.args[4], OscArg::Int(7)));
     }
 }

@@ -67,6 +67,9 @@ pub struct CueContext {
     /// Output buffer size from machine config — passed to `ensure_input_feed`
     /// so the input stream uses the same period as the output stream.
     pub audio_buffer_size: u32,
+    /// The live workspace, when the context was built from one.  Lets OSC cues
+    /// resolve QLab query tokens (`#/cue/...#`) in their messages at GO time.
+    pub(crate) workspace_ref: Option<Arc<Mutex<crate::show::Workspace>>>,
 }
 
 impl CueContext {
@@ -104,6 +107,7 @@ impl CueContext {
             fixture_groups: Arc::new(fixture_groups),
             input_patches: Arc::new(input_patches),
             audio_buffer_size,
+            workspace_ref: None,
         }
     }
 

@@ -87,7 +87,16 @@ impl Cue for OscCue {
         for msg in &self.messages {
             if let Some(patch) = context.resolve_osc_patch(msg.patch_id) {
                 let target = format!("{}:{}", patch.ip, patch.port);
-                if let Err(e) = msg.send(&target) {
+                // QLab OSC-query tokens (`#/cue/...#`) resolve against the live
+                // workspace at send time when the context carries one.
+                let resolved = match &context.workspace_ref {
+                    Some(ws) => match ws.lock() {
+                        Ok(guard) => msg.resolve_query_tokens(&guard),
+                        Err(_) => msg.clone(),
+                    },
+                    None => msg.clone(),
+                };
+                if let Err(e) = resolved.send(&target) {
                     log::warn!("OSC send failed to {target}: {e}");
                 } else {
                     context.mark_action_started(self.id);

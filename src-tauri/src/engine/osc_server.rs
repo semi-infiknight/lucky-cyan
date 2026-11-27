@@ -2655,6 +2655,16 @@ fn format_reply(format: &str, workspace_id: Uuid, address: &str, status: &str, d
         .replace("#data#", &data_text)
 }
 
+/// QLab OSC-query token (`#/cue/...#`) embedded in an outgoing Network cue
+/// message: parse the token text as a no-argument query and read it against
+/// the current workspace.  Returns the query's `data` (`None` = error/unknown).
+pub(crate) fn resolve_query_token(workspace: &Workspace, text: &str) -> Option<serde_json::Value> {
+    let message = rosc::OscMessage { addr: text.into(), args: vec![] };
+    let query = CueQuery::parse(&message)?;
+    let src = SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0));
+    query.read(workspace, src, 0)
+}
+
 fn handle_query(query: CueQuery<'_>, src: SocketAddr, handle: &tauri::AppHandle) -> Option<Vec<u8>> {
     let state = handle.try_state::<AppState>()?;
     let port = match state.osc_server.status(false) {

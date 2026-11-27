@@ -41,6 +41,7 @@ pub(super) fn workspace_context(state: &AppState, ws: &Workspace) -> CueContext 
         ws.preferences.audio.audio_buffer_size,
     );
     context.set_workspace(ws);
+    context.workspace_ref = Some(std::sync::Arc::clone(&state.workspace));
     context
 }
 
