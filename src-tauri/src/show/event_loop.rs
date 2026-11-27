@@ -1179,7 +1179,12 @@ fn tick(
     // ------------------------------------------------------------------
     // Non-consuming peek — the inner block still consumes the flags when it sends.
     let osc_feedback_active = crate::engine::osc_feedback::is_enabled()
-        || crate::engine::osc_feedback::any_request_pending();
+        || crate::engine::osc_feedback::any_request_pending()
+        || crate::engine::osc_updates::has_subscribers();
+    // Collected for `/updates` subscribers while the payloads below are computed.
+    let mut update_cue_ids: Vec<CueId> = Vec::new();
+    let mut update_playhead: Option<CueId> = None;
+    let mut update_structure_changed = false;
     let (running_payload, progress_payload, playhead_payload, cue_list_payload) =
         if !osc_feedback_active {
             (None, None, None, None)
@@ -1199,7 +1204,15 @@ fn tick(
                 };
 
             let running_ids: Vec<CueId> = running_now.iter().map(|(id, _, _, _)| *id).collect();
-            let running_p: Option<Vec<(String, String)>> = if running_ids != *prev_running_cues {
+            let running_changed = running_ids != *prev_running_cues;
+            if running_changed {
+                // Symmetric difference: cues that started and cues that stopped.
+                update_cue_ids = prev_running_cues
+                    .iter().filter(|id| !running_ids.contains(id))
+                    .chain(running_ids.iter().filter(|id| !prev_running_cues.contains(id)))
+                    .cloned().collect();
+            }
+            let running_p: Option<Vec<(String, String)>> = if running_changed {
                 *prev_running_cues = running_ids;
                 Some(running_now.into_iter().map(|(_, n, name, _)| (n, name)).collect())
             } else {
@@ -1210,6 +1223,7 @@ fn tick(
                 let id = playhead_now.as_ref().map(|(id, _, _)| *id);
                 if id != *prev_playhead_cue || crate::engine::osc_feedback::is_playhead_requested() {
                     *prev_playhead_cue = id;
+                    update_playhead = id;
                     Some(playhead_now.map(|(_, n, name)| (n, name)).unwrap_or_default())
                 } else {
                     None
@@ -1223,6 +1237,7 @@ fn tick(
                     || crate::engine::osc_feedback::is_cue_list_requested()
                 {
                     *prev_cue_list_hash = cue_list_hash;
+                    update_structure_changed = true;
                     Some(all_cues)
                 } else {
                     None
@@ -1232,6 +1247,23 @@ fn tick(
         } else {
             (None, None, None, None)
         };
+
+    // Push QLab-style `/update/...` messages to `/updates` subscribers.
+    if crate::engine::osc_updates::has_subscribers()
+        && (update_structure_changed || update_playhead.is_some() || !update_cue_ids.is_empty())
+    {
+        let ws_id = ws.instance_id;
+        let mut messages = vec![crate::engine::osc_updates::update_workspace(ws_id)];
+        if let Some(playhead) = update_playhead {
+            messages.push(crate::engine::osc_updates::update_playback_position(ws_id, active_list_id, Some(playhead)));
+        } else if playhead_payload.is_some() {
+            messages.push(crate::engine::osc_updates::update_playback_position(ws_id, active_list_id, None));
+        }
+        for id in &update_cue_ids {
+            messages.push(crate::engine::osc_updates::update_cue(ws_id, *id));
+        }
+        crate::engine::osc_updates::push(&messages);
+    }
 
     // Rename for clarity in the rest of the function.
     let newly_completed   = all_newly_completed;

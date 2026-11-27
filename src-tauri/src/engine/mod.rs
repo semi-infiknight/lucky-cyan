@@ -36,6 +36,7 @@ pub mod net_interface;
 pub mod osc_feedback;
 pub mod osc_patch;
 pub mod osc_server;
+pub mod osc_updates;
 pub mod overrides;
 pub mod output_engine;
 mod output_meter;

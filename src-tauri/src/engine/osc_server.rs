@@ -157,7 +157,7 @@ impl OscServer {
                 protocol.settings(&config),
                 super::net_interface::bind_ip,
                 move |status| { let _ = status_handle.emit(protocol.status_event(), status); },
-                move |packet, explicitly_allowed| handle_packet(packet, explicitly_allowed, &packet_handle),
+                move |packet, explicitly_allowed, src| handle_packet(packet, explicitly_allowed, src, &packet_handle),
                 move |query| handle_query(query, &query_handle),
             )
         };
@@ -194,7 +194,7 @@ impl Listener {
         config: ListenerConfig,
         bind_ip: impl Fn() -> IpAddr + Send + 'static,
         mut on_status: impl FnMut(&OscListenerStatus) + Send + 'static,
-        on_packet: impl FnMut(&rosc::OscPacket, bool) + Send + 'static,
+        on_packet: impl FnMut(&rosc::OscPacket, bool, SocketAddr) + Send + 'static,
         on_query: impl FnMut(CueQuery<'_>) -> Option<Vec<u8>> + Send + 'static,
     ) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -249,7 +249,7 @@ fn server_loop(
     commands: Receiver<ListenerCommand>,
     bind_ip: impl Fn() -> IpAddr,
     mut on_status: impl FnMut(OscListenerStatus),
-    mut on_packet: impl FnMut(&rosc::OscPacket, bool),
+    mut on_packet: impl FnMut(&rosc::OscPacket, bool, SocketAddr),
     mut on_query: impl FnMut(CueQuery<'_>) -> Option<Vec<u8>>,
 ) {
     let label = protocol.label();
@@ -344,7 +344,8 @@ fn server_loop(
                         log::debug!("{label}: dropped duplicate packet from {src}");
                         continue;
                     }
-                    on_packet(&packet, !config.allowed_ips.is_empty());
+                    crate::engine::osc_updates::touch(src);
+                    on_packet(&packet, !config.allowed_ips.is_empty(), src);
                 }
                 Err(e) if is_timeout(&e) => {}
                 Err(e) => log::warn!("{label}: recv error: {e}"),
@@ -406,7 +407,8 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
             [] => Vec::new(),
             // One argument for QLab cue property writes (`/cue/5/preWait 3`,
             // `/cue/5/qName LX`); numeric when it parses, string otherwise.
-            [one] if address.starts_with("/cue/") || address.starts_with("/cue_id/") => {
+            [one] if address.starts_with("/cue/") || address.starts_with("/cue_id/")
+                || address == "/updates" || address.ends_with("/updates") => {
                 match one.parse::<f64>() {
                     Ok(value) if (value * 1000.0).is_finite() => vec![rosc::OscType::Double(value)],
                     _ => vec![rosc::OscType::String((*one).to_owned())],
@@ -425,12 +427,12 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
 // Packet dispatch
 // ---------------------------------------------------------------------------
 
-fn handle_packet(packet: &rosc::OscPacket, explicitly_allowed: bool, app_handle: &tauri::AppHandle) {
+fn handle_packet(packet: &rosc::OscPacket, explicitly_allowed: bool, src: SocketAddr, app_handle: &tauri::AppHandle) {
     match packet {
-        rosc::OscPacket::Message(msg) => handle_message(msg, explicitly_allowed, app_handle),
+        rosc::OscPacket::Message(msg) => handle_message(msg, explicitly_allowed, src, app_handle),
         rosc::OscPacket::Bundle(bundle) => {
             for p in &bundle.content {
-                handle_packet(p, explicitly_allowed, app_handle);
+                handle_packet(p, explicitly_allowed, src, app_handle);
             }
         }
     }
@@ -451,6 +453,8 @@ enum OscAction<'a> {
     ListPause(NetworkPauseAction),
     /// QLab `/thump` keepalive: acknowledged but performs no action.
     Heartbeat,
+    /// QLab `/updates {0|1}`: subscribe/unsubscribe the sender to push updates.
+    Updates(bool),
     /// Trigger a full cue-list feedback dump.
     CueListRequest,
     /// Trigger a playhead feedback dump.
@@ -479,7 +483,7 @@ fn resolve_action<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a> {
     OscAction::Command(payload)
 }
 
-fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, app_handle: &tauri::AppHandle) {
+fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, src: SocketAddr, app_handle: &tauri::AppHandle) {
     let (matched, activity) = match authorized_action(&msg.addr, &msg.args, explicitly_allowed) {
         OscAction::WorkspaceTransport { workspace, action } => {
             if let Some(state) = app_handle.try_state::<AppState>() {
@@ -520,6 +524,10 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, app_handle: 
             (true, true)
         }
         OscAction::Heartbeat => (true, false),
+        OscAction::Updates(enabled) => {
+            crate::engine::osc_updates::set_subscription(src, enabled);
+            (true, false)
+        }
         OscAction::Command(payload) => {
             let _ = app_handle.emit("osc-command", &payload);
             (true, true)
@@ -709,7 +717,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         .or_else(|| addr.strip_prefix("/cue_id/"))
         .and_then(|rest| rest.split_once('/'))
         .is_some_and(|(_, verb)| matches!(verb, "preWait" | "postWait" | "armed" | "qName" | "continueMode"));
-    if !args.is_empty() && !cue_write {
+    let updates_arg = addr == "/updates" || addr.ends_with("/updates");
+    if !args.is_empty() && !cue_write && !updates_arg {
         return OscAction::Unmatched;
     }
     let Some((workspace, addr)) = WorkspaceSelector::split_address(addr) else {
@@ -718,6 +727,17 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
     use NetworkWorkspaceAction as Transport;
     if addr == "/thump" {
         return OscAction::Heartbeat;
+    }
+    // QLab `/updates {bool}` works at any access level and may be workspace-scoped.
+    if addr == "/updates" {
+        let _ = workspace;
+        return match args {
+            [one] => match qlab_bool(one) {
+                Some(on) => OscAction::Updates(on),
+                None => OscAction::Unmatched,
+            },
+            _ => OscAction::Unmatched,
+        };
     }
     // QLab `/go/{cue_number}`: park the playhead on the numbered cue, then GO.
     if let Some(number) = addr.strip_prefix("/go/") {
@@ -1914,6 +1934,21 @@ mod tests {
     }
 
     #[test]
+    fn qlab_updates_subscription_resolves_at_any_access_level() {
+        assert!(matches!(resolve_action("/updates", &[rosc::OscType::Int(1)]), OscAction::Updates(true)));
+        assert!(matches!(resolve_action("/updates", &[rosc::OscType::String("no".into())]), OscAction::Updates(false)));
+        assert!(matches!(resolve_action("/workspace/Blue/updates", &[rosc::OscType::Double(1.0)]), OscAction::Updates(true)));
+        // Any access level: not gated by the allowlist, unlike transport/writes.
+        assert!(matches!(authorized_action("/updates", &[rosc::OscType::Int(1)], false), OscAction::Updates(true)));
+        assert!(matches!(resolve_action("/updates", &[]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/updates", &[rosc::OscType::String("maybe".into())]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/updates", &[rosc::OscType::Int(1), rosc::OscType::Int(0)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/updates/extra", &[rosc::OscType::Int(1)]), OscAction::Unmatched));
+        assert!(parse_text_message(b"/updates 1").is_some());
+        assert!(parse_text_message(b"/updates").is_none());
+    }
+
+    #[test]
     fn qlab_thump_is_acknowledged_without_activity() {
         assert!(matches!(resolve_action("/thump", &[]), OscAction::Heartbeat));
         assert!(matches!(authorized_action("/thump", &[], false), OscAction::Heartbeat));
@@ -1953,7 +1988,7 @@ mod tests {
         let listener = Listener::spawn(
             protocol, protocol.settings(&config), || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
-            |_, _| {},
+            |_, _, _| {},
             move |query| query.encode_reply(instance, Some(false.into())),
         );
         let OscListenerStatus::Listening { address } = statuses.recv_timeout(Duration::from_secs(2)).unwrap() else {
@@ -2026,7 +2061,7 @@ mod tests {
             Protocol::Osc.settings(&config),
             || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
-            move |packet, explicitly_allowed| { let _ = packet_tx.send((packet.clone(), explicitly_allowed)); },
+            move |packet, explicitly_allowed, _src| { let _ = packet_tx.send((packet.clone(), explicitly_allowed)); },
             |_| None,
         );
         let timeout = Duration::from_secs(2);
@@ -2062,7 +2097,7 @@ mod tests {
             Protocol::Osc.settings(&config),
             || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
-            |_, _| {},
+            |_, _, _| {},
             |_| None,
         );
         let timeout = Duration::from_secs(2);
@@ -2145,7 +2180,7 @@ mod tests {
             protocol.settings(&config),
             || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
-            move |packet, _| { let _ = packet_tx.send(packet.clone()); },
+            move |packet, _, _src| { let _ = packet_tx.send(packet.clone()); },
             |_| None,
         );
         let timeout = Duration::from_secs(2);
