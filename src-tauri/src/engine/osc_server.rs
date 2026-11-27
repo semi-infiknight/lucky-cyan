@@ -401,9 +401,21 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
         }
         vec![rosc::OscType::Double(value)]
     } else {
-        Vec::new()
+        let rest: Vec<&str> = tokens.collect();
+        match rest.as_slice() {
+            [] => Vec::new(),
+            // One argument for QLab cue property writes (`/cue/5/preWait 3`,
+            // `/cue/5/qName LX`); numeric when it parses, string otherwise.
+            [one] if address.starts_with("/cue/") || address.starts_with("/cue_id/") => {
+                match one.parse::<f64>() {
+                    Ok(value) if (value * 1000.0).is_finite() => vec![rosc::OscType::Double(value)],
+                    _ => vec![rosc::OscType::String((*one).to_owned())],
+                }
+            }
+            _ => return None,
+        }
     };
-    if tokens.next().is_some() || matches!(resolve_action(&address, &args), OscAction::Unmatched) {
+    if matches!(resolve_action(&address, &args), OscAction::Unmatched) {
         return None;
     }
     Some(rosc::OscMessage { addr: address, args })
@@ -544,6 +556,8 @@ fn authorized_action<'a>(addr: &'a str, args: &[rosc::OscType], explicitly_allow
         | OscAction::AddressedCue { action: NetworkCueAction::Reset, .. }
         | OscAction::WorkspaceTransport { .. }
         | OscAction::SetOverride { .. } if !explicitly_allowed => OscAction::Unmatched,
+        // Property writes edit saved show data: control-level only.
+        OscAction::AddressedCue { action, .. } if !explicitly_allowed && action.is_write() => OscAction::Unmatched,
         _ => action,
     }
 }
@@ -637,11 +651,49 @@ fn qlab_literal_cue_number(number: &str) -> bool {
         && !matches!(number, "selected" | "active" | "playhead" | "all" | "none" | "next" | "previous" | "nextSequence" | "previousSequence")
 }
 
+/// QLab cue verbs that write a saved cue field and therefore take exactly one
+/// argument: `/cue/{n}/preWait 5`, `/cue/{n}/armed 0`, ...
+fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueAction> {
+    if args.len() != 1 {
+        return None;
+    }
+    match verb {
+        "preWait" | "postWait" => {
+            let value = numeric_arg(args)?;
+            (value.is_finite() && value >= 0.0).then(|| {
+                if verb == "preWait" { NetworkCueAction::SetPreWait(value) } else { NetworkCueAction::SetPostWait(value) }
+            })
+        }
+        "armed" => qlab_bool(&args[0]).map(NetworkCueAction::SetArmed),
+        "qName" => match &args[0] {
+            rosc::OscType::String(name)
+                if !name.is_empty() && name.len() <= MAX_CUE_ADDRESS_NUMBER_BYTES =>
+            {
+                Some(NetworkCueAction::SetQName(name.clone()))
+            }
+            _ => None,
+        },
+        "continueMode" => match &args[0] {
+            rosc::OscType::String(mode) => serde_json::from_str::<crate::cue::types::ContinueMode>(
+                &serde_json::to_string(mode).ok()?,
+            ).ok().map(NetworkCueAction::SetContinueMode),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a> {
     if let Some(rest) = addr.strip_prefix("/overrides/") {
         return parse_override_address(rest, args);
     }
-    if !args.is_empty() {
+    // Property writes are the only cue commands that carry an argument.
+    let cue_write = addr
+        .strip_prefix("/cue/")
+        .or_else(|| addr.strip_prefix("/cue_id/"))
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(_, verb)| matches!(verb, "preWait" | "postWait" | "armed" | "qName" | "continueMode"));
+    if !args.is_empty() && !cue_write {
         return OscAction::Unmatched;
     }
     let Some((workspace, addr)) = WorkspaceSelector::split_address(addr) else {
@@ -694,21 +746,27 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             return OscAction::Unmatched;
         }
         match action {
-            "start" => (id, NetworkCueAction::Start),
-            "stop" => (id, NetworkCueAction::Stop),
-            "reset" => (id, NetworkCueAction::Reset),
-            "pause" => (id, NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
-            "resume" => (id, NetworkCueAction::SetPause(NetworkPauseAction::Resume)),
-            _ => return OscAction::Unmatched,
+            "start" if args.is_empty() => (id, NetworkCueAction::Start),
+            "stop" if args.is_empty() => (id, NetworkCueAction::Stop),
+            "reset" if args.is_empty() => (id, NetworkCueAction::Reset),
+            "pause" if args.is_empty() => (id, NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
+            "resume" if args.is_empty() => (id, NetworkCueAction::SetPause(NetworkPauseAction::Resume)),
+            verb => match cue_write_action(verb, args) {
+                Some(write) => (id, write),
+                None => return OscAction::Unmatched,
+            },
         }
     } else if let Some((number, action)) = addr.strip_prefix("/cue/").and_then(|cue| cue.split_once('/')) {
         match action {
-            "start" => (number, NetworkCueAction::Start),
-            "stop" => (number, NetworkCueAction::Stop),
-            "reset" => (number, NetworkCueAction::Reset),
-            "pause" => (number, NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
-            "resume" => (number, NetworkCueAction::SetPause(NetworkPauseAction::Resume)),
-            _ => return OscAction::Unmatched,
+            "start" if args.is_empty() => (number, NetworkCueAction::Start),
+            "stop" if args.is_empty() => (number, NetworkCueAction::Stop),
+            "reset" if args.is_empty() => (number, NetworkCueAction::Reset),
+            "pause" if args.is_empty() => (number, NetworkCueAction::SetPause(NetworkPauseAction::Pause)),
+            "resume" if args.is_empty() => (number, NetworkCueAction::SetPause(NetworkPauseAction::Resume)),
+            verb => match cue_write_action(verb, args) {
+                Some(write) => (number, write),
+                None => return OscAction::Unmatched,
+            },
         }
     } else {
         return OscAction::Unmatched;
@@ -1286,7 +1344,7 @@ mod tests {
             for selector in ["Blue", "Practice.inkue", &uuid.to_string()] {
                 let address = format!("/workspace/{selector}/cue/202.1/{verb}");
                 let text = parse_text_message(address.as_bytes()).unwrap();
-                assert_eq!(resolve(&text.addr, &workspace), Some((1, cue_id, expected)));
+                assert_eq!(resolve(&text.addr, &workspace), Some((1, cue_id, expected.clone())));
                 assert!(matches!(resolve_action(&address, &[rosc::OscType::Int(1)]), OscAction::Unmatched));
             }
         }
@@ -1528,6 +1586,60 @@ mod tests {
         let enabled = value.unwrap_or_else(|| !local.get(key).unwrap_or(true));
         local.set(key, enabled).unwrap();
         assert_eq!(local.get("msc_output"), Some(true));
+    }
+
+    #[test]
+    fn qlab_cue_property_writes_parse_validate_and_require_the_allowlist() {
+        use crate::cue::types::ContinueMode;
+        let d = |v: f64| rosc::OscType::Double(v);
+        let s = |v: &str| rosc::OscType::String(v.to_owned());
+
+        assert!(matches!(resolve_action("/cue/5/preWait", &[d(2.5)]),
+            OscAction::AddressedCue { number: "5", action: NetworkCueAction::SetPreWait(v), .. } if v == 2.5));
+        assert!(matches!(resolve_action("/cue/5/postWait", &[d(0.0)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetPostWait(0.0), .. }));
+        assert!(matches!(resolve_action("/cue/selected/armed", &[rosc::OscType::Int(0)]),
+            OscAction::AddressedCue { number: "selected", action: NetworkCueAction::SetArmed(false), .. }));
+        assert!(matches!(resolve_action("/cue/5/armed", &[s("yes")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetArmed(true), .. }));
+        assert!(matches!(resolve_action("/cue/5/qName", &[s("LX 5")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetQName(ref name), .. } if name == "LX 5"));
+        assert!(matches!(resolve_action("/cue/5/continueMode", &[s("auto_follow")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetContinueMode(ContinueMode::AutoFollow), .. }));
+        let uuid = uuid::Uuid::new_v4();
+        assert!(matches!(resolve_action(&format!("/cue_id/{uuid}/preWait"), &[d(1.0)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetPreWait(1.0), .. }));
+
+        // Bad or missing arguments stay unmatched, and so do writes on verbs that take none.
+        for (address, args) in [
+            ("/cue/5/preWait", &[][..]),
+            ("/cue/5/preWait", &[d(-1.0)][..]),
+            ("/cue/5/preWait", &[d(f64::NAN)][..]),
+            ("/cue/5/preWait", &[d(1.0), d(2.0)][..]),
+            ("/cue/5/start", &[d(1.0)][..]),
+            ("/cue/5/armed", &[s("maybe")][..]),
+            ("/cue/5/qName", &[s("")][..]),
+            ("/cue/5/continueMode", &[s("teleport")][..]),
+            ("/cue/5/level", &[d(0.5)][..]),
+        ] {
+            assert!(matches!(resolve_action(address, args), OscAction::Unmatched), "{address} {args:?}");
+        }
+
+        // Writes are control-level: they need an explicitly allowlisted sender,
+        // even unscoped, while transport verbs on the same cue do not.
+        assert!(matches!(authorized_action("/cue/5/preWait", &[d(1.0)], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/5/preWait", &[d(1.0)], true),
+            OscAction::AddressedCue { action, .. } if action.is_write()));
+        assert!(matches!(authorized_action("/cue/5/stop", &[], false),
+            OscAction::AddressedCue { action: NetworkCueAction::Stop, .. }));
+
+        // Plain text takes one numeric or string argument for cue writes only.
+        let parsed = parse_text_message(b"/cue/5/preWait 2.5").unwrap();
+        assert_eq!(parsed.args, vec![d(2.5)]);
+        let parsed = parse_text_message(b"/cue/5/qName LX5").unwrap();
+        assert_eq!(parsed.args, vec![s("LX5")]);
+        assert!(parse_text_message(b"/cue/5/qName LX 5").is_none(), "plain-text arguments cannot contain spaces");
+        assert!(parse_text_message(b"/cue/5/stop 1").is_none());
     }
 
     #[test]

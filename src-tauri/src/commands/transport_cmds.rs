@@ -9,7 +9,7 @@ use crate::{
     cue::{
         context::{CueContext, CueEvent},
         traits::Cue,
-        types::{CueId, CueState, CueType},
+        types::{ContinueMode, CueId, CueState, CueType},
     },
     show::{cue_list::CueList, transport::{stage_media_load_time, Transport}, undo_stack::UndoHistory, Workspace},
     state::AppState,
@@ -177,7 +177,7 @@ pub fn go_cue(
     go_cue_in_list(&mut transport, cue_list, id, false, &app_handle)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum NetworkCueAction {
     Go,
     Start,
@@ -185,6 +185,26 @@ pub(crate) enum NetworkCueAction {
     Stop,
     Reset,
     SetPause(NetworkPauseAction),
+    /// QLab property writes (`/cue/{n}/preWait 5`, `/armed 0`, ...). These edit
+    /// saved cue data, so they are control-level and need an allowlisted sender.
+    SetPreWait(f64),
+    SetPostWait(f64),
+    SetArmed(bool),
+    SetQName(String),
+    SetContinueMode(ContinueMode),
+}
+
+impl NetworkCueAction {
+    pub(crate) fn is_write(&self) -> bool {
+        matches!(
+            self,
+            NetworkCueAction::SetPreWait(_)
+                | NetworkCueAction::SetPostWait(_)
+                | NetworkCueAction::SetArmed(_)
+                | NetworkCueAction::SetQName(_)
+                | NetworkCueAction::SetContinueMode(_)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,7 +245,51 @@ pub(crate) fn address_numbered_network_cue(
             result
         }
         NetworkCueAction::SetPause(action) => network_pause_in_list(&transport.context, cue_list, Some(id), action, app_handle),
+        NetworkCueAction::SetPreWait(secs) => {
+            apply_cue_write(&mut ws, index, id, |cue| cue.set_pre_wait(std::time::Duration::from_secs_f64(secs.max(0.0))), app_handle)
+        }
+        NetworkCueAction::SetPostWait(secs) => {
+            apply_cue_write(&mut ws, index, id, |cue| cue.set_post_wait(std::time::Duration::from_secs_f64(secs.max(0.0))), app_handle)
+        }
+        NetworkCueAction::SetArmed(armed) => {
+            apply_cue_write(&mut ws, index, id, |cue| cue.set_disabled(!armed), app_handle)
+        }
+        NetworkCueAction::SetQName(name) => {
+            let name = name.clone();
+            apply_cue_write(&mut ws, index, id, move |cue| cue.set_name(name), app_handle)
+        }
+        NetworkCueAction::SetContinueMode(mode) => {
+            apply_cue_write(&mut ws, index, id, move |cue| cue.set_continue_mode(mode), app_handle)
+        }
     }
+}
+
+/// Apply one saved-field edit to the addressed cue, then mark the workspace
+/// modified and refresh the list so the change is visible in the desk flow.
+fn apply_cue_write(
+    ws: &mut Workspace,
+    index: usize,
+    id: CueId,
+    edit: impl FnOnce(&mut dyn Cue),
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    if !edit_cue_field(ws, index, id, edit) {
+        return Ok(());
+    }
+    ws.mark_modified();
+    let _ = app_handle.emit("cue-list-refresh", ());
+    let _ = app_handle.emit("workspace-modified", ());
+    Ok(())
+}
+
+/// Apply the edit to the addressed cue (recursively). Returns false when the
+/// cue is gone, so callers can skip the modified/refresh signals.
+fn edit_cue_field(ws: &mut Workspace, index: usize, id: CueId, edit: impl FnOnce(&mut dyn Cue)) -> bool {
+    let Some(cue) = ws.cue_lists.get_mut(index).and_then(|list| list.get_mut_recursive(&id)) else {
+        return false;
+    };
+    edit(cue);
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -809,6 +873,32 @@ pub fn load_media_to_time(
 mod tests {
     use super::*;
     use crate::cue::{memo_cue::MemoCue, types::ContinueMode, wait_cue::WaitCue};
+
+    #[test]
+    fn network_cue_writes_edit_the_addressed_cue_and_mark_the_workspace() {
+        let mut workspace = Workspace::new("OSC writes");
+        assert!(!workspace.is_modified);
+        let mut cue = WaitCue::new();
+        cue.set_number(Some("7".into()));
+        let id = cue.id();
+        let list_index = 0;
+        workspace.active_cue_list_mut().unwrap().push(Box::new(cue));
+
+        assert!(edit_cue_field(&mut workspace, list_index, id, |cue| {
+            cue.set_pre_wait(std::time::Duration::from_secs(2));
+            cue.set_continue_mode(ContinueMode::AutoFollow);
+            cue.set_disabled(true);
+            cue.set_name("renamed".into());
+        }));
+        workspace.mark_modified();
+        let cue = workspace.cue_lists[list_index].get_recursive(&id).unwrap();
+        assert_eq!(cue.pre_wait(), std::time::Duration::from_secs(2));
+        assert_eq!(cue.continue_mode(), ContinueMode::AutoFollow);
+        assert!(cue.is_disabled());
+        assert_eq!(cue.name(), "renamed");
+        assert!(workspace.is_modified);
+        assert!(!edit_cue_field(&mut workspace, list_index, uuid::Uuid::new_v4(), |_| {}));
+    }
 
     #[test]
     fn hotkey_capture_checks_the_displayed_binding_and_undo_keeps_standby_and_arming() {

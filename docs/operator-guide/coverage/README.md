@@ -119,7 +119,7 @@ Use an isolated endpoint for OSC follow markers. The native desk also supports M
 
 ## Scripting and automation
 
-Inspect a saved file with MCP or approve a gated action locally. An allowlisted OSC controller can read active-list standby and the state of a numbered cue. An imported AppleScript needs an operator-approved portable replacement. [OSC query exercise](../workshops/README.md#read-standby-and-cue-state-from-an-osc-controller) · [Automation guide](../automation/README.md)
+Inspect a saved file with MCP or approve a gated action locally. An allowlisted OSC controller can read active-list standby and cue state and properties, and write cue fields such as pre-wait, arming, name and continue mode. An imported AppleScript needs an operator-approved portable replacement. [OSC query exercise](../workshops/README.md#read-standby-and-cue-state-from-an-osc-controller) · [Automation guide](../automation/README.md)
 
 - [QLab's OSC Dictionary](https://qlab.app/docs/v5/scripting/osc-dictionary-v5/)
 - [OSC Queries](https://qlab.app/docs/v5/scripting/osc-queries/)
