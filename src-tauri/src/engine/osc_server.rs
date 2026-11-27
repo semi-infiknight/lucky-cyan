@@ -158,7 +158,7 @@ impl OscServer {
                 super::net_interface::bind_ip,
                 move |status| { let _ = status_handle.emit(protocol.status_event(), status); },
                 move |packet, explicitly_allowed, src| handle_packet(packet, explicitly_allowed, src, &packet_handle),
-                move |query| handle_query(query, &query_handle),
+                move |query, src| handle_query(query, src, &query_handle),
             )
         };
         Self { osc: spawn(Protocol::Osc), plain_text: spawn(Protocol::PlainText) }
@@ -195,7 +195,7 @@ impl Listener {
         bind_ip: impl Fn() -> IpAddr + Send + 'static,
         mut on_status: impl FnMut(&OscListenerStatus) + Send + 'static,
         on_packet: impl FnMut(&rosc::OscPacket, bool, SocketAddr) + Send + 'static,
-        on_query: impl FnMut(CueQuery<'_>) -> Option<Vec<u8>> + Send + 'static,
+        on_query: impl FnMut(CueQuery<'_>, SocketAddr) -> Option<Vec<u8>> + Send + 'static,
     ) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
         let initial = if config.enabled { OscListenerStatus::Binding } else { OscListenerStatus::Disabled };
@@ -250,7 +250,7 @@ fn server_loop(
     bind_ip: impl Fn() -> IpAddr,
     mut on_status: impl FnMut(OscListenerStatus),
     mut on_packet: impl FnMut(&rosc::OscPacket, bool, SocketAddr),
-    mut on_query: impl FnMut(CueQuery<'_>) -> Option<Vec<u8>>,
+    mut on_query: impl FnMut(CueQuery<'_>, SocketAddr) -> Option<Vec<u8>>,
 ) {
     let label = protocol.label();
     loop {
@@ -327,11 +327,14 @@ fn server_loop(
                     };
                     if let rosc::OscPacket::Message(message) = &packet {
                         if let Some(query) = CueQuery::parse(message) {
+                            // QLab always accepts the app-level queries (/version,
+                            // /workspaces, /overrides reads, /alwaysReply and /updates
+                            // status reads); show-data queries need the allowlist.
                             if matches!(protocol, Protocol::Osc)
-                                && !config.allowed_ips.is_empty()
                                 && query.is_single_datagram(data)
+                                && (!config.allowed_ips.is_empty() || query.is_any_access())
                             {
-                                if let Some(reply) = on_query(query) {
+                                if let Some(reply) = on_query(query, src) {
                                     let _ = socket.send_to(&reply, src);
                                 }
                             }
@@ -897,6 +900,28 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
 /// With no argument (or `toggle`) the current value flips; otherwise the
 /// argument follows QLab's boolean rules (number != 0, or a string starting
 /// with Y/y/T/t/1-9 true, N/n/F/f/0 false).
+/// Map an override address core to its registry key. The `toggle` prefix leaves
+/// the core capitalized ("DmxOutput"); the `Enabled` suffix form keeps QLab's
+/// camelCase ("dmxOutput").
+fn override_key(core: &str) -> Option<&'static str> {
+    match core {
+        "dmxOutput" | "DmxOutput" => Some("dmx_output"),
+        "midiInput" | "MidiInput" => Some("midi_input"),
+        "midiOutput" | "MidiOutput" => Some("midi_output"),
+        "mscInput" | "MscInput" => Some("msc_input"),
+        "mscOutput" | "MscOutput" => Some("msc_output"),
+        "networkExternalInput" | "NetworkExternalInput" => Some("network_external_input"),
+        "timecodeInput" | "TimecodeInput" => Some("timecode_input"),
+        _ => None,
+    }
+}
+
+/// The `/overrides/{x}Enabled` form without `/toggle`: QLab's read form, which
+/// `CueQuery::parse` turns into a query rather than a command.
+fn override_enabled_key(name: &str) -> Option<&'static str> {
+    override_key(name.strip_suffix("Enabled")?)
+}
+
 fn parse_override_address(rest: &str, args: &[rosc::OscType]) -> OscAction<'static> {
     let (name, suffix) = match rest.split_once('/') {
         Some((name, suffix)) => (name, Some(suffix)),
@@ -905,26 +930,20 @@ fn parse_override_address(rest: &str, args: &[rosc::OscType]) -> OscAction<'stat
     if suffix.is_some() && suffix != Some("toggle") {
         return OscAction::Unmatched;
     }
-    let (core, toggle_name) = if let Some(core) = name.strip_prefix("toggle") {
+    let (core, mut toggle_name) = if let Some(core) = name.strip_prefix("toggle") {
         (core, true)
     } else if let Some(core) = name.strip_suffix("Enabled") {
         (core, false)
     } else {
         return OscAction::Unmatched;
     };
-    // The `toggle` prefix leaves the core capitalized ("DmxOutput"); the
-    // `Enabled` suffix form keeps QLab's camelCase ("dmxOutput").
-    let key = match core {
-        "dmxOutput" | "DmxOutput" => "dmx_output",
-        "midiInput" | "MidiInput" => "midi_input",
-        "midiOutput" | "MidiOutput" => "midi_output",
-        "mscInput" | "MscInput" => "msc_input",
-        "mscOutput" | "MscOutput" => "msc_output",
-        "networkExternalInput" | "NetworkExternalInput" => "network_external_input",
-        "timecodeInput" | "TimecodeInput" => "timecode_input",
-        _ => return OscAction::Unmatched,
+    toggle_name = toggle_name || suffix == Some("toggle");
+    let Some(key) = override_key(core) else {
+        return OscAction::Unmatched;
     };
     let value = match args {
+        // No argument on the `Enabled` form is the read, handled as a query.
+        [] if !toggle_name => return OscAction::Unmatched,
         [] => None,
         _ if toggle_name => return OscAction::Unmatched,
         [one] => match one {
@@ -1134,16 +1153,28 @@ enum CueQueryKind<'a> {
     CueLists,
     /// QLab `/cueList/{list_id}/playbackPosition`: the standby cue ID, or null.
     CueListPlaybackPosition(Uuid),
-    /// QLab app-level queries `/version` and `/workspaces` (never workspace-scoped).
+    /// QLab app-level queries (never workspace-scoped, always accepted).
     App(AppQueryKind),
+    /// QLab per-sender status reads: `/alwaysReply` and `/updates` without an argument.
+    Sender(SenderQuery),
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum AppQueryKind {
     /// QLab `/version`: the running app version string.
     Version,
-    /// QLab `/workspaces`: IDs of open workspaces; Inkue runs one per instance.
+    /// QLab `/workspaces`: one entry per open workspace; Inkue runs one per instance.
     Workspaces,
+    /// QLab `/overrides/{x}Enabled` read form: the current override state.
+    Override(&'static str),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SenderQuery {
+    /// QLab `/alwaysReply` read form: this sender's alwaysReply status.
+    AlwaysReplyStatus,
+    /// QLab `/updates` read form: this sender's subscription status.
+    UpdatesStatus,
 }
 
 struct CueQuery<'a> {
@@ -1159,15 +1190,24 @@ impl<'a> CueQuery<'a> {
         }
         let (workspace, path) = WorkspaceSelector::split_address(&message.addr)?;
         let path = path.strip_prefix('/')?;
-        // App-level queries `/version` and `/workspaces` exist only unscoped.
+        // App-level queries `/version`, `/workspaces` and `/overrides/{x}Enabled`
+        // exist only unscoped; QLab always accepts them, even without a passcode.
         if workspace.is_none() {
             if let Some(app) = match path {
                 "version" => Some(AppQueryKind::Version),
                 "workspaces" => Some(AppQueryKind::Workspaces),
-                _ => None,
+                _ => path.strip_prefix("overrides/").and_then(override_enabled_key).map(AppQueryKind::Override),
             } {
                 return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::App(app) });
             }
+        }
+        // `/alwaysReply` and `/updates` without an argument read the sender's status.
+        if let Some(sender) = match path {
+            "alwaysReply" => Some(SenderQuery::AlwaysReplyStatus),
+            "updates" => Some(SenderQuery::UpdatesStatus),
+            _ => None,
+        } {
+            return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::Sender(sender) });
         }
         // Workspace-level queries next: `/cueLists`, `/cueList/{id}/playbackPosition`.
         if path == "cueLists" {
@@ -1215,6 +1255,12 @@ impl<'a> CueQuery<'a> {
         })
     }
 
+    /// App-level and per-sender status queries carry no show data, so QLab
+    /// answers them at any access level (even with no passcode configured).
+    fn is_any_access(&self) -> bool {
+        matches!(self.kind, CueQueryKind::App(_) | CueQueryKind::Sender(_))
+    }
+
     fn is_single_datagram(&self, data: &[u8]) -> bool {
         // The decoder accepts some malformed empty type tags. Require the exact
         // address padding and zero-argument OSC type tag before returning data.
@@ -1224,16 +1270,40 @@ impl<'a> CueQuery<'a> {
             && data.get(end..) == Some(b",\0\0\0")
     }
 
-    fn read(&self, workspace: &Workspace) -> Option<serde_json::Value> {
-        if !matches!(self.kind, CueQueryKind::App(_)) && workspace.cue_lists.len() > MAX_SCOPED_ROWS {
+    fn read(&self, workspace: &Workspace, src: SocketAddr, port: u16) -> Option<serde_json::Value> {
+        if !self.is_any_access() && workspace.cue_lists.len() > MAX_SCOPED_ROWS {
             return None;
         }
         match &self.kind {
             CueQueryKind::App(AppQueryKind::Version) =>
                 Some(serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string())),
-            CueQueryKind::App(AppQueryKind::Workspaces) => Some(serde_json::Value::Array(vec![
-                serde_json::Value::String(workspace.instance_id().to_string()),
-            ])),
+            CueQueryKind::App(AppQueryKind::Workspaces) => {
+                // QLab shape: one dictionary per open workspace. Inkue replies
+                // to the requesting socket, so udpReplyPort is the sender's port.
+                let name = if !workspace.metadata.name.is_empty() {
+                    workspace.metadata.name.clone()
+                } else {
+                    workspace.file_path.as_deref()
+                        .and_then(|path| path.file_name())
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("Untitled")
+                        .to_string()
+                };
+                Some(serde_json::json!([{
+                    "uniqueID": workspace.instance_id().to_string(),
+                    "displayName": name,
+                    "port": port,
+                    "udpReplyPort": src.port(),
+                    "version": env!("CARGO_PKG_VERSION"),
+                }]))
+            }
+            CueQueryKind::App(AppQueryKind::Override(key)) => Some(serde_json::json!(
+                crate::engine::overrides::OVERRIDES.get(key).unwrap_or(true)
+            )),
+            CueQueryKind::Sender(SenderQuery::AlwaysReplyStatus) =>
+                Some(serde_json::json!(always_reply_enabled(src))),
+            CueQueryKind::Sender(SenderQuery::UpdatesStatus) =>
+                Some(serde_json::json!(crate::engine::osc_updates::is_subscribed(src))),
             CueQueryKind::CueLists => Some(serde_json::Value::Array(
                 workspace.cue_lists.iter().map(|list| serde_json::json!({
                     "id": list.id.to_string(),
@@ -1298,12 +1368,12 @@ impl<'a> CueQuery<'a> {
         }
     }
 
-    fn reply_data(&self, workspace: &Workspace) -> Option<(Uuid, Option<serde_json::Value>)> {
+    fn reply_data(&self, workspace: &Workspace, src: SocketAddr, port: u16) -> Option<(Uuid, Option<serde_json::Value>)> {
         let instance = workspace.instance_id();
         if self.workspace.is_some_and(|requested| !requested.matches(workspace)) {
             return None;
         }
-        Some((instance, self.read(workspace)))
+        Some((instance, self.read(workspace, src, port)))
     }
 
     fn encode_reply(&self, workspace_id: Uuid, data: Option<serde_json::Value>) -> Option<Vec<u8>> {
@@ -1351,12 +1421,16 @@ fn unique_workspace_cue(
     found
 }
 
-fn handle_query(query: CueQuery<'_>, handle: &tauri::AppHandle) -> Option<Vec<u8>> {
+fn handle_query(query: CueQuery<'_>, src: SocketAddr, handle: &tauri::AppHandle) -> Option<Vec<u8>> {
     let state = handle.try_state::<AppState>()?;
+    let port = match state.osc_server.status(false) {
+        Ok(OscListenerStatus::Listening { address }) => address.port(),
+        _ => 0,
+    };
     let (workspace_id, data) = {
         // A read never blocks show work. A busy desk sends no reply; the peer can retry.
         let workspace = state.workspace.try_lock().ok()?;
-        query.reply_data(&workspace)?
+        query.reply_data(&workspace, src, port)?
     };
     query.encode_reply(workspace_id, data)
 }
@@ -1377,6 +1451,9 @@ mod tests {
     fn query_packet(address: &str) -> Vec<u8> {
         rosc::encoder::encode(&rosc::OscPacket::Message(query_message(address))).unwrap()
     }
+
+    /// A stable fake sender address for query reads (below the ephemeral range).
+    fn peer() -> SocketAddr { (Ipv4Addr::LOCALHOST, 9).into() }
 
     #[test]
     fn query_scrutinizes_addresses_without_enabling_qlab_writes_or_text_queries() {
@@ -1416,7 +1493,7 @@ mod tests {
         workspace.cue_lists.push(other);
         workspace.cue_lists.last_mut().unwrap().set_playhead(None).unwrap();
 
-        let read = |address: &str| CueQuery::parse(&query_message(address)).unwrap().read(&workspace);
+        let read = |address: &str| CueQuery::parse(&query_message(address)).unwrap().read(&workspace, peer(), 0);
         let lists = read("/cueLists").unwrap();
         assert_eq!(lists.as_array().unwrap().len(), 2);
         assert_eq!(lists[0]["id"], active_id.to_string());
@@ -1430,9 +1507,9 @@ mod tests {
 
         // Workspace-scoped forms work; wrong workspace selector reads nothing.
         let scoped = format!("/workspace/Lists/cueLists");
-        assert_eq!(CueQuery::parse(&query_message(&scoped)).unwrap().read(&workspace).unwrap().as_array().unwrap().len(), 2);
+        assert_eq!(CueQuery::parse(&query_message(&scoped)).unwrap().read(&workspace, peer(), 0).unwrap().as_array().unwrap().len(), 2);
         let wrong = format!("/workspace/Other/cueLists");
-        assert!(CueQuery::parse(&query_message(&wrong)).unwrap().reply_data(&workspace).is_none());
+        assert!(CueQuery::parse(&query_message(&wrong)).unwrap().reply_data(&workspace, peer(), 0).is_none());
 
         // Unknown shapes stay unmatched.
         for address in ["/cueList/abc/playbackPosition", "/cueLists/extra", "/cueList/", "/cueLists 1"] {
@@ -1456,7 +1533,7 @@ mod tests {
         workspace.active_cue_list_mut().unwrap().push(Box::new(cue));
 
         let read = |address: &str| {
-            CueQuery::parse(&query_message(address)).unwrap().read(&workspace)
+            CueQuery::parse(&query_message(address)).unwrap().read(&workspace, peer(), 0)
         };
         assert_eq!(read("/cue/42/qName"), Some("LX warmup".into()));
         assert_eq!(read("/cue/42/armed"), Some(false.into()));
@@ -1482,7 +1559,7 @@ mod tests {
         list.push(Box::new(first));
 
         let read = |address: &str, workspace: &Workspace| {
-            CueQuery::parse(&query_message(address)).unwrap().read(workspace)
+            CueQuery::parse(&query_message(address)).unwrap().read(workspace, peer(), 0)
         };
         assert_eq!(read("/cue/playhead/number", &workspace), Some("101".into()));
         assert_eq!(read("/cue/101/isRunning", &workspace), Some(false.into()));
@@ -1515,7 +1592,7 @@ mod tests {
         list.push(Box::new(group));
         list.set_playhead(Some(last_id)).unwrap();
 
-        let read = |address: &str| CueQuery::parse(&query_message(address)).unwrap().read(&workspace);
+        let read = |address: &str| CueQuery::parse(&query_message(address)).unwrap().read(&workspace, peer(), 0);
         assert_eq!(read("/cue/playhead/number"), Some("3.2".into()));
         assert_eq!(read("/workspace/Deck/cue/playhead/uniqueID"), Some(last_id.to_string().into()));
         assert_eq!(read("/cue/3.2/isRunning"), None, "short numbered queries keep their scope");
@@ -1546,7 +1623,7 @@ mod tests {
         workspace.cue_lists.push(other_list);
 
         let query = |path: &str, workspace: &Workspace| {
-            CueQuery::parse(&query_message(path)).unwrap().reply_data(workspace)
+            CueQuery::parse(&query_message(path)).unwrap().reply_data(workspace, peer(), 0)
         };
         let scoped = |path| format!("/workspace/{}/cue/{path}", instance.to_string().to_uppercase());
         assert_eq!(query("/cue/102.1/uniqueID", &workspace), Some((instance, None)));
@@ -2088,7 +2165,7 @@ mod tests {
             protocol, protocol.settings(&config), || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
             |_, _, _| {},
-            |_| Some(rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
+            |_query, _src| Some(rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
                 addr: "/reply/cue/101/number".into(),
                 args: vec![rosc::OscType::String("canned".into())],
             })).unwrap()),
@@ -2165,14 +2242,21 @@ mod tests {
         let version_message = query_message("/version");
         let version = CueQuery::parse(&version_message).unwrap();
         assert!(matches!(version.kind, CueQueryKind::App(AppQueryKind::Version)));
-        assert_eq!(version.read(&workspace),
+        assert_eq!(version.read(&workspace, peer(), 0),
             Some(serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string())));
 
         let workspaces_message = query_message("/workspaces");
         let workspaces = CueQuery::parse(&workspaces_message).unwrap();
         assert!(matches!(workspaces.kind, CueQueryKind::App(AppQueryKind::Workspaces)));
-        assert_eq!(workspaces.read(&workspace),
-            Some(serde_json::json!([instance.to_string()])));
+        // QLab shape: an array of {uniqueID, displayName, port, udpReplyPort, version}.
+        // Inkue replies to the requesting socket, so udpReplyPort is the sender's port.
+        assert_eq!(workspaces.read(&workspace, peer(), 53000), Some(serde_json::json!([{
+            "uniqueID": instance.to_string(),
+            "displayName": "App query rehearsal",
+            "port": 53000,
+            "udpReplyPort": 9,
+            "version": env!("CARGO_PKG_VERSION"),
+        }])));
 
         // App-level queries are never workspace-scoped, take no arguments,
         // and are not accepted on the plain-text command port.
@@ -2186,7 +2270,7 @@ mod tests {
         assert!(parse_text_message(b"/workspaces").is_none());
 
         // Replies keep the standard query envelope at /reply{address}.
-        let bytes = version.encode_reply(instance, version.read(&workspace)).unwrap();
+        let bytes = version.encode_reply(instance, version.read(&workspace, peer(), 0)).unwrap();
         let (remaining, rosc::OscPacket::Message(message)) = rosc::decoder::decode_udp(&bytes).unwrap() else {
             panic!("expected a single OSC reply");
         };
@@ -2197,6 +2281,114 @@ mod tests {
             "workspace_id": instance, "address": "/version", "status": "ok",
             "data": env!("CARGO_PKG_VERSION"),
         }));
+    }
+
+    #[test]
+    fn always_reply_and_updates_have_per_sender_read_forms() {
+        let workspace = Workspace::new("Sender status");
+        // Port 11: the registry TTL test owns ports 9/10 in the shared map.
+        let sender_peer: SocketAddr = (Ipv4Addr::LOCALHOST, 11).into();
+
+        let ar_message = query_message("/alwaysReply");
+        let ar = CueQuery::parse(&ar_message).unwrap();
+        assert!(matches!(ar.kind, CueQueryKind::Sender(SenderQuery::AlwaysReplyStatus)));
+        assert_eq!(ar.read(&workspace, sender_peer, 0), Some(serde_json::json!(false)));
+        set_always_reply(sender_peer, true);
+        assert_eq!(ar.read(&workspace, sender_peer, 0), Some(serde_json::json!(true)));
+        set_always_reply(sender_peer, false);
+        assert_eq!(ar.read(&workspace, sender_peer, 0), Some(serde_json::json!(false)));
+
+        let up_message = query_message("/updates");
+        let up = CueQuery::parse(&up_message).unwrap();
+        assert!(matches!(up.kind, CueQueryKind::Sender(SenderQuery::UpdatesStatus)));
+        assert_eq!(up.read(&workspace, sender_peer, 0), Some(serde_json::json!(false)));
+        crate::engine::osc_updates::set_subscription(sender_peer, true);
+        assert_eq!(up.read(&workspace, sender_peer, 0), Some(serde_json::json!(true)));
+        crate::engine::osc_updates::set_subscription(sender_peer, false);
+
+        // Scoped forms read the same sender status once the workspace matches.
+        let scoped = format!("/workspace/{}/updates", workspace.instance_id());
+        let scoped_message = query_message(&scoped);
+        let scoped_query = CueQuery::parse(&scoped_message).unwrap();
+        assert!(matches!(scoped_query.kind, CueQueryKind::Sender(SenderQuery::UpdatesStatus)));
+
+        // The write forms (one argument) stay commands, not queries.
+        let mut write = query_message("/alwaysReply");
+        write.args.push(rosc::OscType::Int(1));
+        assert!(CueQuery::parse(&write).is_none());
+        assert!(matches!(resolve_action("/alwaysReply", &[rosc::OscType::Int(1)]), OscAction::AlwaysReply(true)));
+        let mut write_updates = query_message("/updates");
+        write_updates.args.push(rosc::OscType::Int(1));
+        assert!(CueQuery::parse(&write_updates).is_none());
+
+        // Sender status reads are any-access, like the app queries; cue queries are not.
+        assert!(ar.is_any_access() && up.is_any_access());
+        assert!(!CueQuery::parse(&query_message("/cue/1/number")).unwrap().is_any_access());
+    }
+
+    #[test]
+    fn override_enabled_read_forms_are_app_queries_and_writes_stay_commands() {
+        let workspace = Workspace::new("Override reads");
+
+        let read_message = query_message("/overrides/dmxOutputEnabled");
+        let read = CueQuery::parse(&read_message).unwrap();
+        assert!(matches!(read.kind, CueQueryKind::App(AppQueryKind::Override("dmx_output"))));
+        assert!(read.read(&workspace, peer(), 0).unwrap().is_boolean(),
+            "the read returns the current override state");
+        assert!(read.is_any_access());
+
+        // Writes and toggles stay commands; the no-arg Enabled form no longer toggles.
+        let mut write = query_message("/overrides/dmxOutputEnabled");
+        write.args.push(rosc::OscType::Int(1));
+        assert!(CueQuery::parse(&write).is_none());
+        assert!(matches!(resolve_action("/overrides/dmxOutputEnabled", &[rosc::OscType::Int(1)]),
+            OscAction::SetOverride { key: "dmx_output", value: Some(true) }));
+        assert!(matches!(resolve_action("/overrides/dmxOutputEnabled", &[]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/overrides/toggleDmxOutput", &[]),
+            OscAction::SetOverride { key: "dmx_output", value: None }));
+        assert!(CueQuery::parse(&query_message("/overrides/toggleDmxOutput")).is_none());
+        assert!(CueQuery::parse(&query_message("/overrides/bogusEnabled")).is_none());
+        assert!(CueQuery::parse(&query_message("/workspace/Blue/overrides/dmxOutputEnabled")).is_none());
+    }
+
+    #[test]
+    fn app_and_sender_status_queries_answer_even_without_an_allowlist() {
+        let (status_tx, statuses) = crossbeam_channel::unbounded();
+        let (seen_tx, seen) = crossbeam_channel::unbounded();
+        let protocol = Protocol::Osc;
+        let config = OscReceiveConfig { enabled: true, port: 0, ..OscReceiveConfig::default() };
+        let listener = Listener::spawn(
+            protocol, protocol.settings(&config), || Ipv4Addr::LOCALHOST.into(),
+            move |status| { let _ = status_tx.send(status.clone()); },
+            |_, _, _| {},
+            move |query, _src| {
+                let _ = seen_tx.send(query.address.to_string());
+                Some(query_packet(&format!("/reply{}", query.address)))
+            },
+        );
+        let OscListenerStatus::Listening { address } = statuses.recv_timeout(Duration::from_secs(2)).unwrap() else {
+            panic!("expected an OSC socket");
+        };
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        sender.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut response = [0; 1024];
+
+        // QLab always accepts the app-level and sender-status reads, no passcode needed.
+        for query in ["/version", "/workspaces", "/alwaysReply", "/updates", "/overrides/dmxOutputEnabled"] {
+            sender.send_to(&query_packet(query), address).unwrap();
+            assert_eq!(seen.recv_timeout(Duration::from_secs(2)).unwrap(), query);
+            let (length, _origin) = sender.recv_from(&mut response).unwrap();
+            let (_, rosc::OscPacket::Message(message)) = rosc::decoder::decode_udp(&response[..length]).unwrap() else {
+                panic!("expected a single OSC reply");
+            };
+            assert_eq!(message.addr, format!("/reply{query}"));
+        }
+        // Show-data queries still require the allowlist.
+        sender.send_to(&query_packet("/cue/101/number"), address).unwrap();
+        sender.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        assert!(sender.recv_from(&mut response).is_err());
+        assert!(seen.recv_timeout(Duration::from_millis(300)).is_err());
+        listener.stop();
     }
 
     #[test]
@@ -2214,7 +2406,7 @@ mod tests {
             protocol, protocol.settings(&config), || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
             |_, _, _| {},
-            move |query| {
+            move |query, _src| {
                 let _ = seen_tx.send(query.address.to_string());
                 Some(query_packet(&format!("/reply{}", query.address)))
             },
@@ -2263,10 +2455,10 @@ mod tests {
         let address = format!("/workspace/{}/cue/1/number", workspace.instance_id());
         let message = query_message(&address);
         let query = CueQuery::parse(&message).unwrap();
-        assert_eq!(query.read(&workspace), Some("1".into()));
+        assert_eq!(query.read(&workspace, peer(), 0), Some("1".into()));
         let list = workspace.active_cue_list_mut().unwrap();
         list.get_mut_recursive(&group_id).unwrap().child_cues_mut().unwrap().push(Box::new(MemoCue::new()));
-        assert_eq!(query.read(&workspace), None);
+        assert_eq!(query.read(&workspace, peer(), 0), None);
     }
 
     #[test]
@@ -2279,7 +2471,7 @@ mod tests {
             protocol, protocol.settings(&config), || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
             |_, _, _| {},
-            move |query| query.encode_reply(instance, Some(false.into())),
+            move |query, _src| query.encode_reply(instance, Some(false.into())),
         );
         let OscListenerStatus::Listening { address } = statuses.recv_timeout(Duration::from_secs(2)).unwrap() else {
             panic!("expected an OSC socket");
@@ -2352,7 +2544,7 @@ mod tests {
             || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
             move |packet, explicitly_allowed, _src| { let _ = packet_tx.send((packet.clone(), explicitly_allowed)); },
-            |_| None,
+            |_query, _src| None,
         );
         let timeout = Duration::from_secs(2);
         assert!(matches!(
@@ -2388,7 +2580,7 @@ mod tests {
             || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
             |_, _, _| {},
-            |_| None,
+            |_query, _src| None,
         );
         let timeout = Duration::from_secs(2);
         assert_eq!(statuses.recv_timeout(timeout).unwrap(), OscListenerStatus::Disabled);
@@ -2471,7 +2663,7 @@ mod tests {
             || Ipv4Addr::LOCALHOST.into(),
             move |status| { let _ = status_tx.send(status.clone()); },
             move |packet, _, _src| { let _ = packet_tx.send(packet.clone()); },
-            |_| None,
+            |_query, _src| None,
         );
         let timeout = Duration::from_secs(2);
         let OscListenerStatus::Listening { address } = statuses.recv_timeout(timeout).unwrap() else {

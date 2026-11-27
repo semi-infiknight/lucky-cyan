@@ -24,6 +24,15 @@ pub fn set_subscription(addr: SocketAddr, on: bool) {
     }
 }
 
+/// Is this sender currently subscribed? Also prunes expired entries.
+pub fn is_subscribed(addr: SocketAddr) -> bool {
+    let Ok(mut guard) = SUBSCRIBERS.lock() else { return false };
+    let Some(map) = guard.as_mut() else { return false };
+    let now = Instant::now();
+    map.retain(|_, seen| now.duration_since(*seen) < SUBSCRIBER_TTL);
+    map.contains_key(&addr)
+}
+
 /// Any live subscriber? Also prunes expired ones.
 pub fn has_subscribers() -> bool {
     let Ok(mut guard) = SUBSCRIBERS.lock() else { return false };
