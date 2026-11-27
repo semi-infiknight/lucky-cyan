@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -843,7 +844,8 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
                 || address == "/udpReplyPort" || address.ends_with("/udpReplyPort")
                 || address == "/overrideWindow" || address.ends_with("/overrideWindow")
                 || address == "/replyFormat" || address.ends_with("/replyFormat")
-                || address == "/eventFormat" || address.ends_with("/eventFormat") => {
+                || address == "/eventFormat" || address.ends_with("/eventFormat")
+                || address == "/workingDirectory" => {
                 match one.parse::<f64>() {
                     Ok(value) if (value * 1000.0).is_finite() => vec![rosc::OscType::Double(value)],
                     _ => vec![rosc::OscType::String((*one).to_owned())],
@@ -904,6 +906,8 @@ enum OscAction<'a> {
     Broadcast { listen: bool, event: Option<String> },
     /// QLab `/eventFormat {string}`: custom show-control broadcast format.
     SetEventFormat(String),
+    /// QLab `/workingDirectory {path}`: set the application working directory.
+    SetWorkingDirectory(String),
     /// Trigger a full cue-list feedback dump.
     CueListRequest,
     /// Trigger a playhead feedback dump.
@@ -1033,6 +1037,15 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, src: SocketA
             crate::engine::osc_broadcast::set_event_format(src, Some(format));
             (true, false)
         }
+        OscAction::SetWorkingDirectory(path) => {
+            match set_working_directory(&path) {
+                Ok(_) => (true, false),
+                Err(error) => {
+                    log::warn!("OSC /workingDirectory rejected: {error}");
+                    (false, false)
+                }
+            }
+        }
         OscAction::Command(payload) => {
             let _ = app_handle.emit("osc-command", &payload);
             (true, true)
@@ -1083,7 +1096,8 @@ fn authorized_action<'a>(addr: &'a str, args: &[rosc::OscType], explicitly_allow
         | OscAction::AddressedCuePattern { workspace: Some(_), .. }
         | OscAction::AddressedCuePattern { action: NetworkCueAction::Reset, .. }
         | OscAction::WorkspaceTransport { .. }
-        | OscAction::SetOverride { .. } if !explicitly_allowed => OscAction::Unmatched,
+        | OscAction::SetOverride { .. }
+        | OscAction::SetWorkingDirectory(_) if !explicitly_allowed => OscAction::Unmatched,
         // Property writes edit saved show data: control-level only.
         OscAction::AddressedCue { action, .. }
         | OscAction::AddressedCuePattern { action, .. } if !explicitly_allowed && action.is_write() => OscAction::Unmatched,
@@ -1283,7 +1297,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         .is_some_and(|(_, verb)| {
             let core = verb.split('/').next().unwrap_or(verb);
             matches!(core, "preWait" | "postWait" | "armed" | "qName" | "continueMode"
-                | "notes" | "colorName" | "flagged" | "load")
+                | "notes" | "colorName" | "flagged" | "load" | "panic")
         });
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
@@ -1292,7 +1306,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         || addr == "/udpReplyPort" || addr.ends_with("/udpReplyPort")
         || addr == "/overrideWindow" || addr.ends_with("/overrideWindow")
         || addr == "/replyFormat" || addr.ends_with("/replyFormat")
-        || addr == "/eventFormat" || addr.ends_with("/eventFormat");
+        || addr == "/eventFormat" || addr.ends_with("/eventFormat")
+        || addr == "/workingDirectory";
     if !args.is_empty() && !cue_write && !updates_arg {
         return OscAction::Unmatched;
     }
@@ -1375,6 +1390,15 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         let _ = workspace;
         return match args {
             [rosc::OscType::String(format)] => OscAction::SetEventFormat(format.clone()),
+            _ => OscAction::Unmatched,
+        };
+    }
+    // QLab `/workingDirectory {path}` (application-level, unscoped only); the
+    // no-argument form is the read (a query).
+    if addr == "/workingDirectory" {
+        let _ = workspace;
+        return match args {
+            [rosc::OscType::String(path)] => OscAction::SetWorkingDirectory(path.clone()),
             _ => OscAction::Unmatched,
         };
     }
@@ -1468,6 +1492,16 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             "hardStop" if args.is_empty() => (id, NetworkCueAction::HardStop),
             "devamp" if args.is_empty() => (id, NetworkCueAction::Devamp),
             "togglePause" if args.is_empty() => (id, NetworkCueAction::SetPause(NetworkPauseAction::Toggle)),
+            // QLab `/cue_id/{id}/panic [seconds]`: fade out and stop; a second
+            // panic while fading hard-stops immediately.
+            "panic" => match args {
+                [] => (id, NetworkCueAction::Panic(None)),
+                [one] => match numeric_arg(std::slice::from_ref(one)) {
+                    Some(secs) if secs.is_finite() && secs >= 0.0 => (id, NetworkCueAction::Panic(Some(secs))),
+                    _ => return OscAction::Unmatched,
+                },
+                _ => return OscAction::Unmatched,
+            },
             "load" => match args {
                 [] => (id, NetworkCueAction::Load(0.0)),
                 [one] => match numeric_arg(std::slice::from_ref(one)) {
@@ -1492,6 +1526,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
                 "resume" if args.is_empty() => NetworkCueAction::SetPause(NetworkPauseAction::Resume),
                 "hardStop" if args.is_empty() => NetworkCueAction::HardStop,
                 "togglePause" if args.is_empty() => NetworkCueAction::SetPause(NetworkPauseAction::Toggle),
+                "panic" if args.is_empty() => NetworkCueAction::Panic(None),
                 verb => match cue_write_action(verb, args) {
                     Some(write) if write.is_write() => write,
                     _ => return OscAction::Unmatched,
@@ -1511,6 +1546,15 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             "hardStop" if args.is_empty() => (number, NetworkCueAction::HardStop),
             "devamp" if args.is_empty() => (number, NetworkCueAction::Devamp),
             "togglePause" if args.is_empty() => (number, NetworkCueAction::SetPause(NetworkPauseAction::Toggle)),
+            // QLab `/cue/{n}/panic [seconds]`: fade out and stop the cue.
+            "panic" => match args {
+                [] => (number, NetworkCueAction::Panic(None)),
+                [one] => match numeric_arg(std::slice::from_ref(one)) {
+                    Some(secs) if secs.is_finite() && secs >= 0.0 => (number, NetworkCueAction::Panic(Some(secs))),
+                    _ => return OscAction::Unmatched,
+                },
+                _ => return OscAction::Unmatched,
+            },
             "load" => match args {
                 [] => (number, NetworkCueAction::Load(0.0)),
                 [one] => match numeric_arg(std::slice::from_ref(one)) {
@@ -1863,6 +1907,12 @@ enum AppQueryKind {
     Override(&'static str),
     /// QLab `/overrideWindow` read form: is the Override window visible?
     OverrideWindow,
+    /// QLab `/fontNames`: array of installed font names.
+    FontNames,
+    /// QLab `/fontFamiliesAndStyles`: dictionary of family → styles array.
+    FontFamiliesAndStyles,
+    /// QLab `/workingDirectory` read form: the current working directory.
+    WorkingDirectory,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1887,6 +1937,52 @@ struct CueQuery<'a> {
     kind: CueQueryKind<'a>,
 }
 
+/// QLab `/workingDirectory`: the explicitly set directory, if any. The read
+/// form falls back to the open workspace's folder, then the user's home.
+static WORKING_DIRECTORY: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+fn home_directory() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn working_directory(workspace: &Workspace) -> PathBuf {
+    if let Ok(guard) = WORKING_DIRECTORY.lock() {
+        if let Some(path) = guard.as_ref() {
+            return path.clone();
+        }
+    }
+    workspace
+        .file_path
+        .as_deref()
+        .and_then(|path| path.parent().map(PathBuf::from))
+        .unwrap_or_else(home_directory)
+}
+
+/// QLab `/workingDirectory {path}` write: tilde expands to the home directory;
+/// the target must be an existing directory. Control-level (allowlist) only.
+fn set_working_directory(path: &str) -> Result<PathBuf, String> {
+    let expanded = if path == "~" {
+        home_directory()
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        home_directory().join(rest)
+    } else {
+        PathBuf::from(path)
+    };
+    let canonical = expanded
+        .canonicalize()
+        .map_err(|error| format!("working directory {path:?}: {error}"))?;
+    if !canonical.is_dir() {
+        return Err(format!("working directory {path:?} is not a directory"));
+    }
+    if let Ok(mut guard) = WORKING_DIRECTORY.lock() {
+        *guard = Some(canonical.clone());
+    }
+    Ok(canonical)
+}
+
 impl<'a> CueQuery<'a> {
     fn parse(message: &'a rosc::OscMessage) -> Option<Self> {
         if !message.args.is_empty() {
@@ -1901,6 +1997,9 @@ impl<'a> CueQuery<'a> {
                 "version" => Some(AppQueryKind::Version),
                 "workspaces" => Some(AppQueryKind::Workspaces),
                 "overrideWindow" => Some(AppQueryKind::OverrideWindow),
+                "fontNames" => Some(AppQueryKind::FontNames),
+                "fontFamiliesAndStyles" => Some(AppQueryKind::FontFamiliesAndStyles),
+                "workingDirectory" => Some(AppQueryKind::WorkingDirectory),
                 _ => path.strip_prefix("overrides/").and_then(override_enabled_key).map(AppQueryKind::Override),
             } {
                 return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::App(app) });
@@ -2016,6 +2115,18 @@ impl<'a> CueQuery<'a> {
             )),
             CueQueryKind::App(AppQueryKind::OverrideWindow) =>
                 Some(serde_json::json!(crate::engine::overrides::OVERRIDES.override_window())),
+            CueQueryKind::App(AppQueryKind::FontNames) =>
+                Some(serde_json::json!(crate::commands::preferences_cmds::list_system_fonts())),
+            CueQueryKind::App(AppQueryKind::FontFamiliesAndStyles) => {
+                let families = crate::commands::preferences_cmds::font_families_and_styles();
+                let map: serde_json::Map<String, serde_json::Value> = families
+                    .into_iter()
+                    .map(|(family, styles)| (family, serde_json::json!(styles)))
+                    .collect();
+                Some(serde_json::Value::Object(map))
+            }
+            CueQueryKind::App(AppQueryKind::WorkingDirectory) =>
+                Some(serde_json::Value::String(working_directory(workspace).to_string_lossy().into_owned())),
             CueQueryKind::Sender(SenderQuery::AlwaysReply) =>
                 Some(serde_json::json!(always_reply_enabled(src))),
             CueQueryKind::Sender(SenderQuery::Updates) =>
@@ -2801,7 +2912,7 @@ mod tests {
         let d = |v: f64| rosc::OscType::Double(v);
         let s = |v: &str| rosc::OscType::String(v.to_owned());
 
-        assert!(matches!(resolve_action("/cue/5/preWait", &[d(2.5)]),
+        assert!(matches!(resolve_action("/cue/5/preWait", &[rosc::OscType::Double(2.5)]),
             OscAction::AddressedCue { number: "5", action: NetworkCueAction::SetPreWait(v), .. } if v == 2.5));
         assert!(matches!(resolve_action("/cue/5/postWait", &[d(0.0)]),
             OscAction::AddressedCue { action: NetworkCueAction::SetPostWait(0.0), .. }));
@@ -2820,9 +2931,9 @@ mod tests {
         // Bad or missing arguments stay unmatched, and so do writes on verbs that take none.
         for (address, args) in [
             ("/cue/5/preWait", &[][..]),
-            ("/cue/5/preWait", &[d(-1.0)][..]),
+            ("/cue/5/preWait", &[rosc::OscType::Double(-1.0)][..]),
             ("/cue/5/preWait", &[d(f64::NAN)][..]),
-            ("/cue/5/preWait", &[d(1.0), d(2.0)][..]),
+            ("/cue/5/preWait", &[rosc::OscType::Double(1.0), rosc::OscType::Double(2.0)][..]),
             ("/cue/5/start", &[d(1.0)][..]),
             ("/cue/5/armed", &[s("maybe")][..]),
             ("/cue/5/qName", &[s("")][..]),
@@ -2940,7 +3051,7 @@ mod tests {
         // Invalid forms stay unmatched.
         for (address, args) in [
             ("/cue/5/preWait/+", &[][..]),
-            ("/cue/5/preWait/+", &[d(1.0), d(2.0)][..]),
+            ("/cue/5/preWait/+", &[rosc::OscType::Double(1.0), rosc::OscType::Double(2.0)][..]),
             ("/cue/5/preWait/+/1", &[d(1.0)][..]),
             ("/cue/5/preWait/+/abc", &[][..]),
             ("/cue/5/preWait/+", &[d(f64::NAN)][..]),
@@ -2994,6 +3105,73 @@ mod tests {
 
         // /panic is now its own transport action (broadcasts panicAll).
         assert!(matches!(resolve_action("/panic", &[]), OscAction::WorkspaceTransport { action: NetworkWorkspaceAction::Panic, .. }));
+    }
+
+    #[test]
+    fn qlab_cue_panic_verbs_and_app_font_and_working_directory_messages_resolve() {
+        // Cue-level /panic with an optional non-negative duration, by number,
+        // by uniqueID, and on wildcards (no argument there).
+        assert!(matches!(resolve_action("/cue/5/panic", &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::Panic(None), number: "5", .. }));
+        assert!(matches!(resolve_action("/cue/5/panic", &[rosc::OscType::Double(2.5)]),
+            OscAction::AddressedCue { action: NetworkCueAction::Panic(Some(v)), .. } if v == 2.5));
+        assert!(matches!(resolve_action("/cue/5/panic", &[rosc::OscType::Int(0)]),
+            OscAction::AddressedCue { action: NetworkCueAction::Panic(Some(0.0)), .. }));
+        for args in [&[rosc::OscType::Double(-1.0)][..], &[rosc::OscType::String("x".into())][..], &[rosc::OscType::Double(1.0), rosc::OscType::Double(2.0)][..]] {
+            assert!(matches!(resolve_action("/cue/5/panic", args), OscAction::Unmatched), "{args:?}");
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(resolve_action(&format!("/cue_id/{id}/panic"), &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::Panic(None), .. }));
+        assert!(matches!(resolve_action("/cue/*/panic", &[]),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::Panic(None), .. }));
+        assert!(matches!(resolve_action("/cue/*/panic", &[rosc::OscType::Double(1.0)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/playhead/panic", &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::Panic(None), number: "playhead", .. }));
+        // Panic is a transport action: any access when unscoped, not a write.
+        assert!(matches!(authorized_action("/cue/5/panic", &[], false),
+            OscAction::AddressedCue { action: NetworkCueAction::Panic(None), .. }));
+        assert!(!NetworkCueAction::Panic(None).is_write());
+        assert!(parse_text_message(b"/cue/5/panic").is_some());
+        assert!(parse_text_message(b"/cue/5/panic 2").is_some());
+
+        // App-level font and working-directory queries: any access, readable.
+        let workspace = Workspace::new("Blue");
+        let src: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let names_msg = query_message("/fontNames");
+        let names = CueQuery::parse(&names_msg).unwrap();
+        assert!(matches!(names.kind, CueQueryKind::App(AppQueryKind::FontNames)));
+        assert!(names.is_any_access());
+        assert!(names.read(&workspace, src, 53000).unwrap().is_array());
+        let families_msg = query_message("/fontFamiliesAndStyles");
+        let families = CueQuery::parse(&families_msg).unwrap();
+        assert!(matches!(families.kind, CueQueryKind::App(AppQueryKind::FontFamiliesAndStyles)));
+        assert!(families.read(&workspace, src, 53000).unwrap().is_object());
+        let wd_msg = query_message("/workingDirectory");
+        let wd = CueQuery::parse(&wd_msg).unwrap();
+        assert!(matches!(wd.kind, CueQueryKind::App(AppQueryKind::WorkingDirectory)));
+        assert!(wd.read(&workspace, src, 53000).unwrap().is_string());
+
+        // /workingDirectory write: one string arg, control-level only.
+        assert!(matches!(
+            resolve_action("/workingDirectory", &[rosc::OscType::String("/tmp".into())]),
+            OscAction::SetWorkingDirectory(ref p) if p == "/tmp"));
+        assert!(matches!(resolve_action("/workingDirectory", &[]), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/workingDirectory", &[rosc::OscType::String("/tmp".into())], false),
+            OscAction::Unmatched));
+        assert!(matches!(authorized_action("/workingDirectory", &[rosc::OscType::String("/tmp".into())], true),
+            OscAction::SetWorkingDirectory(_)));
+        assert!(parse_text_message(b"/workingDirectory /tmp").is_some());
+
+        // The write validates (existing directory) and tilde expands to home.
+        let dir = std::env::temp_dir();
+        let set = set_working_directory(dir.to_str().unwrap()).unwrap();
+        assert!(set.is_dir());
+        assert_eq!(working_directory(&workspace), set);
+        assert!(set_working_directory("/definitely/not/a/real/dir/xyz").is_err());
+        let home = set_working_directory("~").unwrap();
+        assert!(home.is_dir());
+        let _ = set_working_directory(dir.to_str().unwrap());
     }
 
     #[test]
@@ -3311,10 +3489,10 @@ mod tests {
         assert!(matches!(resolve_action("/cue/*/togglePause", &[]),
             OscAction::AddressedCuePattern { action: NetworkCueAction::SetPause(Toggle), .. }));
         assert!(matches!(resolve_action("/cue/*/devamp", &[]), OscAction::Unmatched));
-        assert!(matches!(resolve_action("/cue/*/load", &[d(1.0)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/*/load", &[rosc::OscType::Double(1.0)]), OscAction::Unmatched));
         // Arguments on no-arg verbs and malformed load args are rejected.
-        assert!(matches!(resolve_action("/cue/5/hardStop", &[d(1.0)]), OscAction::Unmatched));
-        assert!(matches!(resolve_action("/cue/5/devamp", &[d(1.0)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/hardStop", &[rosc::OscType::Double(1.0)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/devamp", &[rosc::OscType::Double(1.0)]), OscAction::Unmatched));
         assert!(matches!(resolve_action("/cue/5/load", &[d(f64::NAN)]), OscAction::Unmatched));
         assert!(matches!(resolve_action("/cue/5/load", &[d(1.0), d(2.0)]), OscAction::Unmatched));
         // Actions are not saved-field writes: any access level, like start/stop.

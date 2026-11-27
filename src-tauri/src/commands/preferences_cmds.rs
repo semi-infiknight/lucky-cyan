@@ -433,6 +433,62 @@ pub fn list_system_fonts() -> Vec<String> {
     }
 }
 
+/// Parse `fc-list : family style` output (`Family,Alias:style=Regular`) into
+/// family → sorted style list. Pure so the QLab `/fontFamiliesAndStyles` query
+/// can be tested without fontconfig installed.
+fn parse_fc_list_families_styles(output: &str) -> Vec<(String, Vec<String>)> {
+    let mut map: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = Default::default();
+    for line in output.lines() {
+        let Some((families, style)) = line.rsplit_once(":style=") else { continue };
+        let style = style.trim();
+        if style.is_empty() { continue; }
+        for family in families.split(',') {
+            let family = family.trim();
+            if family.is_empty() { continue; }
+            map.entry(family.to_owned()).or_default().insert(style.to_owned());
+        }
+    }
+    map.into_iter().map(|(family, styles)| (family, styles.into_iter().collect())).collect()
+}
+
+/// Font family names paired with their available styles, for QLab's
+/// `/fontFamiliesAndStyles` application query. Unix: fontconfig `fc-list`
+/// (empty when fontconfig is unavailable, same fallback as the font picker).
+/// Windows: GDI face names grouped by stripping a trailing style word.
+pub fn font_families_and_styles() -> Vec<(String, Vec<String>)> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let output = match std::process::Command::new("fc-list").arg(":").arg("family").arg("style").output() {
+            Ok(o) if o.status.success() => o,
+            _ => return Vec::new(),
+        };
+        parse_fc_list_families_styles(&String::from_utf8_lossy(&output.stdout))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        const STYLE_WORDS: [&str; 10] = [
+            "Bold Italic", "Bold Oblique", "Bold", "Italic", "Oblique", "Light", "Medium",
+            "SemiBold", "DemiBold", "Regular",
+        ];
+        let mut map: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = Default::default();
+        for face in list_system_fonts() {
+            let mut family = face.clone();
+            let mut style = "Regular".to_owned();
+            for word in STYLE_WORDS {
+                if let Some(prefix) = face.strip_suffix(word) {
+                    if !prefix.trim().is_empty() {
+                        family = prefix.trim().to_owned();
+                        style = word.to_owned();
+                        break;
+                    }
+                }
+            }
+            map.entry(family).or_default().insert(style);
+        }
+        map.into_iter().map(|(family, styles)| (family, styles.into_iter().collect())).collect()
+    }
+}
+
 /// Return all available audio output devices for the given backend.
 ///
 /// Enumeration runs **off the main thread** (async command → `spawn_blocking`)
@@ -608,4 +664,23 @@ pub fn open_preferences_window(app_handle: AppHandle) -> Result<(), String> {
     w.show().map_err(|e| e.to_string())?;
     w.set_focus().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_fc_list_families_styles;
+
+    #[test]
+    fn fc_list_family_style_lines_group_into_families() {
+        let parsed = parse_fc_list_families_styles(
+            "DejaVu Sans:style=Book\nDejaVu Sans,DejaVu:style=Bold\nNoStyleLine\n:style=Regular\n",
+        );
+        assert_eq!(
+            parsed,
+            vec![
+                ("DejaVu".to_owned(), vec!["Bold".to_owned()]),
+                ("DejaVu Sans".to_owned(), vec!["Bold".to_owned(), "Book".to_owned()]),
+            ]
+        );
+    }
 }

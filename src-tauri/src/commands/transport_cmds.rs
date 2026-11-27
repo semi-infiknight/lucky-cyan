@@ -1,6 +1,8 @@
 //! Tauri commands for transport control (GO, STOP, PAUSE, RESUME).
 
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 
 use tauri::{Emitter, State};
 use uuid::Uuid;
@@ -209,6 +211,9 @@ pub(crate) enum NetworkCueAction {
     HardStop,
     /// QLab `/cue/{n}/devamp`: exit the loop at the end of the current pass.
     Devamp,
+    /// QLab `/cue/{n}/panic [seconds]`: fade out and stop the cue; `Some(0)`
+    /// or a second panic while the fade runs hard-stops immediately.
+    Panic(Option<f64>),
     /// QLab `/cue/{n}/load {seconds}`: arm at a time (negative counts from the end).
     Load(f64),
     Reset,
@@ -287,12 +292,18 @@ pub(crate) fn address_numbered_network_cue(
         NetworkCueAction::Select => super::cue_cmds::set_playhead_in_list(cue_list, Some(id), app_handle),
         NetworkCueAction::Stop => stop_cue_in_list(&mut transport, cue_list, id, app_handle),
         NetworkCueAction::HardStop => {
+            clear_panicking(&id);
             let result = transport.hard_stop_cue(cue_list, &id).map_err(|error| error.to_string());
             let _ = app_handle.emit("cue-list-refresh", ());
             result
         }
         NetworkCueAction::Devamp => {
             let result = transport.devamp_cue(cue_list, id).map(|_| ()).map_err(|error| error.to_string());
+            let _ = app_handle.emit("cue-list-refresh", ());
+            result
+        }
+        NetworkCueAction::Panic(duration) => {
+            let result = panic_cue_in_list(&mut transport, cue_list, id, *duration, app_handle);
             let _ = app_handle.emit("cue-list-refresh", ());
             result
         }
@@ -344,7 +355,12 @@ pub(crate) fn address_network_cue_pattern(
             }
             NetworkCueAction::HardStop => {
                 let list = &mut ws.cue_lists[index];
+                clear_panicking(&id);
                 transport.hard_stop_cue(list, &id).map_err(|error| error.to_string())
+            }
+            NetworkCueAction::Panic(duration) => {
+                let list = &mut ws.cue_lists[index];
+                panic_cue_in_list(&mut transport, list, id, *duration, app_handle)
             }
             NetworkCueAction::Reset => {
                 let list = &mut ws.cue_lists[index];
@@ -956,6 +972,7 @@ fn reset_workspace_locked(
     emit_playhead(app_handle, standby);
     broadcast_bare_event(show, "resetAll");
     broadcast_msc(show, crate::cue::msc::MscCommand::Reset, "");
+    clear_all_panicking();
     Ok(())
 }
 
@@ -1024,6 +1041,7 @@ pub(super) fn stop_locked(state: &AppState, app_handle: &tauri::AppHandle, ws: &
     broadcast_bare_event(ws, if hard { "hardStopAll" } else { "stopAll" });
     // QLab MSC broadcast: Stop All and HardStop All both send ALL_OFF.
     broadcast_msc(ws, crate::cue::msc::MscCommand::AllOff, "");
+    clear_all_panicking();
     Ok(())
 }
 
@@ -1043,12 +1061,76 @@ pub fn stop_cue(
     stop_cue_in_list(&mut transport, cue_list, id, &app_handle)
 }
 
+/// Cue IDs currently fading out from a QLab `/cue/{n}/panic`: a second panic
+/// while the fade runs hard-stops immediately (QLab behavior).
+static PANICKING: Mutex<Option<HashSet<CueId>>> = Mutex::new(None);
+
+fn panicking_contains(id: &CueId) -> bool {
+    match PANICKING.lock() {
+        Ok(guard) => guard.as_ref().is_some_and(|set| set.contains(id)),
+        Err(_) => false,
+    }
+}
+
+fn mark_panicking(id: CueId) {
+    if let Ok(mut guard) = PANICKING.lock() {
+        guard.get_or_insert_with(HashSet::new).insert(id);
+    }
+}
+
+fn clear_panicking(id: &CueId) {
+    if let Ok(mut guard) = PANICKING.lock() {
+        if let Some(set) = guard.as_mut() {
+            set.remove(id);
+        }
+    }
+}
+
+fn clear_all_panicking() {
+    if let Ok(mut guard) = PANICKING.lock() {
+        *guard = None;
+    }
+}
+
+/// QLab `/cue/{n}/panic [seconds]`: fade the cue out and stop it. `Some(0)` —
+/// or a second panic while the fade is still running — hard-stops immediately.
+fn panic_cue_in_list(
+    transport: &mut Transport,
+    cue_list: &mut crate::show::cue_list::CueList,
+    id: uuid::Uuid,
+    duration: Option<f64>,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    if panicking_contains(&id) || duration == Some(0.0) {
+        clear_panicking(&id);
+        let result = transport.hard_stop_cue(cue_list, &id).map_err(|error| error.to_string());
+        let _ = app_handle.emit(
+            "cue-state-changed",
+            serde_json::json!({
+                "cue_id": id.to_string(),
+                "old_state": "running",
+                "new_state": "standby",
+            }),
+        );
+        return result;
+    }
+    let was_running = cue_list
+        .get_recursive(&id)
+        .is_some_and(|cue| cue.is_running() || cue.is_paused());
+    let result = stop_cue_in_list(transport, cue_list, id, app_handle);
+    if was_running {
+        mark_panicking(id);
+    }
+    result
+}
+
 fn stop_cue_in_list(
     transport: &mut Transport,
     cue_list: &mut crate::show::cue_list::CueList,
     id: uuid::Uuid,
     app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
+    clear_panicking(&id);
     if let Some(cue) = cue_list.get_recursive(&id) {
         broadcast_current_cue_event("cue/stop", cue);
     }
