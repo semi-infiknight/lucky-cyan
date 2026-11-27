@@ -1275,6 +1275,13 @@ impl Cue for FadeCue {
         (!looping).then(|| Duration::from_millis(self.fade_duration_ms))
     }
 
+    fn set_duration(&mut self, d: Option<Duration>) {
+        if let Some(d) = d {
+            // The fade engine requires a positive duration; 0 means instant.
+            self.fade_duration_ms = (d.as_millis() as u64).max(1);
+        }
+    }
+
     fn file_duration(&self) -> Option<Duration> {
         // The existing loop progress projection uses this as one pass.
         Some(self.loop_path_period.unwrap_or_else(|| Duration::from_millis(self.fade_duration_ms)))
@@ -2610,5 +2617,16 @@ mod tests {
         assert_eq!(rebuilt.linked_incoming_voice(), incoming_voice);
         assert!(rebuilt.awaiting_picture, "still waiting for its picture");
         assert!(!rebuilt.in_pre_wait, "waiting for a picture is not a pre-wait");
+    }
+
+    #[test]
+    fn set_duration_overrides_the_fade_time_and_clamps_to_positive() {
+        use crate::cue::traits::Cue;
+        let mut fade = FadeCue::new();
+        assert_eq!(fade.duration(), Some(Duration::from_millis(2000)));
+        fade.set_duration(Some(Duration::from_millis(750)));
+        assert_eq!(fade.duration(), Some(Duration::from_millis(750)));
+        fade.set_duration(Some(Duration::ZERO));
+        assert_eq!(fade.duration(), Some(Duration::from_millis(1)));
     }
 }

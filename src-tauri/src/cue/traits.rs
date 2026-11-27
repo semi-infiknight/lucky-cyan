@@ -235,6 +235,11 @@ pub trait Cue: Send + std::any::Any {
     /// Returns `None` for open-ended cues (e.g., looping audio).
     fn duration(&self) -> Option<Duration>;
 
+    /// QLab `/cue/{n}/duration {seconds}` write: cues with an explicit editable
+    /// duration (Wait, Fade) override it; other cue types ignore it (their
+    /// duration derives from the file and trims).
+    fn set_duration(&mut self, _d: Option<Duration>) {}
+
     /// Total time elapsed since `go()` was called (including pre-wait).
     fn elapsed(&self) -> Duration;
 

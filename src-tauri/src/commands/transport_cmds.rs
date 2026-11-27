@@ -249,6 +249,10 @@ pub(crate) enum NetworkCueAction {
     SetSlicePlayCount { index: usize, count: u32 },
     /// QLab `/cue/{n}/load {seconds}`: arm at a time (negative counts from the end).
     Load(f64),
+    /// QLab `/cue/{n}/duration {seconds}` write (cues with an editable duration).
+    SetDuration(f64),
+    /// QLab `/cue/{n}/duration/+ {delta}` increment/decrement.
+    AdjustDuration(f64),
     Reset,
     SetPause(NetworkPauseAction),
     /// QLab property writes (`/cue/{n}/preWait 5`, `/armed 0`, ...). These edit
@@ -297,6 +301,8 @@ impl NetworkCueAction {
                 | NetworkCueAction::AdjustPreWait(_)
                 | NetworkCueAction::AdjustPostWait(_)
                 | NetworkCueAction::AdjustContinueMode(_)
+                | NetworkCueAction::SetDuration(_)
+                | NetworkCueAction::AdjustDuration(_)
                 | NetworkCueAction::SetRate { .. }
                 | NetworkCueAction::SetLevel { .. }
                 | NetworkCueAction::SetVideoProp { .. }
@@ -630,6 +636,21 @@ fn write_edit(action: &NetworkCueAction) -> Option<CueEdit<'_>> {
             Some(Box::new(move |cue| {
                 let mode = cue.continue_mode().cycled(steps);
                 cue.set_continue_mode(mode);
+            }))
+        }
+        NetworkCueAction::SetDuration(secs) => {
+            let secs = *secs;
+            Some(Box::new(move |cue| {
+                cue.set_duration(Some(std::time::Duration::from_secs_f64(secs)));
+            }))
+        }
+        NetworkCueAction::AdjustDuration(delta) => {
+            let delta = *delta;
+            Some(Box::new(move |cue| {
+                if let Some(current) = cue.duration() {
+                    let next = (current.as_secs_f64() + delta).max(0.0);
+                    cue.set_duration(Some(std::time::Duration::from_secs_f64(next)));
+                }
             }))
         }
         NetworkCueAction::SetRate { value, live: false } => {

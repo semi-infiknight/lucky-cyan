@@ -1380,6 +1380,7 @@ fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueActi
             "postWait" => Some(NetworkCueAction::AdjustPostWait(sign * delta)),
             "continueMode" if delta.fract() == 0.0 =>
                 Some(NetworkCueAction::AdjustContinueMode((sign * delta) as i64)),
+            "duration" => Some(NetworkCueAction::AdjustDuration(sign * delta)),
             _ => None,
         };
     }
@@ -1392,6 +1393,12 @@ fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueActi
             (value.is_finite() && value >= 0.0).then(|| {
                 if verb == "preWait" { NetworkCueAction::SetPreWait(value) } else { NetworkCueAction::SetPostWait(value) }
             })
+        }
+        // QLab `/cue/{n}/duration {seconds}`: saved write for cues with an
+        // editable duration (Wait, Fade); media cues ignore it at apply time.
+        "duration" => {
+            let value = numeric_arg(args)?;
+            (value.is_finite() && value >= 0.0).then_some(NetworkCueAction::SetDuration(value))
         }
         "armed" => qlab_bool(&args[0]).map(NetworkCueAction::SetArmed),
         "qName" => match &args[0] {
@@ -1449,7 +1456,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             matches!(core, "preWait" | "postWait" | "armed" | "qName" | "continueMode"
                 | "notes" | "colorName" | "flagged" | "load" | "panic" | "rate" | "level"
                 | "opacity" | "layer" | "blendMode" | "saturation" | "scale" | "rotation"
-                | "translateX" | "translateY" | "infiniteLoop" | "sliceMarker")
+                | "translateX" | "translateY" | "infiniteLoop" | "sliceMarker" | "duration")
         });
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
@@ -3234,6 +3241,35 @@ mod tests {
         assert_eq!(read("/cue/13/sliceMarkers").unwrap(), serde_json::Value::Null);
         let cue_ref = workspace.active_cue_list().unwrap().get(&plain_id).unwrap();
         assert!(cue_ref.slice_list().is_none());
+    }
+
+    #[test]
+    fn qlab_duration_write_and_adjust_parse_and_read_back() {
+        use crate::cue::wait_cue::WaitCue;
+        let d = |v: f64| vec![rosc::OscType::Double(v)];
+        // Write: one non-negative number; adjust: /+ or /- with a delta.
+        assert!(matches!(resolve_action("/cue/5/duration", &d(12.5)),
+            OscAction::AddressedCue { action: NetworkCueAction::SetDuration(v), .. } if v == 12.5));
+        assert!(matches!(resolve_action("/cue/5/duration", &d(-1.0)), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/duration", &[]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/duration/+", &d(2.0)),
+            OscAction::AddressedCue { action: NetworkCueAction::AdjustDuration(v), .. } if v == 2.0));
+        assert!(matches!(resolve_action("/cue/5/duration/-/0.5", &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::AdjustDuration(v), .. } if v == -0.5));
+        assert!(matches!(authorized_action("/cue/5/duration", &d(1.0), false), OscAction::Unmatched));
+        assert!(NetworkCueAction::SetDuration(1.0).is_write());
+        assert!(NetworkCueAction::AdjustDuration(1.0).is_write());
+
+        // Query read reflects the Wait cue's duration.
+        let mut workspace = Workspace::new("Blue");
+        let mut wait = WaitCue::new();
+        wait.set_number(Some("5".into()));
+        workspace.active_cue_list_mut().unwrap().push(Box::new(wait));
+        let read = |address: &str| {
+            let message = query_message(address);
+            CueQuery::parse(&message).unwrap().read(&workspace, peer(), 0)
+        };
+        assert_eq!(read("/cue/5/duration").unwrap(), serde_json::json!(5.0));
     }
 
     #[test]

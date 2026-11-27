@@ -275,6 +275,12 @@ impl Cue for WaitCue {
         Some(self.wait_duration)
     }
 
+    fn set_duration(&mut self, d: Option<Duration>) {
+        if let Some(d) = d {
+            self.wait_duration = d;
+        }
+    }
+
     fn elapsed(&self) -> Duration {
         self.elapsed_at(Instant::now())
     }
@@ -404,5 +410,16 @@ mod tests {
         wait.apply_clock_edge(list, ClockEdge::Lost(lost), TcOnStop::Pause, &context).unwrap();
         wait.apply_clock_edge(list, ClockEdge::Returned(returned), TcOnStop::Pause, &context).unwrap();
         assert_eq!(wait.elapsed_at(began + Duration::from_secs(4)), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn set_duration_overrides_the_wait_time() {
+        use crate::cue::traits::Cue;
+        let mut wait = WaitCue::new();
+        assert_eq!(wait.duration(), Some(Duration::from_secs(5)));
+        wait.set_duration(Some(Duration::from_millis(1500)));
+        assert_eq!(wait.duration(), Some(Duration::from_millis(1500)));
+        wait.set_duration(None);
+        assert_eq!(wait.duration(), Some(Duration::from_millis(1500)));
     }
 }
