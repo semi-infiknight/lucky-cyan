@@ -1415,6 +1415,22 @@ fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueActi
             _ => None,
         };
     }
+    // QLab `/cue/{n}/move {position} [{target_group_id}]`: 1-based position;
+    // with a Group unique ID as the second argument, move the cue into that
+    // Group at the position (clamped to the Group's length).
+    if verb == "move" {
+        let position = |args: &[rosc::OscType]| {
+            numeric_arg(args).filter(|v| v.is_finite() && v.fract() == 0.0 && (1.0..=10_000.0).contains(v))
+        };
+        return match args {
+            [one] => position(std::slice::from_ref(one))
+                .map(|v| NetworkCueAction::Move { position: v as usize - 1, target: None }),
+            [one, rosc::OscType::String(text)] => position(std::slice::from_ref(one))
+                .zip(hyphenated_query_id(text))
+                .map(|(v, target)| NetworkCueAction::Move { position: v as usize - 1, target: Some(target) }),
+            _ => None,
+        };
+    }
     if toggle_suffix || args.len() != 1 {
         return None;
     }
@@ -1488,7 +1504,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
                 | "notes" | "colorName" | "flagged" | "load" | "panic" | "rate" | "level"
                 | "opacity" | "layer" | "blendMode" | "saturation" | "scale" | "rotation"
                 | "translateX" | "translateY" | "infiniteLoop" | "sliceMarker" | "duration"
-                | "tempCueTargetNumber" | "tempCueTargetID")
+                | "tempCueTargetNumber" | "tempCueTargetID" | "move")
         });
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
@@ -3481,6 +3497,44 @@ mod tests {
             CueQuery::parse(&message).unwrap().read(&workspace, peer(), 0)
         };
         assert_eq!(read("/cue/5/duration").unwrap(), serde_json::json!(5.0));
+    }
+
+    #[test]
+    fn qlab_move_write_parses_and_is_gated() {
+        let s = |t: &str| rosc::OscType::String(t.into());
+        let d = |v: f64| vec![rosc::OscType::Double(v)];
+        let id = Uuid::new_v4();
+        // One argument: 1-based position, stored 0-based.
+        assert!(matches!(resolve_action("/cue/5/move", &d(3.0)),
+            OscAction::AddressedCue { action: NetworkCueAction::Move { position: 2, target: None }, .. }));
+        // Two arguments: position plus a Group unique ID.
+        assert!(matches!(resolve_action("/cue/5/move", &[rosc::OscType::Double(2.0), s(&id.to_string())]),
+            OscAction::AddressedCue { action: NetworkCueAction::Move { position: 1, target: Some(t) }, .. } if t == id));
+        // `/cue_id/{uuid}/move` works too.
+        let address = format!("/cue_id/{id}/move");
+        assert!(matches!(resolve_action(&address, &d(1.0)),
+            OscAction::AddressedCue { action: NetworkCueAction::Move { position: 0, target: None }, .. }));
+        // Bad forms: no args, zero/negative/fractional position, string position,
+        // non-UUID target, extra args.
+        assert!(matches!(resolve_action("/cue/5/move", &[]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/move", &d(0.0)), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/move", &d(-2.0)), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/move", &d(2.5)), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/move", &[s("2")]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/move", &[rosc::OscType::Double(2.0), s("nope")]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/move", &[rosc::OscType::Double(2.0), s(&id.to_string()), s("x")]), OscAction::Unmatched));
+        // Writes are gated behind the allowlist and count as writes (wildcard OK).
+        assert!(matches!(authorized_action("/cue/5/move", &d(1.0), false), OscAction::Unmatched));
+        assert!(NetworkCueAction::Move { position: 0, target: None }.is_write());
+        assert!(NetworkCueAction::Move { position: 0, target: Some(id) }.is_write());
+        assert!(matches!(resolve_action("/cue/*/move", &d(1.0)),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::Move { .. }, .. }));
+        // Plain text: the single-argument form parses; the two-argument form
+        // needs binary OSC.
+        let message = parse_text_message(b"/cue/5/move 3").unwrap();
+        assert!(matches!(resolve_action(&message.addr, &message.args),
+            OscAction::AddressedCue { action: NetworkCueAction::Move { position: 2, target: None }, .. }));
+        assert!(parse_text_message(b"/cue/5/move 3 9b2f").is_none());
     }
 
     #[test]

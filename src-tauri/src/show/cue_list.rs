@@ -1111,6 +1111,35 @@ impl CueList {
 
     /// Move a cue from anywhere in the hierarchy to the top-level list,
     /// immediately before `before_id` (or at the end if `None`).
+    /// QLab `/cue/{n}/move {position} [{target_group_id}]`: with no target,
+    /// reorder the top-level cue to 0-based `position`; with a target Group,
+    /// move the cue (from anywhere in the list) into that Group at `position`
+    /// (clamped to the Group's length).
+    pub fn move_cue_to(&mut self, id: &CueId, position: usize, target: Option<&CueId>) -> Result<()> {
+        let Some(target_id) = target else {
+            anyhow::ensure!(self.index_of(id).is_some(), "Move without a target only reorders top-level cues");
+            return self.move_cue(id, position);
+        };
+        anyhow::ensure!(*target_id != *id, "Cannot move a cue into itself");
+        self.check_group_structure_change(std::slice::from_ref(id), false)?;
+        let moving = self.get_recursive(id).ok_or_else(|| anyhow!("Cue {id:?} not found"))?;
+        anyhow::ensure!(!contains_cue(moving, target_id), "Cannot move a cue into its own descendant");
+        let standby = self.capture_enter_standby();
+        let cue = extract_cue_anywhere(&mut self.cues, id).ok_or_else(|| anyhow!("Cue {id:?} not found"))?;
+        if self.playhead_cue_id == Some(*id) {
+            self.playhead_cue_id = self.cues.first().map(|c| c.id());
+        }
+        let group = self.get_mut_recursive(target_id).ok_or_else(|| anyhow!("Target {target_id:?} not found"))?;
+        let group = (group as &mut dyn std::any::Any)
+            .downcast_mut::<crate::cue::group_cue::GroupCue>()
+            .ok_or_else(|| anyhow!("Move target is not a Group"))?;
+        let pos = position.min(group.children.len());
+        group.children.insert(pos, cue);
+        self.structure_changed();
+        self.preserve_enter_standby(standby);
+        Ok(())
+    }
+
     pub fn move_to_top_level_before(
         &mut self,
         cue_id: &CueId,
@@ -1866,6 +1895,53 @@ mod tests {
         list.move_before(&[id1], None).unwrap();
         assert_eq!(list.cues.last().unwrap().id(), id1);
         assert_eq!(list.cues[1].id(), id3);
+    }
+
+    #[test]
+    fn move_cue_to_reorders_and_moves_into_group() {
+        use crate::cue::group_cue::GroupCue;
+        let mut list = CueList::new("Test");
+        let c1 = memo(); let id1 = c1.id();
+        let c2 = memo(); let id2 = c2.id();
+        let c3 = memo(); let id3 = c3.id();
+        let child = memo(); let child_id = child.id();
+        let inner = GroupCue::new(); let inner_id = inner.id();
+        let mut group = GroupCue::new();
+        group.children.push(child);
+        group.children.push(Box::new(inner));
+        let group_id = group.id();
+        list.push(c1); list.push(c2); list.push(c3); list.push(Box::new(group));
+
+        // No target: reorder a top-level cue (0-based, clamped to the end).
+        list.move_cue_to(&id3, 0, None).unwrap();
+        assert_eq!(list.cues[0].id(), id3);
+        assert_eq!(list.cues[1].id(), id1);
+        list.move_cue_to(&id3, 99, None).unwrap();
+        assert_eq!(list.cues.last().unwrap().id(), id3);
+        // A nested cue cannot be reordered without a target.
+        assert!(list.move_cue_to(&child_id, 0, None).is_err());
+
+        // Group target: move a top-level cue into the group at position 1.
+        list.set_playhead(Some(id1)).unwrap();
+        list.move_cue_to(&id1, 1, Some(&group_id)).unwrap();
+        assert!(list.index_of(&id1).is_none());
+        let children = list.get(&group_id).unwrap().child_cues().unwrap();
+        assert_eq!(children.len(), 3);
+        assert_eq!(children[1].id(), id1);
+        // Moving the playhead cue resets the playhead to the first top-level cue.
+        assert_eq!(list.playhead_cue_id, Some(list.cues[0].id()));
+        // The position clamps to the group's length.
+        list.move_cue_to(&id2, 99, Some(&group_id)).unwrap();
+        let children = list.get(&group_id).unwrap().child_cues().unwrap();
+        assert_eq!(children.last().unwrap().id(), id2);
+
+        // A group cannot move into itself or its own descendant; a non-group
+        // target is rejected; unknown ids are rejected.
+        assert!(list.move_cue_to(&group_id, 0, Some(&group_id)).is_err());
+        assert!(list.move_cue_to(&group_id, 0, Some(&inner_id)).is_err());
+        assert!(list.move_cue_to(&id3, 0, Some(&child_id)).is_err());
+        assert!(list.move_cue_to(&Uuid::new_v4(), 0, None).is_err());
+        assert!(list.move_cue_to(&id3, 0, Some(&Uuid::new_v4())).is_err());
     }
 
     #[test]

@@ -252,6 +252,9 @@ pub(crate) enum NetworkCueAction {
     SetTemporaryTargetNumber(String),
     /// QLab `/cue/{n}/tempCueTargetID {uuid}`: same, resolved by unique ID.
     SetTemporaryTargetId(Uuid),
+    /// QLab `/cue/{n}/move {position} [{target_group_id}]`: undoable reorder
+    /// (0-based position) or move into the target Group at that position.
+    Move { position: usize, target: Option<Uuid> },
     /// QLab `/cue/{n}/load {seconds}`: arm at a time (negative counts from the end).
     Load(f64),
     /// QLab `/cue/{n}/duration {seconds}` write (cues with an editable duration).
@@ -316,6 +319,7 @@ impl NetworkCueAction {
                 | NetworkCueAction::SetSlicePlayCount { .. }
                 | NetworkCueAction::SetTemporaryTargetNumber(_)
                 | NetworkCueAction::SetTemporaryTargetId(_)
+                | NetworkCueAction::Move { .. }
         )
     }
 }
@@ -415,6 +419,11 @@ pub(crate) fn address_numbered_network_cue(
             let _ = app_handle.emit("cue-list-refresh", ());
             result
         }
+        NetworkCueAction::Move { position, target } => {
+            let result = move_cue_locked(state, &mut ws, index, id, *position, *target, app_handle);
+            let _ = app_handle.emit("cue-list-refresh", ());
+            result
+        }
         // QLab `/live` writes drive the running voice and record a temporary
         // override; they never touch saved data and are not undoable.
         NetworkCueAction::SetRate { value, live: true } => {
@@ -464,6 +473,35 @@ fn delete_cue_locked(
     drop(history);
     let _ = app_handle.emit("workspace-modified", serde_json::json!({}));
     result.map(|_| ()).map_err(|error| error.to_string())
+}
+
+/// QLab `/cue/{n}/move {position} [{target_group_id}]`: reorder a top-level cue
+/// to 0-based `position`, or move it into the target Group at `position`
+/// (clamped to the Group's length). Undoable; the caller holds the workspace
+/// lock.
+fn move_cue_locked(
+    state: &AppState,
+    ws: &mut Workspace,
+    index: usize,
+    id: CueId,
+    position: usize,
+    target: Option<Uuid>,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    let mut history = state.undo_stack.lock().map_err(|e| e.to_string())?;
+    let result = (|| {
+        let list = ws.cue_lists.get_mut(index).ok_or_else(|| "No such cue list".to_string())?;
+        let before = super::undo_cmds::take_snapshot(list);
+        let result = list.move_cue_to(&id, position, target.as_ref());
+        if result.is_ok() {
+            history.push_action(list.id, before);
+            ws.mark_modified();
+        }
+        result.map_err(|error| error.to_string())
+    })();
+    drop(history);
+    let _ = app_handle.emit("workspace-modified", serde_json::json!({}));
+    result
 }
 
 /// QLab `/new {cue_type}` (optionally workspace-scoped): create a cue of the
@@ -565,6 +603,13 @@ pub(crate) fn address_network_cue_pattern(
             }
             NetworkCueAction::Delete => {
                 delete_cue_locked(state, &mut ws, index, id, app_handle)
+            }
+            NetworkCueAction::Move { position, target } => {
+                let result = move_cue_locked(state, &mut ws, index, id, *position, *target, app_handle);
+                if result.is_ok() {
+                    wrote = true;
+                }
+                result
             }
             NetworkCueAction::SetRate { value, live: true } => {
                 let list = &mut ws.cue_lists[index];
