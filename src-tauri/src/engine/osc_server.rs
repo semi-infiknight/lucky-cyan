@@ -396,7 +396,8 @@ fn always_reply_enabled(addr: SocketAddr) -> bool {
     let Ok(mut guard) = ALWAYS_REPLY.lock() else { return false };
     let Some(map) = guard.as_mut() else { return false };
     let now = Instant::now();
-    map.retain(|_, seen| now.duration_since(*seen) < Duration::from_secs(61));
+    map.retain(|peer, seen| crate::engine::osc_updates::is_pinned(*peer)
+        || now.duration_since(*seen) < Duration::from_secs(61));
     map.contains_key(&addr)
 }
 
@@ -463,7 +464,9 @@ fn parse_text_message(data: &[u8]) -> Option<rosc::OscMessage> {
             // `/cue/5/qName LX`); numeric when it parses, string otherwise.
             [one] if address.starts_with("/cue/") || address.starts_with("/cue_id/")
                 || address == "/updates" || address.ends_with("/updates")
-                || address == "/alwaysReply" || address.ends_with("/alwaysReply") => {
+                || address == "/alwaysReply" || address.ends_with("/alwaysReply")
+                || address == "/forgetMeNot" || address.ends_with("/forgetMeNot")
+                || address == "/udpKeepAlive" || address.ends_with("/udpKeepAlive") => {
                 match one.parse::<f64>() {
                     Ok(value) if (value * 1000.0).is_finite() => vec![rosc::OscType::Double(value)],
                     _ => vec![rosc::OscType::String((*one).to_owned())],
@@ -512,6 +515,8 @@ enum OscAction<'a> {
     Updates(bool),
     /// QLab `/alwaysReply {0|1}`: reply to every message from this sender.
     AlwaysReply(bool),
+    /// QLab `/forgetMeNot` | `/udpKeepAlive {0|1}` and `/disconnect`: client session.
+    ClientSession { action: ClientSessionAction },
     /// Trigger a full cue-list feedback dump.
     CueListRequest,
     /// Trigger a playhead feedback dump.
@@ -520,6 +525,14 @@ enum OscAction<'a> {
     SetOverride { key: &'static str, value: Option<bool> },
     /// Address (or its arguments) does not map to any Inkue command.
     Unmatched,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ClientSessionAction {
+    /// QLab `/forgetMeNot {bool}` / `/udpKeepAlive {bool}`: pin beyond the 61 s keepalive.
+    Pin(bool),
+    /// QLab `/disconnect`: drop the sender from every client registry.
+    Disconnect,
 }
 
 fn resolve_action<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a> {
@@ -538,6 +551,16 @@ fn resolve_action<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a> {
         _ => return parse_qlab_address(addr, args),
     };
     OscAction::Command(payload)
+}
+
+fn apply_client_session(action: ClientSessionAction, src: SocketAddr) {
+    match action {
+        ClientSessionAction::Pin(on) => crate::engine::osc_updates::pin_client(src, on),
+        ClientSessionAction::Disconnect => {
+            crate::engine::osc_updates::disconnect_client(src);
+            set_always_reply(src, false);
+        }
+    }
 }
 
 fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, src: SocketAddr, app_handle: &tauri::AppHandle) {
@@ -586,6 +609,10 @@ fn handle_message(msg: &rosc::OscMessage, explicitly_allowed: bool, src: SocketA
             (true, false)
         }
         OscAction::AlwaysReply(_) => (true, false),
+        OscAction::ClientSession { action } => {
+            apply_client_session(action, src);
+            (true, false)
+        }
         OscAction::Command(payload) => {
             let _ = app_handle.emit("osc-command", &payload);
             (true, true)
@@ -776,7 +803,9 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         .and_then(|rest| rest.split_once('/'))
         .is_some_and(|(_, verb)| matches!(verb, "preWait" | "postWait" | "armed" | "qName" | "continueMode"));
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
-        || addr == "/alwaysReply" || addr.ends_with("/alwaysReply");
+        || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
+        || addr == "/forgetMeNot" || addr.ends_with("/forgetMeNot")
+        || addr == "/udpKeepAlive" || addr.ends_with("/udpKeepAlive");
     if !args.is_empty() && !cue_write && !updates_arg {
         return OscAction::Unmatched;
     }
@@ -794,6 +823,26 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
             [one] => match qlab_bool(one) {
                 Some(on) if addr == "/updates" => OscAction::Updates(on),
                 Some(on) => OscAction::AlwaysReply(on),
+                None => OscAction::Unmatched,
+            },
+            // The no-argument form is the read, parsed as a query instead.
+            _ => OscAction::Unmatched,
+        };
+    }
+    // QLab `/disconnect` and `/forgetMeNot`/`/udpKeepAlive {bool}` manage the
+    // sending client at any access level; no-arg forgetMeNot is the read form.
+    if addr == "/disconnect" {
+        let _ = workspace;
+        return match args {
+            [] => OscAction::ClientSession { action: ClientSessionAction::Disconnect },
+            _ => OscAction::Unmatched,
+        };
+    }
+    if addr == "/forgetMeNot" || addr == "/udpKeepAlive" {
+        let _ = workspace;
+        return match args {
+            [one] => match qlab_bool(one) {
+                Some(on) => OscAction::ClientSession { action: ClientSessionAction::Pin(on) },
                 None => OscAction::Unmatched,
             },
             _ => OscAction::Unmatched,
@@ -1172,9 +1221,11 @@ enum AppQueryKind {
 #[derive(Clone, Copy, PartialEq)]
 enum SenderQuery {
     /// QLab `/alwaysReply` read form: this sender's alwaysReply status.
-    AlwaysReplyStatus,
+    AlwaysReply,
     /// QLab `/updates` read form: this sender's subscription status.
-    UpdatesStatus,
+    Updates,
+    /// QLab `/forgetMeNot`/`/udpKeepAlive` read form: is this sender pinned?
+    Pinned,
 }
 
 struct CueQuery<'a> {
@@ -1201,10 +1252,12 @@ impl<'a> CueQuery<'a> {
                 return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::App(app) });
             }
         }
-        // `/alwaysReply` and `/updates` without an argument read the sender's status.
+        // `/alwaysReply`, `/updates` and `/forgetMeNot`/`/udpKeepAlive` without an
+        // argument read the sender's status.
         if let Some(sender) = match path {
-            "alwaysReply" => Some(SenderQuery::AlwaysReplyStatus),
-            "updates" => Some(SenderQuery::UpdatesStatus),
+            "alwaysReply" => Some(SenderQuery::AlwaysReply),
+            "updates" => Some(SenderQuery::Updates),
+            "forgetMeNot" | "udpKeepAlive" => Some(SenderQuery::Pinned),
             _ => None,
         } {
             return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::Sender(sender) });
@@ -1300,10 +1353,12 @@ impl<'a> CueQuery<'a> {
             CueQueryKind::App(AppQueryKind::Override(key)) => Some(serde_json::json!(
                 crate::engine::overrides::OVERRIDES.get(key).unwrap_or(true)
             )),
-            CueQueryKind::Sender(SenderQuery::AlwaysReplyStatus) =>
+            CueQueryKind::Sender(SenderQuery::AlwaysReply) =>
                 Some(serde_json::json!(always_reply_enabled(src))),
-            CueQueryKind::Sender(SenderQuery::UpdatesStatus) =>
+            CueQueryKind::Sender(SenderQuery::Updates) =>
                 Some(serde_json::json!(crate::engine::osc_updates::is_subscribed(src))),
+            CueQueryKind::Sender(SenderQuery::Pinned) =>
+                Some(serde_json::json!(crate::engine::osc_updates::is_pinned(src))),
             CueQueryKind::CueLists => Some(serde_json::Value::Array(
                 workspace.cue_lists.iter().map(|list| serde_json::json!({
                     "id": list.id.to_string(),
@@ -2291,7 +2346,7 @@ mod tests {
 
         let ar_message = query_message("/alwaysReply");
         let ar = CueQuery::parse(&ar_message).unwrap();
-        assert!(matches!(ar.kind, CueQueryKind::Sender(SenderQuery::AlwaysReplyStatus)));
+        assert!(matches!(ar.kind, CueQueryKind::Sender(SenderQuery::AlwaysReply)));
         assert_eq!(ar.read(&workspace, sender_peer, 0), Some(serde_json::json!(false)));
         set_always_reply(sender_peer, true);
         assert_eq!(ar.read(&workspace, sender_peer, 0), Some(serde_json::json!(true)));
@@ -2300,7 +2355,7 @@ mod tests {
 
         let up_message = query_message("/updates");
         let up = CueQuery::parse(&up_message).unwrap();
-        assert!(matches!(up.kind, CueQueryKind::Sender(SenderQuery::UpdatesStatus)));
+        assert!(matches!(up.kind, CueQueryKind::Sender(SenderQuery::Updates)));
         assert_eq!(up.read(&workspace, sender_peer, 0), Some(serde_json::json!(false)));
         crate::engine::osc_updates::set_subscription(sender_peer, true);
         assert_eq!(up.read(&workspace, sender_peer, 0), Some(serde_json::json!(true)));
@@ -2310,7 +2365,7 @@ mod tests {
         let scoped = format!("/workspace/{}/updates", workspace.instance_id());
         let scoped_message = query_message(&scoped);
         let scoped_query = CueQuery::parse(&scoped_message).unwrap();
-        assert!(matches!(scoped_query.kind, CueQueryKind::Sender(SenderQuery::UpdatesStatus)));
+        assert!(matches!(scoped_query.kind, CueQueryKind::Sender(SenderQuery::Updates)));
 
         // The write forms (one argument) stay commands, not queries.
         let mut write = query_message("/alwaysReply");
@@ -2324,6 +2379,142 @@ mod tests {
         // Sender status reads are any-access, like the app queries; cue queries are not.
         assert!(ar.is_any_access() && up.is_any_access());
         assert!(!CueQuery::parse(&query_message("/cue/1/number")).unwrap().is_any_access());
+    }
+
+    #[test]
+    fn qlab_client_session_commands_resolve_at_any_access_level() {
+        use ClientSessionAction::{Disconnect, Pin};
+        assert!(matches!(resolve_action("/disconnect", &[]), OscAction::ClientSession { action: Disconnect }));
+        assert!(matches!(resolve_action("/workspace/Blue/disconnect", &[]), OscAction::ClientSession { action: Disconnect }));
+        assert!(matches!(resolve_action("/disconnect", &[rosc::OscType::Int(1)]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/forgetMeNot", &[rosc::OscType::Int(1)]), OscAction::ClientSession { action: Pin(true) }));
+        assert!(matches!(resolve_action("/udpKeepAlive", &[rosc::OscType::String("no".into())]), OscAction::ClientSession { action: Pin(false) }));
+        assert!(matches!(resolve_action("/forgetMeNot", &[rosc::OscType::String("maybe".into())]), OscAction::Unmatched));
+        // No-arg forgetMeNot is the read form: a query, not a command.
+        assert!(matches!(resolve_action("/forgetMeNot", &[]), OscAction::Unmatched));
+        let read_message = query_message("/forgetMeNot");
+        let read = CueQuery::parse(&read_message).unwrap();
+        assert!(matches!(read.kind, CueQueryKind::Sender(SenderQuery::Pinned)));
+        assert!(read.is_any_access());
+        assert!(CueQuery::parse(&query_message("/udpKeepAlive")).is_some());
+        let mut write = query_message("/udpKeepAlive");
+        write.args.push(rosc::OscType::Int(1));
+        assert!(CueQuery::parse(&write).is_none());
+        // Any access level, and on the plain-text port too.
+        assert!(matches!(authorized_action("/disconnect", &[], false), OscAction::ClientSession { .. }));
+        assert!(matches!(authorized_action("/forgetMeNot", &[rosc::OscType::Int(1)], false),
+            OscAction::ClientSession { action: Pin(true) }));
+        assert!(parse_text_message(b"/disconnect").is_some());
+        assert!(parse_text_message(b"/forgetMeNot 1").is_some());
+        assert!(parse_text_message(b"/udpKeepAlive true").is_some());
+        assert!(parse_text_message(b"/forgetMeNot").is_none());
+        assert!(parse_text_message(b"/disconnect 1").is_none());
+    }
+
+    #[test]
+    fn pinned_clients_survive_the_keepalive_window_and_disconnect_clears_everything() {
+        // Port 12: ports 9/10/11 are owned by the other registry tests.
+        let pinned_peer: SocketAddr = (Ipv4Addr::LOCALHOST, 12).into();
+        let other_peer: SocketAddr = (Ipv4Addr::LOCALHOST, 13).into();
+        let stale = Instant::now().checked_sub(Duration::from_secs(120)).unwrap();
+
+        set_always_reply(pinned_peer, true);
+        set_always_reply(other_peer, true);
+        crate::engine::osc_updates::set_subscription(pinned_peer, true);
+        crate::engine::osc_updates::set_subscription(other_peer, true);
+        crate::engine::osc_updates::pin_client(pinned_peer, true);
+        // Age both entries past the 61 s window, in both registries.
+        if let Ok(mut guard) = ALWAYS_REPLY.lock() {
+            let map = guard.as_mut().unwrap();
+            map.insert(pinned_peer, stale);
+            map.insert(other_peer, stale);
+        }
+        crate::engine::osc_updates::age_subscription_for_test(pinned_peer, 120);
+        crate::engine::osc_updates::age_subscription_for_test(other_peer, 120);
+        // Pinned sender keeps both registrations; the unpinned one is pruned.
+        assert!(always_reply_enabled(pinned_peer));
+        assert!(!always_reply_enabled(other_peer));
+        assert!(crate::engine::osc_updates::is_subscribed(pinned_peer));
+        assert!(!crate::engine::osc_updates::is_subscribed(other_peer));
+
+        // /disconnect drops the pin, the alwaysReply entry and the subscription.
+        crate::engine::osc_updates::disconnect_client(pinned_peer);
+        set_always_reply(pinned_peer, false);
+        assert!(!crate::engine::osc_updates::is_pinned(pinned_peer));
+        assert!(!always_reply_enabled(pinned_peer));
+        assert!(!crate::engine::osc_updates::is_subscribed(pinned_peer));
+    }
+
+    #[test]
+    fn disconnect_stops_always_reply_and_updates_end_to_end_over_udp() {
+        let (status_tx, statuses) = crossbeam_channel::unbounded();
+        let protocol = Protocol::Osc;
+        let config = OscReceiveConfig {
+            enabled: true,
+            port: 0,
+            allowed_ips: vec!["127.0.0.1".into()],
+            ..OscReceiveConfig::default()
+        };
+        let listener = Listener::spawn(
+            protocol, protocol.settings(&config), || Ipv4Addr::LOCALHOST.into(),
+            move |status| { let _ = status_tx.send(status.clone()); },
+            |packet, _allowed, src| {
+                // Mirror the production dispatch for client-session commands.
+                if let rosc::OscPacket::Message(message) = packet {
+                    if let OscAction::ClientSession { action } = resolve_action(&message.addr, &message.args) {
+                        apply_client_session(action, src);
+                    }
+                    if let OscAction::Updates(on) = resolve_action(&message.addr, &message.args) {
+                        crate::engine::osc_updates::set_subscription(src, on);
+                    }
+                }
+            },
+            |_query, _src| None,
+        );
+        let OscListenerStatus::Listening { address } = statuses.recv_timeout(Duration::from_secs(2)).unwrap() else {
+            panic!("expected an OSC socket");
+        };
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        sender.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let src = sender.local_addr().unwrap();
+        let mut response = [0; 1024];
+        let send = |addr: &str, args: Vec<rosc::OscType>| {
+            let packet = rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage {
+                addr: addr.into(), args,
+            })).unwrap();
+            sender.send_to(&packet, address).unwrap();
+        };
+        let recv_reply = |response: &mut [u8; 1024]| -> String {
+            let (length, _origin) = sender.recv_from(response).unwrap();
+            let (_, rosc::OscPacket::Message(message)) = rosc::decoder::decode_udp(&response[..length]).unwrap() else {
+                panic!("expected a single OSC reply");
+            };
+            message.addr
+        };
+
+        send("/alwaysReply", vec![rosc::OscType::Int(1)]);
+        assert_eq!(recv_reply(&mut response), "/reply/alwaysReply");
+        // Once alwaysReply is on, every command is acknowledged in order.
+        send("/updates", vec![rosc::OscType::Int(1)]);
+        assert_eq!(recv_reply(&mut response), "/reply/updates");
+        send("/forgetMeNot", vec![rosc::OscType::Int(1)]);
+        assert_eq!(recv_reply(&mut response), "/reply/forgetMeNot");
+        // /thump's reply also proves the two packets above were processed first.
+        send("/thump", vec![]);
+        assert_eq!(recv_reply(&mut response), "/reply/thump");
+        assert!(always_reply_enabled(src));
+        assert!(crate::engine::osc_updates::is_subscribed(src));
+        assert!(crate::engine::osc_updates::is_pinned(src));
+
+        send("/disconnect", vec![]);
+        assert_eq!(recv_reply(&mut response), "/reply/disconnect");
+        assert!(!always_reply_enabled(src), "disconnect clears alwaysReply");
+        assert!(!crate::engine::osc_updates::is_subscribed(src), "disconnect clears updates");
+        assert!(!crate::engine::osc_updates::is_pinned(src), "disconnect clears the pin");
+        send("/panic", vec![]);
+        sender.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        assert!(sender.recv_from(&mut response).is_err(), "no replies after disconnect");
+        listener.stop();
     }
 
     #[test]
