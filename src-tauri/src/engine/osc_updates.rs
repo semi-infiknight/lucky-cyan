@@ -114,7 +114,7 @@ mod tests {
         let (addr, args) = update_playback_position(ws, list, Some(cue));
         assert_eq!(addr, format!("/update/workspace/{ws}/cueList/{list}/playbackPosition"));
         assert_eq!(args, vec![rosc::OscType::String(cue.to_string())]);
-        let (addr, args) = update_playback_position(ws, list, None);
+        let (_addr, args) = update_playback_position(ws, list, None);
         assert!(args.is_empty());
         assert_eq!(update_cue(ws, cue).0, format!("/update/workspace/{ws}/cue_id/{cue}"));
     }

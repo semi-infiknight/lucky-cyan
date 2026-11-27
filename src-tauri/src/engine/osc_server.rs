@@ -1134,6 +1134,16 @@ enum CueQueryKind<'a> {
     CueLists,
     /// QLab `/cueList/{list_id}/playbackPosition`: the standby cue ID, or null.
     CueListPlaybackPosition(Uuid),
+    /// QLab app-level queries `/version` and `/workspaces` (never workspace-scoped).
+    App(AppQueryKind),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum AppQueryKind {
+    /// QLab `/version`: the running app version string.
+    Version,
+    /// QLab `/workspaces`: IDs of open workspaces; Inkue runs one per instance.
+    Workspaces,
 }
 
 struct CueQuery<'a> {
@@ -1149,7 +1159,17 @@ impl<'a> CueQuery<'a> {
         }
         let (workspace, path) = WorkspaceSelector::split_address(&message.addr)?;
         let path = path.strip_prefix('/')?;
-        // Workspace-level queries first: `/cueLists`, `/cueList/{id}/playbackPosition`.
+        // App-level queries `/version` and `/workspaces` exist only unscoped.
+        if workspace.is_none() {
+            if let Some(app) = match path {
+                "version" => Some(AppQueryKind::Version),
+                "workspaces" => Some(AppQueryKind::Workspaces),
+                _ => None,
+            } {
+                return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::App(app) });
+            }
+        }
+        // Workspace-level queries next: `/cueLists`, `/cueList/{id}/playbackPosition`.
         if path == "cueLists" {
             return Some(Self { address: &message.addr, workspace, kind: CueQueryKind::CueLists });
         }
@@ -1205,10 +1225,15 @@ impl<'a> CueQuery<'a> {
     }
 
     fn read(&self, workspace: &Workspace) -> Option<serde_json::Value> {
-        if workspace.cue_lists.len() > MAX_SCOPED_ROWS {
+        if !matches!(self.kind, CueQueryKind::App(_)) && workspace.cue_lists.len() > MAX_SCOPED_ROWS {
             return None;
         }
         match &self.kind {
+            CueQueryKind::App(AppQueryKind::Version) =>
+                Some(serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string())),
+            CueQueryKind::App(AppQueryKind::Workspaces) => Some(serde_json::Value::Array(vec![
+                serde_json::Value::String(workspace.instance_id().to_string()),
+            ])),
             CueQueryKind::CueLists => Some(serde_json::Value::Array(
                 workspace.cue_lists.iter().map(|list| serde_json::json!({
                     "id": list.id.to_string(),
@@ -2129,6 +2154,87 @@ mod tests {
         send("/panic", vec![]);
         sender.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         assert!(sender.recv_from(&mut response).is_err());
+        listener.stop();
+    }
+
+    #[test]
+    fn app_level_queries_report_version_and_open_workspaces() {
+        let workspace = Workspace::new("App query rehearsal");
+        let instance = workspace.instance_id();
+
+        let version_message = query_message("/version");
+        let version = CueQuery::parse(&version_message).unwrap();
+        assert!(matches!(version.kind, CueQueryKind::App(AppQueryKind::Version)));
+        assert_eq!(version.read(&workspace),
+            Some(serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string())));
+
+        let workspaces_message = query_message("/workspaces");
+        let workspaces = CueQuery::parse(&workspaces_message).unwrap();
+        assert!(matches!(workspaces.kind, CueQueryKind::App(AppQueryKind::Workspaces)));
+        assert_eq!(workspaces.read(&workspace),
+            Some(serde_json::json!([instance.to_string()])));
+
+        // App-level queries are never workspace-scoped, take no arguments,
+        // and are not accepted on the plain-text command port.
+        assert!(CueQuery::parse(&query_message("/workspace/Blue/version")).is_none());
+        assert!(CueQuery::parse(&query_message("/workspace/Blue/workspaces")).is_none());
+        assert!(CueQuery::parse(&query_message("/version/extra")).is_none());
+        let mut with_arg = query_message("/workspaces");
+        with_arg.args.push(rosc::OscType::Int(1));
+        assert!(CueQuery::parse(&with_arg).is_none());
+        assert!(parse_text_message(b"/version").is_none());
+        assert!(parse_text_message(b"/workspaces").is_none());
+
+        // Replies keep the standard query envelope at /reply{address}.
+        let bytes = version.encode_reply(instance, version.read(&workspace)).unwrap();
+        let (remaining, rosc::OscPacket::Message(message)) = rosc::decoder::decode_udp(&bytes).unwrap() else {
+            panic!("expected a single OSC reply");
+        };
+        assert!(remaining.is_empty());
+        assert_eq!(message.addr, "/reply/version");
+        let [rosc::OscType::String(json)] = message.args.as_slice() else { panic!("expected JSON data") };
+        assert_eq!(serde_json::from_str::<serde_json::Value>(json).unwrap(), serde_json::json!({
+            "workspace_id": instance, "address": "/version", "status": "ok",
+            "data": env!("CARGO_PKG_VERSION"),
+        }));
+    }
+
+    #[test]
+    fn app_level_queries_reach_the_query_handler_over_udp() {
+        let (status_tx, statuses) = crossbeam_channel::unbounded();
+        let (seen_tx, seen) = crossbeam_channel::unbounded();
+        let protocol = Protocol::Osc;
+        let config = OscReceiveConfig {
+            enabled: true,
+            port: 0,
+            allowed_ips: vec!["127.0.0.1".into()],
+            ..OscReceiveConfig::default()
+        };
+        let listener = Listener::spawn(
+            protocol, protocol.settings(&config), || Ipv4Addr::LOCALHOST.into(),
+            move |status| { let _ = status_tx.send(status.clone()); },
+            |_, _, _| {},
+            move |query| {
+                let _ = seen_tx.send(query.address.to_string());
+                Some(query_packet(&format!("/reply{}", query.address)))
+            },
+        );
+        let OscListenerStatus::Listening { address } = statuses.recv_timeout(Duration::from_secs(2)).unwrap() else {
+            panic!("expected an OSC socket");
+        };
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        sender.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut response = [0; 1024];
+        for query in ["/version", "/workspaces"] {
+            sender.send_to(&query_packet(query), address).unwrap();
+            assert_eq!(seen.recv_timeout(Duration::from_secs(2)).unwrap(), query);
+            let (length, origin) = sender.recv_from(&mut response).unwrap();
+            assert_eq!(origin, address);
+            let (_, rosc::OscPacket::Message(message)) = rosc::decoder::decode_udp(&response[..length]).unwrap() else {
+                panic!("expected a single OSC reply");
+            };
+            assert_eq!(message.addr, format!("/reply{query}"));
+        }
         listener.stop();
     }
 
