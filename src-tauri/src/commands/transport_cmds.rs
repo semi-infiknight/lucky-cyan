@@ -9,7 +9,7 @@ use crate::{
     cue::{
         context::{CueContext, CueEvent},
         traits::Cue,
-        types::{ContinueMode, CueId, CueState, CueType},
+        types::{ContinueMode, CueColor, CueId, CueState, CueType},
     },
     show::{cue_list::CueList, transport::{stage_media_load_time, Transport}, undo_stack::UndoHistory, Workspace},
     state::AppState,
@@ -192,6 +192,13 @@ pub(crate) enum NetworkCueAction {
     SetArmed(bool),
     SetQName(String),
     SetContinueMode(ContinueMode),
+    /// QLab `/cue/{n}/notes {string}`.
+    SetNotes(String),
+    /// QLab `/cue/{n}/colorName {string}`.
+    SetColor(CueColor),
+    /// QLab `/cue/{n}/flagged {bool}`; `None` toggles (the `toggle` argument or
+    /// `/toggle` suffix). Flagging lives on the owning cue list, not the cue.
+    SetFlagged(Option<bool>),
 }
 
 impl NetworkCueAction {
@@ -203,6 +210,9 @@ impl NetworkCueAction {
                 | NetworkCueAction::SetArmed(_)
                 | NetworkCueAction::SetQName(_)
                 | NetworkCueAction::SetContinueMode(_)
+                | NetworkCueAction::SetNotes(_)
+                | NetworkCueAction::SetColor(_)
+                | NetworkCueAction::SetFlagged(_)
         )
     }
 }
@@ -333,6 +343,14 @@ fn write_edit(action: &NetworkCueAction) -> Option<CueEdit<'_>> {
             let mode = *mode;
             Some(Box::new(move |cue| cue.set_continue_mode(mode)))
         }
+        NetworkCueAction::SetNotes(notes) => {
+            let notes = notes.clone();
+            Some(Box::new(move |cue| cue.set_notes(notes)))
+        }
+        NetworkCueAction::SetColor(color) => {
+            let color = *color;
+            Some(Box::new(move |cue| cue.set_color(color)))
+        }
         _ => None,
     }
 }
@@ -344,10 +362,32 @@ fn apply_write(
     action: &NetworkCueAction,
     app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
+    if let NetworkCueAction::SetFlagged(flag) = action {
+        // Flagging is a cue-list property; toggle reads the current state.
+        if apply_flagged_write(ws, index, id, *flag) {
+            ws.mark_modified();
+            let _ = app_handle.emit("cue-list-refresh", ());
+            let _ = app_handle.emit("workspace-modified", ());
+        }
+        return Ok(());
+    }
     match write_edit(action) {
         Some(edit) => apply_cue_write(ws, index, id, edit, app_handle),
         None => Ok(()),
     }
+}
+
+/// Set or clear a cue's flag in its owning list (`None` toggles). Returns false
+/// when the list is gone, so callers can skip the modified/refresh signals.
+fn apply_flagged_write(ws: &mut Workspace, index: usize, id: CueId, flag: Option<bool>) -> bool {
+    let Some(list) = ws.cue_lists.get(index) else { return false };
+    if list.get_recursive(&id).is_none() {
+        return false;
+    }
+    let flag = flag.unwrap_or_else(|| !list.flagged_cues.contains(&id));
+    let list = ws.cue_lists.get_mut(index).unwrap();
+    if flag { list.flagged_cues.insert(id); } else { list.flagged_cues.remove(&id); }
+    true
 }
 
 /// Apply one saved-field edit to the addressed cue, then mark the workspace
@@ -984,6 +1024,45 @@ mod tests {
         assert_eq!(cue.name(), "renamed");
         assert!(workspace.is_modified);
         assert!(!edit_cue_field(&mut workspace, list_index, uuid::Uuid::new_v4(), |_| {}));
+    }
+
+    #[test]
+    fn notes_color_and_flagged_writes_apply_to_the_addressed_cue() {
+        use crate::cue::types::CueColor;
+        let mut workspace = Workspace::new("OSC property writes");
+        let mut cue = MemoCue::new();
+        cue.set_number(Some("9".into()));
+        let id = cue.id();
+        let list_index = 0;
+        workspace.active_cue_list_mut().unwrap().push(Box::new(cue));
+
+        // Notes and color go through the cue edit mapping.
+        let notes_action = NetworkCueAction::SetNotes("check mic 3".into());
+        let edit = write_edit(&notes_action).unwrap();
+        assert!(edit_cue_field(&mut workspace, list_index, id, edit));
+        let color_action = NetworkCueAction::SetColor(CueColor::from_osc_name("Hot Pink").unwrap());
+        let edit = write_edit(&color_action).unwrap();
+        assert!(edit_cue_field(&mut workspace, list_index, id, edit));
+        let cue = workspace.cue_lists[list_index].get_recursive(&id).unwrap();
+        assert_eq!(cue.notes(), "check mic 3");
+        assert_eq!(cue.color(), CueColor::HotPink);
+
+        // Flagged lives on the list and toggles when the write carries None.
+        assert!(!workspace.cue_lists[list_index].flagged_cues.contains(&id));
+        assert!(apply_flagged_write(&mut workspace, list_index, id, Some(true)));
+        assert!(workspace.cue_lists[list_index].flagged_cues.contains(&id));
+        assert!(apply_flagged_write(&mut workspace, list_index, id, None));
+        assert!(!workspace.cue_lists[list_index].flagged_cues.contains(&id));
+        assert!(apply_flagged_write(&mut workspace, list_index, id, None));
+        assert!(workspace.cue_lists[list_index].flagged_cues.contains(&id));
+        assert!(apply_flagged_write(&mut workspace, list_index, id, Some(false)));
+        assert!(!workspace.cue_lists[list_index].flagged_cues.contains(&id));
+        assert!(!apply_flagged_write(&mut workspace, list_index, uuid::Uuid::new_v4(), Some(true)));
+
+        assert!(NetworkCueAction::SetNotes(String::new()).is_write());
+        assert!(NetworkCueAction::SetColor(CueColor::Red).is_write());
+        assert!(NetworkCueAction::SetFlagged(None).is_write());
+        assert!(!NetworkCueAction::Go.is_write());
     }
 
     #[test]

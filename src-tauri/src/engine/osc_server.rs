@@ -802,10 +802,26 @@ fn qlab_literal_cue_number(number: &str) -> bool {
         && !matches!(number, "selected" | "active" | "playhead" | "all" | "none" | "next" | "previous" | "nextSequence" | "previousSequence")
 }
 
-/// QLab cue verbs that write a saved cue field and therefore take exactly one
-/// argument: `/cue/{n}/preWait 5`, `/cue/{n}/armed 0`, ...
+/// QLab cue verbs that write a saved cue field: `/cue/{n}/preWait 5`,
+/// `/cue/{n}/armed 0`, ... take exactly one argument, except the boolean
+/// `toggle` forms (`/cue/{n}/flagged/toggle`) which take none.
 fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueAction> {
-    if args.len() != 1 {
+    let (verb, toggle_suffix) = match verb.split_once('/') {
+        Some((core, "toggle")) => (core, true),
+        _ => (verb, false),
+    };
+    if verb == "flagged" {
+        return match args {
+            [] if toggle_suffix => Some(NetworkCueAction::SetFlagged(None)),
+            [one] => match one {
+                rosc::OscType::String(text) if text.eq_ignore_ascii_case("toggle") =>
+                    Some(NetworkCueAction::SetFlagged(None)),
+                other => qlab_bool(other).map(|flag| NetworkCueAction::SetFlagged(Some(flag))),
+            },
+            _ => None,
+        };
+    }
+    if toggle_suffix || args.len() != 1 {
         return None;
     }
     match verb {
@@ -830,6 +846,16 @@ fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueActi
             ).ok().map(NetworkCueAction::SetContinueMode),
             _ => None,
         },
+        "notes" => match &args[0] {
+            rosc::OscType::String(notes) if notes.len() <= MAX_NOTES_WRITE_BYTES =>
+                Some(NetworkCueAction::SetNotes(notes.clone())),
+            _ => None,
+        },
+        "colorName" => match &args[0] {
+            rosc::OscType::String(name) =>
+                crate::cue::types::CueColor::from_osc_name(name).map(NetworkCueAction::SetColor),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -843,7 +869,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
         .strip_prefix("/cue/")
         .or_else(|| addr.strip_prefix("/cue_id/"))
         .and_then(|rest| rest.split_once('/'))
-        .is_some_and(|(_, verb)| matches!(verb, "preWait" | "postWait" | "armed" | "qName" | "continueMode"));
+        .is_some_and(|(_, verb)| matches!(verb, "preWait" | "postWait" | "armed" | "qName" | "continueMode"
+            | "notes" | "colorName" | "flagged"));
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
         || addr == "/forgetMeNot" || addr.ends_with("/forgetMeNot")
@@ -1085,6 +1112,9 @@ fn qlab_bool(arg: &rosc::OscType) -> Option<bool> {
 const MAX_CUE_ADDRESS_NUMBER_BYTES: usize = 96;
 const MAX_WORKSPACE_SELECTOR_BYTES: usize = 255;
 const MAX_SCOPED_ROWS: usize = 4_096;
+/// QLab `/cue/{n}/notes` read/write cap, so a huge note cannot blow up a UDP reply.
+const MAX_NOTES_QUERY_BYTES: usize = 8_192;
+const MAX_NOTES_WRITE_BYTES: usize = 8_192;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CueQueryProperty {
@@ -1098,6 +1128,12 @@ enum CueQueryProperty {
     PreWait,
     Duration,
     CueType,
+    /// QLab `/cue/{n}/notes` (string).
+    Notes,
+    /// QLab `/cue/{n}/colorName` (color name string).
+    ColorName,
+    /// QLab `/cue/{n}/flagged` (bool; a cue-list property).
+    Flagged,
 }
 
 #[derive(Clone, Copy)]
@@ -1348,6 +1384,9 @@ impl<'a> CueQuery<'a> {
             "preWait" => CueQueryProperty::PreWait,
             "duration" => CueQueryProperty::Duration,
             "qType" => CueQueryProperty::CueType,
+            "notes" => CueQueryProperty::Notes,
+            "colorName" => CueQueryProperty::ColorName,
+            "flagged" => CueQueryProperty::Flagged,
             _ => return None,
         };
         let target = match kind {
@@ -1480,6 +1519,13 @@ impl<'a> CueQuery<'a> {
                 None => serde_json::Value::Null,
             }),
             CueQueryProperty::CueType => serde_json::to_value(cue.cue_type()).ok(),
+            CueQueryProperty::Notes => (cue.notes().len() <= MAX_NOTES_QUERY_BYTES)
+                .then(|| serde_json::Value::String(cue.notes().to_owned())),
+            CueQueryProperty::ColorName =>
+                Some(serde_json::Value::String(cue.color().osc_name().to_owned())),
+            CueQueryProperty::Flagged => Some(serde_json::Value::Bool(
+                workspace.cue_lists.iter().any(|list| list.flagged_cues.contains(&cue.id())),
+            )),
         }
     }
 
@@ -2125,6 +2171,75 @@ mod tests {
         assert_eq!(parsed.args, vec![s("LX5")]);
         assert!(parse_text_message(b"/cue/5/qName LX 5").is_none(), "plain-text arguments cannot contain spaces");
         assert!(parse_text_message(b"/cue/5/stop 1").is_none());
+    }
+
+    #[test]
+    fn qlab_notes_color_name_and_flagged_read_and_write_like_qlab() {
+        use crate::cue::types::CueColor;
+        let s = |v: &str| rosc::OscType::String(v.to_owned());
+
+        // Writes: notes and colorName take one string, flagged takes a boolean
+        // (or `toggle` / the /toggle suffix since QLab 5.2).
+        assert!(matches!(resolve_action("/cue/5/notes", &[s(" LX 5 is hot")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetNotes(ref n), .. } if n == " LX 5 is hot"));
+        assert!(matches!(resolve_action("/cue/5/colorName", &[s("green")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetColor(CueColor::Green), .. }));
+        assert!(matches!(resolve_action("/cue/5/colorName", &[s("Hot Pink")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetColor(CueColor::HotPink), .. }));
+        assert!(matches!(resolve_action("/cue/5/flagged", &[rosc::OscType::Int(1)]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetFlagged(Some(true)), .. }));
+        assert!(matches!(resolve_action("/cue/5/flagged", &[s("no")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetFlagged(Some(false)), .. }));
+        assert!(matches!(resolve_action("/cue/5/flagged", &[s("toggle")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetFlagged(None), .. }));
+        assert!(matches!(resolve_action("/cue/5/flagged/toggle", &[]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetFlagged(None), .. }));
+        assert!(matches!(resolve_action("/cue/*/colorName", &[s("red")]),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::SetColor(CueColor::Red), .. }));
+        for (address, args) in [
+            ("/cue/5/notes", &[][..]),
+            ("/cue/5/notes", &[s(""), s("x")][..]),
+            ("/cue/5/colorName", &[s("chartreuse")][..]),
+            ("/cue/5/colorName", &[][..]),
+            ("/cue/5/flagged", &[s("maybe")][..]),
+            ("/cue/5/flagged/toggle", &[rosc::OscType::Int(1)][..]),
+            ("/cue/5/flagged/extra", &[][..]),
+        ] {
+            assert!(matches!(resolve_action(address, args), OscAction::Unmatched), "{address} {args:?}");
+        }
+        // Writes stay control-level; plain text takes the single argument.
+        assert!(matches!(authorized_action("/cue/5/flagged", &[rosc::OscType::Int(1)], false), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/5/colorName", &[s("red")], true),
+            OscAction::AddressedCue { action, .. } if action.is_write()));
+        assert!(parse_text_message(b"/cue/5/notes hello").is_some());
+        assert!(parse_text_message(b"/cue/5/colorName red").is_some());
+        assert!(parse_text_message(b"/cue/5/flagged 1").is_some());
+        assert!(parse_text_message(b"/cue/5/flagged/toggle").is_some());
+        assert!(parse_text_message(b"/cue/5/notes").is_none());
+
+        // Reads: the three properties query like the rest, by number or ID.
+        let mut workspace = Workspace::new("Property reads");
+        let mut cue = crate::cue::memo_cue::MemoCue::new();
+        cue.set_number(Some("5".into()));
+        cue.set_notes("check the rig".into());
+        cue.set_color(CueColor::SkyBlue);
+        let id = cue.id();
+        workspace.active_cue_list_mut().unwrap().push(Box::new(cue));
+        workspace.active_cue_list_mut().unwrap().flagged_cues.insert(id);
+
+        let read = |address: &str, workspace: &Workspace| {
+            let message = query_message(address);
+            CueQuery::parse(&message).unwrap().read(workspace, peer(), 0)
+        };
+        assert_eq!(read("/cue/5/notes", &workspace), Some(serde_json::json!("check the rig")));
+        assert_eq!(read("/cue/5/colorName", &workspace), Some(serde_json::json!("sky_blue")));
+        assert_eq!(read("/cue/5/flagged", &workspace), Some(serde_json::json!(true)));
+        assert_eq!(read(&format!("/cue_id/{id}/colorName"), &workspace), Some(serde_json::json!("sky_blue")));
+        workspace.active_cue_list_mut().unwrap().flagged_cues.remove(&id);
+        assert_eq!(read("/cue/5/flagged", &workspace), Some(serde_json::json!(false)));
+        // The toggle suffix is a command, not a query.
+        assert!(CueQuery::parse(&query_message("/cue/5/flagged/toggle")).is_none());
+        assert!(parse_text_message(b"/cue/5/flagged").is_none(), "reads are binary-OSC only");
     }
 
     #[test]

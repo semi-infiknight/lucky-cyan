@@ -165,6 +165,76 @@ pub enum CueColor {
     SkyBlue,
 }
 
+impl CueColor {
+    /// QLab OSC `/cue/{n}/colorName` read form: the snake_case name
+    /// ("none", "green", "hot_pink", ...).
+    pub fn osc_name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Red => "red",
+            Self::Orange => "orange",
+            Self::Yellow => "yellow",
+            Self::Green => "green",
+            Self::Cyan => "cyan",
+            Self::Blue => "blue",
+            Self::Purple => "purple",
+            Self::Pink => "pink",
+            Self::White => "white",
+            Self::Black => "black",
+            Self::Berry => "berry",
+            Self::Crimson => "crimson",
+            Self::Forest => "forest",
+            Self::Gray => "gray",
+            Self::HotPink => "hot_pink",
+            Self::Indigo => "indigo",
+            Self::Lavender => "lavender",
+            Self::Magenta => "magenta",
+            Self::Midnight => "midnight",
+            Self::Olive => "olive",
+            Self::Peach => "peach",
+            Self::Plum => "plum",
+            Self::SkyBlue => "sky_blue",
+        }
+    }
+
+    /// Parse an OSC color name case-insensitively, ignoring spaces, underscores
+    /// and hyphens: "hot pink", "hot_pink" and "HotPink" are all hot pink.
+    pub fn from_osc_name(name: &str) -> Option<Self> {
+        let normalized: String = name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        Some(match normalized.as_str() {
+            "none" | "nocolor" => Self::None,
+            "red" => Self::Red,
+            "orange" => Self::Orange,
+            "yellow" => Self::Yellow,
+            "green" => Self::Green,
+            "cyan" => Self::Cyan,
+            "blue" => Self::Blue,
+            "purple" => Self::Purple,
+            "pink" => Self::Pink,
+            "white" => Self::White,
+            "black" => Self::Black,
+            "berry" => Self::Berry,
+            "crimson" => Self::Crimson,
+            "forest" => Self::Forest,
+            "gray" | "grey" => Self::Gray,
+            "hotpink" => Self::HotPink,
+            "indigo" => Self::Indigo,
+            "lavender" => Self::Lavender,
+            "magenta" => Self::Magenta,
+            "midnight" => Self::Midnight,
+            "olive" => Self::Olive,
+            "peach" => Self::Peach,
+            "plum" => Self::Plum,
+            "skyblue" => Self::SkyBlue,
+            _ => return None,
+        })
+    }
+}
+
 /// Play count meaning "loop this slice forever" (a *vamp*).
 pub const PLAY_COUNT_INFINITE: u32 = u32::MAX;
 
