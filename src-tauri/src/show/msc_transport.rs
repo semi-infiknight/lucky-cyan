@@ -95,7 +95,7 @@ pub(super) fn apply(
     match action {
         MscAction::Go(number) => {
             let target = if let Some(number) = number.as_deref() {
-                list.unique_numbered_cue(number).filter(|cue| !cue.is_disabled())
+                list.unique_numbered_cue_deep(number).filter(|cue| !cue.is_disabled())
             } else if list.independent_pads() {
                 None
             } else {
@@ -120,14 +120,14 @@ pub(super) fn apply(
         }
         MscAction::Step { forward, sequence } => list.step_standby(forward, sequence),
         MscAction::Reset(Some(number)) => {
-            let Some(id) = list.unique_numbered_cue(&number).map(|cue| cue.id()) else {
+            let Some(id) = list.unique_numbered_cue_deep(&number).map(|cue| cue.id()) else {
                 return Ok(false);
             };
             transport.reset_cue(list, id)?;
             Ok(true)
         }
         MscAction::Pause(Some(ref number)) | MscAction::Resume(Some(ref number)) | MscAction::Load(Some(ref number)) => {
-            let Some(id) = list.unique_numbered_cue(number).map(|cue| cue.id()) else {
+            let Some(id) = list.unique_numbered_cue_deep(number).map(|cue| cue.id()) else {
                 return Ok(false);
             };
             let Some(cue) = list.get_mut(&id) else { return Ok(false) };
@@ -304,6 +304,34 @@ mod tests {
         let calls = calls.lock().unwrap();
         let prepared = calls.iter().filter(|call| matches!(call, crate::test_support::EngineCall::AudioPlayPausedRouted { .. })).count();
         assert_eq!(prepared, 2);
+    }
+
+    #[test]
+    fn msc_q_path_addresses_a_nested_cue() {
+        use crate::cue::{group_cue::GroupCue, types::ContinueMode, wait_cue::WaitCue};
+        let (context, _, _) = crate::test_support::recording_context();
+        let mut transport = Transport::new(context);
+        let mut show = Workspace::new("Q path");
+        let list = show.active_cue_list_mut().unwrap();
+        list.auto_renumber = false;
+        let mut group = GroupCue::new();
+        group.set_number(Some("3".into()));
+        let mut child = WaitCue::new();
+        child.set_continue_mode(ContinueMode::DoNotContinue);
+        child.set_number(Some("3.1".into()));
+        let child_id = child.id();
+        group.children.push(Box::new(child));
+        list.push(Box::new(group));
+
+        // MSC GO with q_number "3", empty q_list, q_path "1" -> cue "3.1".
+        let mut frame = vec![0xf0, 0x7f, 127, 0x02, 16, 1u8];
+        frame.extend_from_slice(b"3\x00\x001");
+        frame.push(0xf7);
+        let decoded = MscTransport::decode(&frame, 7).unwrap(); // device 127 = all-call
+        assert!(matches!(&decoded.action, MscAction::Go(Some(n)) if n == "3.1"));
+        assert!(decoded.list.is_none());
+        assert!(apply(&mut transport, &mut show, decoded, || true).unwrap());
+        assert!(show.active_cue_list().unwrap().get_recursive(&child_id).unwrap().is_running());
     }
 
     #[test]

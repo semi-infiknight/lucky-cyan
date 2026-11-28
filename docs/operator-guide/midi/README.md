@@ -71,7 +71,7 @@ Message framing and operand examples follow the MSC specification and QLab's com
 3. Stop the rehearsal. Send **STANDBY_+** or **STANDBY_-** and confirm that standby moves one armed row without starting a cue. Send an unnumbered **GO** to start the current standby. Send **ALL_OFF** to stop playback across lists.
 4. Suspend incoming MIDI in Preferences. Send a rehearsal command and confirm the desk stays idle. Choose **Restore MIDI input** in the transport bar and send a fresh command.
 
-Inkue accepts Lighting (General), Sound (General) and Video (General) at the configured device ID and the standard all-call ID 127. Numbered GO, STOP, RESUME, LOAD and RESET use an exact, unique top-level cue number in the addressed list. With no Q list, they use the active list. LOAD prepares supported media for a separate start. Unnumbered RESUME resumes paused playback across lists while held Load media awaits Start. Q path addressing remains open. [QLab MIDI and MSC](https://reference.qlab.app/docs/v5/networking/using-midi-and-msc/)
+Inkue accepts Lighting (General), Sound (General) and Video (General) at the configured device ID and the standard all-call ID 127. Numbered GO, STOP, RESUME, LOAD and RESET use an exact, unique cue number in the addressed list. With no Q list, they use the active list. LOAD prepares supported media for a separate start. Unnumbered RESUME resumes paused playback across lists while held Load media awaits Start. Q path addressing (q_number + q_path, slashes or dots) resolves hierarchical cue numbers such as `3.2.1`, matched uniquely across the whole list including group children. [QLab MIDI and MSC](https://reference.qlab.app/docs/v5/networking/using-midi-and-msc/)
 
 ### Pause or load the highlighted cues
 

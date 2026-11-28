@@ -85,14 +85,27 @@ impl MscTransport {
         }
 
         let mut fields = payload.split(|&byte| byte == 0);
-        let number = decode_address(fields.next()?)?;
+        let number_field = fields.next()?;
         let list = match fields.next() {
             Some(list) if !list.is_empty() => Some(decode_address(list)?),
             _ => None,
         };
-        // A trailing delimiter may omit the path. Hierarchical paths have
-        // their own addressing rules and cannot fall through to a list match.
-        if fields.next().is_some_and(|path| !path.is_empty()) || fields.next().is_some() {
+        // Q path: a hierarchical address inside the list ("2/1" → "2.1").
+        // Combined with the Q number when both are present ("3" + "2/1" →
+        // "3.2.1"); slash and dot both separate levels.
+        let number = match fields.next() {
+            Some(path) if !path.is_empty() => {
+                let path = std::str::from_utf8(path).ok()?.replace('/', ".");
+                let combined = match decode_address(number_field) {
+                    Some(number) => format!("{number}.{path}"),
+                    None if number_field.is_empty() => path,
+                    None => return None,
+                };
+                valid_cue_number(&combined).then(|| combined)?
+            }
+            _ => decode_address(number_field)?,
+        };
+        if fields.next().is_some() {
             return None;
         }
         let action = match command {
@@ -256,13 +269,21 @@ mod tests {
         assert_eq!(MscTransport::decode(&frame(7, 16, 8, b""), 7), unscoped(MscAction::AllOff));
         assert_eq!(MscTransport::decode(&frame(7, 16, 1, b"1\x0004\x00"), 7),
             Some(MscTransport { action: MscAction::Go(Some("1".into())), list: Some("04".into()) }));
+        // Q path addressing: q_path combines with the Q number into a
+        // hierarchical cue number (slash and dot both separate levels).
+        assert_eq!(MscTransport::decode(&frame(7, 16, 1, b"1\x004\x002/1"), 7),
+            Some(MscTransport { action: MscAction::Go(Some("1.2.1".into())), list: Some("4".into()) }));
+        assert_eq!(MscTransport::decode(&frame(7, 16, 1, b"\x004\x003.2"), 7),
+            Some(MscTransport { action: MscAction::Go(Some("3.2".into())), list: Some("4".into()) }));
+        assert_eq!(MscTransport::decode(&frame(7, 16, 10, b"7\x00\x00"), 7),
+            unscoped(MscAction::Reset(Some("7".into()))));
         assert_eq!(MscTransport::decode(&frame(7, 16, 20, b"04"), 7),
             Some(MscTransport { action: MscAction::Step { forward: false, sequence: true }, list: Some("04".into()) }));
         for rejected in [
             frame(8, 16, 1, b"1"),
             frame(7, 17, 1, b"1"),
-            frame(7, 16, 1, b"1\x00\x004"),
-            frame(7, 16, 1, b"1\x004\x005"),
+            frame(7, 16, 1, b"1\x004\x005\x006"),
+            frame(7, 16, 1, b"1\x004\x00a/b"),
             frame(7, 16, 17, b"1\x004"),
             frame(7, 16, 1, b"1..2"),
             frame(7, 16, 2, b"\x0004"),

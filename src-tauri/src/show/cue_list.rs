@@ -446,6 +446,27 @@ impl CueList {
         matches.next().is_none().then(|| first.as_ref())
     }
 
+    /// Unique cue with this (possibly hierarchical, e.g. "3.1") number anywhere
+    /// in the list, including group children — MSC Q paths address nested cues.
+    pub(crate) fn unique_numbered_cue_deep(&self, number: &str) -> Option<&dyn Cue> {
+        fn collect<'a>(cues: &'a [Box<dyn Cue>], number: &str, found: &mut Vec<&'a dyn Cue>) {
+            for cue in cues {
+                if cue.number() == Some(number) {
+                    found.push(cue.as_ref());
+                }
+                if let Some(children) = cue.child_cues() {
+                    collect(children, number, found);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        collect(&self.cues, number, &mut found);
+        match found.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        }
+    }
+
     /// Resolve an operator's standby request without guessing among duplicates.
     pub(crate) fn goto_number_target(&self, number: &str) -> Result<CueId> {
         anyhow::ensure!(!self.independent_pads(), "Choose a cue list to move standby by number.");
@@ -1973,6 +1994,22 @@ mod tests {
         let group_id = group.id;
         list.push(Box::new(group));
         (list, group_id, child_id)
+    }
+
+    #[test]
+    fn unique_numbered_cue_deep_finds_nested_and_rejects_duplicates() {
+        let (mut list, group_id, child_id) = list_with_group_child();
+        list.get_mut_recursive(&group_id).unwrap().set_number(Some("3".into()));
+        list.get_mut_recursive(&child_id).unwrap().set_number(Some("3.1".into()));
+        // Top-level lookup still works, nested numbers resolve deeply.
+        assert_eq!(list.unique_numbered_cue_deep("3").map(|c| c.id()), Some(group_id));
+        assert_eq!(list.unique_numbered_cue_deep("3.1").map(|c| c.id()), Some(child_id));
+        assert!(list.unique_numbered_cue("3.1").is_none(), "top-level lookup must not see the child");
+        assert!(list.unique_numbered_cue_deep("9").is_none());
+        // A duplicate anywhere in the tree makes the number ambiguous.
+        let dup = numbered_memo(Some("3.1"));
+        list.push(dup);
+        assert!(list.unique_numbered_cue_deep("3.1").is_none());
     }
 
     #[test]
