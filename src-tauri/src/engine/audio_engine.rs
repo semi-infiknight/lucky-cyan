@@ -1474,6 +1474,24 @@ impl AudioEngine {
         }).unwrap_or(false)
     }
 
+    /// Latest live output levels of a voice as linear amplitudes:
+    /// `([peak_l, peak_r], [rms_l, rms_r])`, updated by the RT callback each
+    /// block.  `None` when the voice is unknown; zeros when silent.
+    pub fn voice_levels(&self, voice_id: VoiceId) -> Option<([f32; 2], [f32; 2])> {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.with_voice(voice_id, |voice| {
+            let peak = [
+                f32::from_bits(voice.inner.live_peak[0].load(Relaxed)),
+                f32::from_bits(voice.inner.live_peak[1].load(Relaxed)),
+            ];
+            let rms = [
+                f32::from_bits(voice.inner.live_rms[0].load(Relaxed)),
+                f32::from_bits(voice.inner.live_rms[1].load(Relaxed)),
+            ];
+            (peak, rms)
+        })
+    }
+
     /// Current playback position of a voice in **file time** (ms).
     ///
     /// Reads the RT frame cursor, so it reflects loops and slice jumps —
@@ -2297,6 +2315,7 @@ fn fill_buffer(
 
         let mut voice_peak_l = 0.0_f32;
         let mut voice_peak_r = 0.0_f32;
+        let mut voice_sum = [0.0_f64; 2];
 
         let (output, channels, left, right) = match (voice.patch_effects.as_deref(), patch_block) {
             (None, _) => (&mut *output, channels, voice.out_l, voice.out_r),
@@ -2320,10 +2339,11 @@ fn fill_buffer(
         if voice.live.is_some() {
             if let Some(feeds) = feeds_guard.as_deref() {
                 let mut peaks = [0.0; 2];
-                mix_live(output, channels, output_sample_rate, voice, feeds, status_prod, [left, right], &mut peaks, output_period);
+                mix_live(output, channels, output_sample_rate, voice, feeds, status_prod, [left, right], &mut peaks, &mut voice_sum, output_period);
                 [voice_peak_l, voice_peak_r] = peaks;
             }
-            accumulate_peaks(voice, voice_peak_l, voice_peak_r, &mut peak_l, &mut peak_r, &mut patch_peaks);
+            let rms = rms_levels(voice_sum, frames);
+            accumulate_peaks(voice, voice_peak_l, voice_peak_r, rms, &mut peak_l, &mut peak_r, &mut patch_peaks);
             continue;
         }
         let patch_gain = voice.patch_gain();
@@ -2530,7 +2550,7 @@ fn fill_buffer(
                 }
                 let mut peaks = [voice_peak_l, voice_peak_r];
                 matrix.mix(&input_frame[..inputs], matrix_gain * fade_gain, output_gains,
-                    &mut output[out_base..out_base + channels], &mut peaks);
+                    &mut output[out_base..out_base + channels], &mut peaks, &mut voice_sum);
                 [voice_peak_l, voice_peak_r] = peaks;
             } else {
                 let sample_l = input_frame[0];
@@ -2547,6 +2567,8 @@ fn fill_buffer(
 
                 voice_peak_l = voice_peak_l.max(out_l.abs());
                 voice_peak_r = voice_peak_r.max(out_r.abs());
+                voice_sum[0] += f64::from(out_l) * f64::from(out_l);
+                voice_sum[1] += f64::from(out_r) * f64::from(out_r);
             }
 
             frame_pos_f += rate * sample_rate_ratio;
@@ -2578,7 +2600,8 @@ fn fill_buffer(
             effects.finish_buffer();
         }
 
-        accumulate_peaks(voice, voice_peak_l, voice_peak_r, &mut peak_l, &mut peak_r, &mut patch_peaks);
+        let rms = rms_levels(voice_sum, frames);
+        accumulate_peaks(voice, voice_peak_l, voice_peak_r, rms, &mut peak_l, &mut peak_r, &mut patch_peaks);
     }
 
     for active in patch_blocks.into_iter().flatten() {
@@ -2614,14 +2637,25 @@ pub const PATCH_VU_SLOTS: usize = 16;
 
 /// Fold one voice's block peaks into the master meters and, when the voice is
 /// routed through a metered Output Patch, into that patch's VU slot.
+fn rms_levels(sum_sq: [f64; 2], frames: usize) -> [f32; 2] {
+    let frames = frames.max(1) as f64;
+    [(sum_sq[0] / frames).sqrt() as f32, (sum_sq[1] / frames).sqrt() as f32]
+}
+
 fn accumulate_peaks(
     voice: &Arc<Voice>,
     voice_peak_l: f32,
     voice_peak_r: f32,
+    voice_rms: [f32; 2],
     peak_l: &mut f32,
     peak_r: &mut f32,
     patch_peaks: &mut [f32; PATCH_VU_SLOTS * 2],
 ) {
+    use std::sync::atomic::Ordering::Relaxed;
+    voice.inner.live_peak[0].store(voice_peak_l.to_bits(), Relaxed);
+    voice.inner.live_peak[1].store(voice_peak_r.to_bits(), Relaxed);
+    voice.inner.live_rms[0].store(voice_rms[0].to_bits(), Relaxed);
+    voice.inner.live_rms[1].store(voice_rms[1].to_bits(), Relaxed);
     *peak_l = (*peak_l).max(voice_peak_l);
     *peak_r = (*peak_r).max(voice_peak_r);
     if let Some(slot) = voice.patch_slot {
@@ -2651,6 +2685,7 @@ fn mix_live(
     status_prod: &mut ringbuf::HeapProd<AudioStatus>,
     [left, right]: [usize; 2],
     peaks: &mut [f32; 2],
+    sum_sq: &mut [f64; 2],
     output_period: &Arc<std::sync::atomic::AtomicU32>,
 ) {
     let Some(live) = voice.live.as_ref() else { return };
@@ -2729,7 +2764,7 @@ fn mix_live(
         if let Some(matrix) = matrix.as_deref() {
             let source = [s_l, s_r];
             matrix.mix(&source[..inputs], matrix_gain * fade_gain, None,
-                &mut output[base..base + channels], peaks);
+                &mut output[base..base + channels], peaks, sum_sq);
         } else {
             let out_l = s_l * gain_l * fade_gain;
             let out_r = s_r * gain_r * fade_gain;
@@ -2737,6 +2772,8 @@ fn mix_live(
             if right < channels { output[base + right] += out_r; }
             peaks[0] = peaks[0].max(out_l.abs());
             peaks[1] = peaks[1].max(out_r.abs());
+            sum_sq[0] += f64::from(out_l) * f64::from(out_l);
+            sum_sq[1] += f64::from(out_r) * f64::from(out_r);
         }
 
         read += ratio;
@@ -3775,7 +3812,7 @@ mod tests {
         let mut peaks = [0.0; 2];
         let period = Arc::new(std::sync::atomic::AtomicU32::new(256));
 
-        mix_live(&mut out, 2, 48_000, &voice, &feeds, &mut status_prod, [0, 1], &mut peaks, &period);
+        mix_live(&mut out, 2, 48_000, &voice, &feeds, &mut status_prod, [0, 1], &mut peaks, &mut [0.0; 2], &period);
 
         // Center pan → both gains = sqrt(0.5) ≈ 0.707; L = 0.5·0.707 ≈ 0.354.
         assert!(out[0] > 0.34 && out[0] < 0.37, "L sample was {}", out[0]);
@@ -3986,6 +4023,24 @@ mod tests {
             !statuses.iter().any(|s| matches!(s, AudioStatus::SliceBoundary { .. })),
             "no repeat SliceBoundary without a new Devamp"
         );
+    }
+
+    #[test]
+    fn voice_levels_report_block_peak_and_rms() {
+        // Constant 0.5 signal, unity gain: peak and RMS must both land at 0.5.
+        let samples = Arc::new(vec![0.5f32; 2000]);
+        let voice = Voice::new(samples, 2, 48_000, 1.0, 0.0);
+        voice.set_playing();
+        let voice = Arc::new(voice);
+        let pool = rt_pool(vec![Arc::clone(&voice)]);
+        let _ = run_block(&pool, None);
+        use std::sync::atomic::Ordering::Relaxed;
+        let peak_l = f32::from_bits(voice.inner.live_peak[0].load(Relaxed));
+        let rms_l = f32::from_bits(voice.inner.live_rms[0].load(Relaxed));
+        // Center pan applies the constant-power gain (cos(pi/4) = 0.7071).
+        let expected = 0.5 * std::f32::consts::FRAC_1_SQRT_2;
+        assert!((peak_l - expected).abs() < 0.01, "peak mismatch: {peak_l}");
+        assert!((rms_l - expected).abs() < 0.01, "rms mismatch: {rms_l}");
     }
 
     #[test]

@@ -2057,6 +2057,9 @@ enum CueQueryProperty {
     TargetNumber,
     /// QLab `/cue/{n}/cueTargetID` read: the saved target's unique ID, or null.
     TargetId,
+    /// QLab `/cue/{n}/liveAverageLevel/{channel}` read: the running voice's
+    /// average output level on that channel, in dB (null when not running).
+    LiveAverageLevel { channel: u32 },
 }
 
 #[derive(Clone, Copy)]
@@ -2429,6 +2432,13 @@ impl<'a> CueQuery<'a> {
                 }
                 CueQueryProperty::SlicePlayCount { index: index - 1 }
             }
+            property if property.starts_with("liveAverageLevel/") => {
+                let channel = property.strip_prefix("liveAverageLevel/")?.parse::<u32>().ok()?;
+                if channel >= 128 {
+                    return None;
+                }
+                CueQueryProperty::LiveAverageLevel { channel }
+            }
             property if property.starts_with("level/") => {
                 let (rest, live) = match property.strip_suffix("/live") {
                     Some(core) => (core, true),
@@ -2571,13 +2581,8 @@ impl<'a> CueQuery<'a> {
         }
     }
 
-    fn read_cue(
-        &self,
-        workspace: &Workspace,
-        target: CueQueryTarget<'_>,
-        property: CueQueryProperty,
-    ) -> Option<serde_json::Value> {
-        let cue = match target {
+    fn resolve_cue<'w>(&self, workspace: &'w Workspace, target: CueQueryTarget<'_>) -> Option<&'w dyn Cue> {
+        match target {
             CueQueryTarget::Playhead => {
                 let list = workspace.active_cue_list().filter(|list| list.cues.len() <= MAX_SCOPED_ROWS)?;
                 let playhead = list.playhead_cue()?;
@@ -2597,7 +2602,16 @@ impl<'a> CueQuery<'a> {
             }
             CueQueryTarget::Number(number) => unique_workspace_cue(workspace, |cue| cue.number() == Some(number)).map(|(_, cue)| cue),
             CueQueryTarget::Id(id) => unique_workspace_cue(workspace, |cue| cue.id() == id).map(|(_, cue)| cue),
-        }?;
+        }
+    }
+
+    fn read_cue(
+        &self,
+        workspace: &Workspace,
+        target: CueQueryTarget<'_>,
+        property: CueQueryProperty,
+    ) -> Option<serde_json::Value> {
+        let cue = self.resolve_cue(workspace, target)?;
         match property {
             CueQueryProperty::Number => cue.number()
                 .filter(|number| number.len() <= MAX_CUE_ADDRESS_NUMBER_BYTES)
@@ -2708,6 +2722,9 @@ impl<'a> CueQuery<'a> {
                     .map(|id| serde_json::json!(id.to_string()))
                     .unwrap_or(serde_json::Value::Null))
             }
+            // Live meter reads need the engines and are resolved in
+            // `handle_query`, not here.
+            CueQueryProperty::LiveAverageLevel { .. } => None,
         }
     }
 
@@ -2835,19 +2852,57 @@ fn handle_query(query: CueQuery<'_>, src: SocketAddr, handle: &tauri::AppHandle)
         // A read never blocks show work. A busy desk sends no reply; the peer can retry.
         let workspace = state.workspace.try_lock().ok()?;
         let (workspace_id, data) = query.reply_data(&workspace, src, port)?;
-        // `/fullScreen` prefers the live window state when a main window exists.
-        let data = if matches!(query.kind, CueQueryKind::App(AppQueryKind::Fullscreen)) {
-            handle.get_webview_window("main")
-                .and_then(|window| window.is_fullscreen().ok())
-                .map(serde_json::Value::Bool)
-                .or(data)
-        } else {
-            data
+        let data = match &query.kind {
+            // `/fullScreen` prefers the live window state when a main window exists.
+            CueQueryKind::App(AppQueryKind::Fullscreen) => {
+                handle.get_webview_window("main")
+                    .and_then(|window| window.is_fullscreen().ok())
+                    .map(serde_json::Value::Bool)
+                    .or(data)
+            }
+            // Live meter reads need the engines, so they resolve outside `read`.
+            CueQueryKind::Cue { target, property: CueQueryProperty::LiveAverageLevel { channel } } => {
+                Some(live_average_level(&query, &workspace, *target, *channel, &state))
+            }
+            _ => data,
         };
         (workspace_id, data)
     };
     let format = current_reply_format(src);
     query.encode_reply_formatted(workspace_id, data, format.as_deref())
+}
+
+/// QLab `/cue/{n}/liveAverageLevel/{channel}`: the running voice's average
+/// output level on that channel in dB (null when the cue has no running voice
+/// or the channel is unmetered).  Video cues meter their paired soundtrack
+/// voice; channels are 0-based over the voice's metered stereo pair.
+fn live_average_level(
+    query: &CueQuery<'_>,
+    workspace: &Workspace,
+    target: CueQueryTarget<'_>,
+    channel: u32,
+    state: &AppState,
+) -> serde_json::Value {
+    let Some(cue) = query.resolve_cue(workspace, target) else {
+        return serde_json::Value::Null;
+    };
+    let Some(voice) = cue.playing_voice_id() else {
+        return serde_json::Value::Null;
+    };
+    let audio_voice = if cue.is_visual() {
+        match state.output_engine.video_audio_voice(voice) {
+            Some(id) => id,
+            None => return serde_json::Value::Null,
+        }
+    } else {
+        voice
+    };
+    match state.audio_engine.voice_levels(audio_voice) {
+        Some((_, rms)) => rms.get(channel as usize).copied().map_or(serde_json::Value::Null, |level| {
+            if level > 0.0 { serde_json::json!(20.0 * level.log10()) } else { serde_json::Value::Null }
+        }),
+        None => serde_json::Value::Null,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3658,6 +3713,25 @@ mod tests {
             CueQuery::parse(&message).unwrap().read(&workspace, peer(), 0).unwrap(),
             serde_json::json!("5")
         );
+    }
+
+    #[test]
+    fn qlab_live_average_level_query_parses_with_channel() {
+        for (address, channel) in [("/cue/5/liveAverageLevel/0", 0), ("/cue/5/liveAverageLevel/1", 1)] {
+            let message = query_message(address);
+            let query = CueQuery::parse(&message).unwrap();
+            assert!(matches!(query.kind,
+                CueQueryKind::Cue { property: CueQueryProperty::LiveAverageLevel { channel: c }, .. } if c == channel));
+            assert!(!query.is_any_access(), "live meter reads are show data (allowlist)");
+        }
+        for address in ["/cue/5/liveAverageLevel", "/cue/5/liveAverageLevel/x", "/cue/5/liveAverageLevel/128", "/cue/5/liveAverageLevel/0/1"] {
+            assert!(CueQuery::parse(&query_message(address)).is_none(), "{address}");
+        }
+        // `read()` itself yields None for this property: handle_query resolves
+        // the live meter from the engines before encoding the reply.
+        let message = query_message("/cue/5/liveAverageLevel/0");
+        let workspace = Workspace::new("Blue");
+        assert!(CueQuery::parse(&message).unwrap().read(&workspace, peer(), 0).is_none());
     }
 
     #[test]

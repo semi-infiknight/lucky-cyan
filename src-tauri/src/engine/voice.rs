@@ -184,7 +184,7 @@ impl LevelMatrix {
             .map_or(0.0, |p| p.1)
     }
 
-    pub(super) fn mix(&self, samples: &[f32], level: f32, trim: Option<&OutputGains>, output: &mut [f32], peaks: &mut [f32; 2]) {
+    pub(super) fn mix(&self, samples: &[f32], level: f32, trim: Option<&OutputGains>, output: &mut [f32], peaks: &mut [f32; 2], sum_sq: &mut [f64; 2]) {
         for (channel, (destination, routes)) in output.iter_mut().zip(&self.outputs).enumerate() {
             let mut sum = 0.0;
             for &(input, gain) in routes {
@@ -193,6 +193,7 @@ impl LevelMatrix {
             let mixed = sum * level * trim.map_or(1.0, |gains| gains[channel] as f32);
             *destination += mixed;
             peaks[channel % 2] = peaks[channel % 2].max(mixed.abs());
+            sum_sq[channel % 2] += f64::from(mixed) * f64::from(mixed);
         }
     }
 }
@@ -323,6 +324,11 @@ pub struct VoiceInner {
     /// [`DEVAMP_STOP`]).  Written from the non-RT side, consumed by the
     /// callback at the next slice boundary.
     pub devamp_request: AtomicU8,
+    /// Latest per-block output levels (f32 bits in atomics): `[peak_l, peak_r]`
+    /// and `[rms_l, rms_r]`.  Written by the RT callback, read by non-RT meter
+    /// queries (`/cue/{n}/liveAverageLevel/{channel}`).
+    pub live_peak: [AtomicU32; 2],
+    pub live_rms: [AtomicU32; 2],
     /// Optional crosspoint routing ([`LevelMatrix`]).  Written once before the
     /// voice is submitted, read-only in the callback.  `None` — the default —
     /// leaves the voice on the original pan + `out_l`/`out_r` mix path.
@@ -638,6 +644,8 @@ impl Voice {
                 gain_bits: AtomicU32::new(f32::to_bits(gain)),
                 pan_bits: AtomicU32::new(f32::to_bits(pan)),
                 loops_remaining: AtomicU32::new(0),
+                live_peak: [const { AtomicU32::new(0) }; 2],
+                live_rms: [const { AtomicU32::new(0) }; 2],
                 rate_fader: Arc::new(RateFader::default()),
                 rate_slew: UnsafeCell::new(RateSlew::default()),
                 cue_trim: None,
@@ -686,6 +694,8 @@ impl Voice {
                 gain_bits: AtomicU32::new(f32::to_bits(gain)),
                 pan_bits: AtomicU32::new(f32::to_bits(pan)),
                 loops_remaining: AtomicU32::new(0),
+                live_peak: [const { AtomicU32::new(0) }; 2],
+                live_rms: [const { AtomicU32::new(0) }; 2],
                 rate_fader: Arc::new(RateFader::default()),
                 rate_slew: UnsafeCell::new(RateSlew::default()),
                 cue_trim: None,
