@@ -165,4 +165,6 @@ pub enum AudioStatus {
     /// Peak levels of all voices routed through one Output Patch slot
     /// (`Voice::patch_slot`) during the last callback block.
     PatchLevels { slot: u8, peak_l: f32, peak_r: f32 },
+    /// Master peak of one auxiliary (non-main) output device, for aux meters.
+    AuxMasterLevels { device_id: String, peak_l: f32, peak_r: f32 },
 }

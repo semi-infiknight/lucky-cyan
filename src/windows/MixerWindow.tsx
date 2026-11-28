@@ -32,6 +32,12 @@ interface PatchLevel {
   peak_r: number;
 }
 
+interface AuxDeviceLevel {
+  device: string;
+  peak_l: number;
+  peak_r: number;
+}
+
 /** Linear peak → fill fraction on a -60..0 dBFS scale. */
 function peakToFraction(peak: number): number {
   if (peak <= 0) return 0;
@@ -320,6 +326,7 @@ export function MixerWindow() {
   const [patches, setPatches] = useState<OutputPatch[]>([]);
   const [gains, setGains] = useState<Record<string, number>>({});
   const [levels, setLevels] = useState<Record<number, PatchLevel>>({});
+  const [auxDevices, setAuxDevices] = useState<AuxDeviceLevel[]>([]);
 
   useEffect(followDeskTheme, []);
 
@@ -339,12 +346,13 @@ export function MixerWindow() {
   useEffect(() => {
     reload();
     // Fresh object per event so StereoVu's attack effect fires every update.
-    const unlistenLevels = listen<{ levels: PatchLevel[] }>("patch-levels", (e) => {
+    const unlistenLevels = listen<{ levels: PatchLevel[]; aux_devices?: AuxDeviceLevel[] }>("patch-levels", (e) => {
       setLevels((prev) => {
         const next = { ...prev };
         for (const l of e.payload.levels) next[l.slot] = { ...l };
         return next;
       });
+      if (e.payload.aux_devices) setAuxDevices(e.payload.aux_devices);
     });
     // Patch table edits in Preferences arrive as workspace-modified.
     const unlistenWs = listen("workspace-modified", reload);
@@ -425,6 +433,29 @@ export function MixerWindow() {
               level={levels[index]}
               onGain={(v) => commitGain(patch.id, v)}
             />
+          ))}
+        </div>
+      )}
+
+      {/* Auxiliary device meters (one VU per non-main output device in use) */}
+      {auxDevices.length > 0 && (
+        <div
+          style={{
+            flexShrink: 0, display: "flex", gap: 12, alignItems: "center",
+            padding: "6px 10px", borderTop: "1px solid var(--wc-border)",
+            background: "var(--wc-bg-surface)", overflowX: "auto",
+          }}
+        >
+          <span style={{ fontSize: 10, fontWeight: 700, color: "var(--wc-text-faint)", letterSpacing: "0.06em" }}>
+            AUX DEVICES
+          </span>
+          {auxDevices.map((aux) => (
+            <span key={aux.device} style={{ display: "inline-flex", alignItems: "center", gap: 6 }} title={aux.device}>
+              <span style={{ fontSize: 10, color: "var(--wc-text-secondary)", maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {aux.device}
+              </span>
+              <StereoVu level={{ slot: -1, peak_l: aux.peak_l, peak_r: aux.peak_r }} />
+            </span>
           ))}
         </div>
       )}

@@ -1597,10 +1597,15 @@ impl AudioEngine {
         if let Ok(mut aux) = self.aux_streams.lock() {
             for s in aux.iter_mut() {
                 while let Some(msg) = s.status_cons.try_pop() {
-                    // Aux master-level meters would fight the main stream's on
-                    // the VU display; only voice-scoped statuses pass through.
-                    if !matches!(msg, AudioStatus::MasterLevels { .. }) {
-                        out.push(msg);
+                    // Aux master levels pass through tagged with their device,
+                    // so the mixer can meter each auxiliary output separately.
+                    match msg {
+                        AudioStatus::MasterLevels { peak_l, peak_r } => out.push(AudioStatus::AuxMasterLevels {
+                            device_id: s.device_id.clone(),
+                            peak_l,
+                            peak_r,
+                        }),
+                        other => out.push(other),
                     }
                 }
                 if s.deadline(audio_clock_us()).is_none() {

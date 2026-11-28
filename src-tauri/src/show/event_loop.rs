@@ -614,6 +614,7 @@ fn tick(
     let mut patch_peaks: [(f32, f32); crate::engine::audio_engine::PATCH_VU_SLOTS] =
         [(0.0, 0.0); crate::engine::audio_engine::PATCH_VU_SLOTS];
     let mut has_patch_levels = false;
+    let mut aux_levels: Vec<(String, f32, f32)> = Vec::new();
 
     for s in audio_statuses {
         match s {
@@ -650,6 +651,15 @@ fn tick(
                     p.0 = p.0.max(peak_l);
                     p.1 = p.1.max(peak_r);
                     has_patch_levels = true;
+                }
+            }
+            AudioStatus::AuxMasterLevels { device_id, peak_l, peak_r } => {
+                match aux_levels.iter_mut().find(|(d, _, _)| *d == device_id) {
+                    Some(entry) => {
+                        entry.1 = entry.1.max(peak_l);
+                        entry.2 = entry.2.max(peak_r);
+                    }
+                    None => aux_levels.push((device_id, peak_l, peak_r)),
                 }
             }
             _ => {}
@@ -697,14 +707,19 @@ fn tick(
     }
 
     // Per-patch levels for the mixer VUs (slot = index in ws.output_patches).
-    if has_patch_levels {
+    if has_patch_levels || !aux_levels.is_empty() {
         let levels: Vec<serde_json::Value> = patch_peaks
             .iter()
             .enumerate()
             .filter(|(_, (l, r))| *l > 0.0 || *r > 0.0)
             .map(|(slot, (l, r))| serde_json::json!({ "slot": slot, "peak_l": l, "peak_r": r }))
             .collect();
-        let _ = handle.emit("patch-levels", serde_json::json!({ "levels": levels }));
+        let aux: Vec<serde_json::Value> = aux_levels
+            .iter()
+            .filter(|(_, l, r)| *l > 0.0 || *r > 0.0)
+            .map(|(device, l, r)| serde_json::json!({ "device": device, "peak_l": l, "peak_r": r }))
+            .collect();
+        let _ = handle.emit("patch-levels", serde_json::json!({ "levels": levels, "aux_devices": aux }));
     }
 
     // ------------------------------------------------------------------
