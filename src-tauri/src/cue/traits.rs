@@ -532,6 +532,13 @@ pub trait Cue: Send + std::any::Any {
     fn set_temporary_target(&mut self, _id: Option<CueId>) {}
     fn temporary_target(&self) -> Option<CueId> { None }
 
+    /// QLab `/cue/{n}/cueTargetNumber` / `cueTargetID` read: the saved target
+    /// cue (first of the target list), `None` when unset.
+    fn target_cue_id(&self) -> Option<CueId> { None }
+    /// QLab write: replace the saved target list with this single target cue
+    /// (`label` is the target's cue number for the inspector, if it has one).
+    fn set_target_cue(&mut self, _id: CueId, _label: Option<String>) {}
+
     // QLab OSC media-cue properties: saved playback rate and crosspoint level
     // matrix (`/cue/{n}/rate`, `/cue/{n}/level/{row}/{col}`), plus the `/live`
     // overrides that drive a running voice without touching saved data.

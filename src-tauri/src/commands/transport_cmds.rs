@@ -252,6 +252,10 @@ pub(crate) enum NetworkCueAction {
     SetTemporaryTargetNumber(String),
     /// QLab `/cue/{n}/tempCueTargetID {uuid}`: same, resolved by unique ID.
     SetTemporaryTargetId(Uuid),
+    /// QLab `/cue/{n}/cueTargetNumber {m}`: saved write of the target cue by number.
+    SetTargetNumber(String),
+    /// QLab `/cue/{n}/cueTargetID {uuid}`: saved write of the target cue by unique ID.
+    SetTargetId(Uuid),
     /// QLab `/cue/{n}/move {position} [{target_group_id}]`: undoable reorder
     /// (0-based position) or move into the target Group at that position.
     Move { position: usize, target: Option<Uuid> },
@@ -319,6 +323,8 @@ impl NetworkCueAction {
                 | NetworkCueAction::SetSlicePlayCount { .. }
                 | NetworkCueAction::SetTemporaryTargetNumber(_)
                 | NetworkCueAction::SetTemporaryTargetId(_)
+                | NetworkCueAction::SetTargetNumber(_)
+                | NetworkCueAction::SetTargetId(_)
                 | NetworkCueAction::Move { .. }
         )
     }
@@ -359,6 +365,18 @@ pub(crate) fn address_numbered_network_cue(
         }
         _ => None,
     };
+    // Resolve a saved-target argument (cue number or unique ID) to
+    // (target id, target number label) before the mutable list borrow.
+    let saved_target = match &action {
+        NetworkCueAction::SetTargetNumber(number) =>
+            go_to_cue_target(&ws, number).map(|(_, id)| (id, Some(number.clone()))),
+        NetworkCueAction::SetTargetId(uuid) => {
+            let uuid = *uuid;
+            crate::engine::osc_server::unique_workspace_cue(&ws, |cue| cue.id() == uuid)
+                .map(|(_, cue)| (cue.id(), cue.number().map(str::to_owned)))
+        }
+        _ => None,
+    };
     let cue_list = &mut ws.cue_lists[index];
 
     match &action {
@@ -367,6 +385,18 @@ pub(crate) fn address_numbered_network_cue(
                 cue.set_temporary_target(temp_target);
             }
             let _ = app_handle.emit("cue-list-refresh", ());
+            Ok(())
+        }
+        // Saved target write: an unresolvable target leaves the saved data
+        // untouched (unlike the temporary form, which clears on None).
+        NetworkCueAction::SetTargetNumber(_) | NetworkCueAction::SetTargetId(_) => {
+            if let Some((target_id, label)) = saved_target {
+                if edit_cue_field(&mut ws, index, id, |cue| cue.set_target_cue(target_id, label)) {
+                    ws.mark_modified();
+                    let _ = app_handle.emit("cue-list-refresh", ());
+                    let _ = app_handle.emit("workspace-modified", serde_json::json!({}));
+                }
+            }
             Ok(())
         }
         NetworkCueAction::Go | NetworkCueAction::Start => {
@@ -575,6 +605,17 @@ pub(crate) fn address_network_cue_pattern(
     if targets.is_empty() {
         return Ok(());
     }
+    // Resolve a saved-target argument once for all wildcard matches.
+    let saved_target = match &action {
+        NetworkCueAction::SetTargetNumber(number) =>
+            go_to_cue_target(&ws, number).map(|(_, id)| (id, Some(number.clone()))),
+        NetworkCueAction::SetTargetId(uuid) => {
+            let uuid = *uuid;
+            crate::engine::osc_server::unique_workspace_cue(&ws, |cue| cue.id() == uuid)
+                .map(|(_, cue)| (cue.id(), cue.number().map(str::to_owned)))
+        }
+        _ => None,
+    };
     let mut transport = Transport::new(workspace_context(state, &ws));
     let mut first_error: Option<String> = None;
     let mut wrote = false;
@@ -610,6 +651,18 @@ pub(crate) fn address_network_cue_pattern(
                     wrote = true;
                 }
                 result
+            }
+            NetworkCueAction::SetTargetNumber(_) | NetworkCueAction::SetTargetId(_) => {
+                match &saved_target {
+                    Some((target_id, label)) => {
+                        let (target_id, label) = (*target_id, label.clone());
+                        if edit_cue_field(&mut ws, index, id, |cue| cue.set_target_cue(target_id, label)) {
+                            wrote = true;
+                        }
+                        Ok(())
+                    }
+                    None => Ok(()),
+                }
             }
             NetworkCueAction::SetRate { value, live: true } => {
                 let list = &mut ws.cue_lists[index];

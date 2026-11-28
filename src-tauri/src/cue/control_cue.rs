@@ -254,6 +254,12 @@ impl Cue for ControlCue {
     fn set_temporary_target(&mut self, id: Option<CueId>) { self.temporary_target = id; }
     fn temporary_target(&self) -> Option<CueId> { self.temporary_target }
 
+    fn target_cue_id(&self) -> Option<CueId> { self.target_cue_ids.first().copied() }
+    fn set_target_cue(&mut self, id: CueId, label: Option<String>) {
+        self.target_cue_ids = vec![id];
+        self.target_cue_numbers = vec![label.unwrap_or_default()];
+    }
+
     fn replacement_target(&self) -> Option<CueId> { self.replacement_id }
 
     fn control_specification(&self) -> Option<(ControlAction, Vec<CueId>)> {

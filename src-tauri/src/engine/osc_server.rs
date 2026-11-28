@@ -1431,6 +1431,20 @@ fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueActi
             _ => None,
         };
     }
+    // QLab `/cue/{n}/cueTargetNumber {m}` / `cueTargetID {uuid}`: saved write of
+    // the cue's target (resolved against the workspace at dispatch).
+    if verb == "cueTargetNumber" || verb == "cueTargetID" {
+        return match args {
+            [rosc::OscType::String(text)] if verb == "cueTargetNumber" => {
+                qlab_literal_cue_number(text)
+                    .then(|| NetworkCueAction::SetTargetNumber(text.clone()))
+            }
+            [rosc::OscType::String(text)] => {
+                hyphenated_query_id(text).map(NetworkCueAction::SetTargetId)
+            }
+            _ => None,
+        };
+    }
     if toggle_suffix || args.len() != 1 {
         return None;
     }
@@ -1504,7 +1518,8 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
                 | "notes" | "colorName" | "flagged" | "load" | "panic" | "rate" | "level"
                 | "opacity" | "layer" | "blendMode" | "saturation" | "scale" | "rotation"
                 | "translateX" | "translateY" | "infiniteLoop" | "sliceMarker" | "duration"
-                | "tempCueTargetNumber" | "tempCueTargetID" | "move")
+                | "tempCueTargetNumber" | "tempCueTargetID" | "move"
+                | "cueTargetNumber" | "cueTargetID")
         });
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
@@ -2031,6 +2046,10 @@ enum CueQueryProperty {
     TempCueTargetNumber,
     /// QLab `/cue/{n}/tempCueTargetID` read: the temporary target's unique ID, or null.
     TempCueTargetId,
+    /// QLab `/cue/{n}/cueTargetNumber` read: the saved target's cue number, or null.
+    TargetNumber,
+    /// QLab `/cue/{n}/cueTargetID` read: the saved target's unique ID, or null.
+    TargetId,
 }
 
 #[derive(Clone, Copy)]
@@ -2387,6 +2406,8 @@ impl<'a> CueQuery<'a> {
             "sliceMarkers" => CueQueryProperty::SliceMarkers,
             "tempCueTargetNumber" => CueQueryProperty::TempCueTargetNumber,
             "tempCueTargetID" => CueQueryProperty::TempCueTargetId,
+            "cueTargetNumber" => CueQueryProperty::TargetNumber,
+            "cueTargetID" => CueQueryProperty::TargetId,
             property if property.starts_with("sliceMarker/") => {
                 let mut parts = property.strip_prefix("sliceMarker/")?.split('/');
                 let (Some(index), Some(prop), None) = (parts.next(), parts.next(), parts.next()) else {
@@ -2666,6 +2687,17 @@ impl<'a> CueQuery<'a> {
             }
             CueQueryProperty::TempCueTargetId => {
                 Some(cue.temporary_target()
+                    .map(|id| serde_json::json!(id.to_string()))
+                    .unwrap_or(serde_json::Value::Null))
+            }
+            CueQueryProperty::TargetNumber => {
+                let number = cue.target_cue_id()
+                    .and_then(|tid| unique_workspace_cue(workspace, |c| c.id() == tid))
+                    .and_then(|(_, target)| target.number().map(str::to_owned));
+                Some(number.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null))
+            }
+            CueQueryProperty::TargetId => {
+                Some(cue.target_cue_id()
                     .map(|id| serde_json::json!(id.to_string()))
                     .unwrap_or(serde_json::Value::Null))
             }
@@ -3374,6 +3406,58 @@ mod tests {
             .set_temporary_target(Some(target_id));
         assert_eq!(read("/cue/5/tempCueTargetNumber", &workspace).unwrap(), serde_json::json!("12"));
         assert_eq!(read("/cue/5/tempCueTargetID", &workspace).unwrap(), serde_json::json!(target_id.to_string()));
+    }
+
+    #[test]
+    fn qlab_cue_target_writes_and_queries_parse_and_read() {
+        use crate::cue::fade_cue::FadeCue;
+        use crate::cue::wait_cue::WaitCue;
+        let s = |t: &str| rosc::OscType::String(t.into());
+        // Writes: one string argument (cue number, or a UUID for the ID form).
+        assert!(matches!(resolve_action("/cue/5/cueTargetNumber", &[s("12")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetTargetNumber(n), .. } if n == "12"));
+        let id = Uuid::new_v4();
+        assert!(matches!(resolve_action("/cue/5/cueTargetID", &[s(&id.to_string())]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetTargetId(u), .. } if u == id));
+        assert!(matches!(resolve_action("/cue/5/cueTargetID", &[s("not-a-uuid")]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/cueTargetNumber", &[s("a b")]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/cueTargetNumber", &[]), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/5/cueTargetNumber", &[s("12")], false), OscAction::Unmatched));
+        assert!(NetworkCueAction::SetTargetNumber("12".into()).is_write());
+        assert!(NetworkCueAction::SetTargetId(id).is_write());
+        // Wildcard writes are allowed like the other property writes.
+        assert!(matches!(resolve_action("/cue/*/cueTargetNumber", &[s("12")]),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::SetTargetNumber(_), .. }));
+        // Queries: no-arg reads of the saved target's number / unique ID.
+        let message = query_message("/cue/5/cueTargetNumber");
+        assert!(matches!(CueQuery::parse(&message).unwrap().kind,
+            CueQueryKind::Cue { property: CueQueryProperty::TargetNumber, .. }));
+        let message = query_message("/cue/5/cueTargetID");
+        assert!(matches!(CueQuery::parse(&message).unwrap().kind,
+            CueQueryKind::Cue { property: CueQueryProperty::TargetId, .. }));
+
+        let mut workspace = Workspace::new("Blue");
+        let mut fade = FadeCue::new();
+        fade.set_number(Some("5".into()));
+        let fade_id = fade.id();
+        let mut target = WaitCue::new();
+        target.set_number(Some("12".into()));
+        let target_id = target.id();
+        workspace.active_cue_list_mut().unwrap().push(Box::new(fade));
+        workspace.active_cue_list_mut().unwrap().push(Box::new(target));
+        let read = |address: &str, ws: &Workspace| {
+            let message = query_message(address);
+            CueQuery::parse(&message).unwrap().read(ws, peer(), 0)
+        };
+        assert_eq!(read("/cue/5/cueTargetNumber", &workspace).unwrap(), serde_json::Value::Null);
+        assert_eq!(read("/cue/5/cueTargetID", &workspace).unwrap(), serde_json::Value::Null);
+        workspace.active_cue_list_mut().unwrap().get_mut_recursive(&fade_id).unwrap()
+            .set_target_cue(target_id, Some("12".into()));
+        assert_eq!(read("/cue/5/cueTargetNumber", &workspace).unwrap(), serde_json::json!("12"));
+        assert_eq!(read("/cue/5/cueTargetID", &workspace).unwrap(), serde_json::json!(target_id.to_string()));
+        // The write replaces the whole target list with the single target.
+        let fade = workspace.active_cue_list_mut().unwrap().get_mut_recursive(&fade_id).unwrap();
+        assert_eq!(fade.target_cue_id(), Some(target_id));
     }
 
     #[test]

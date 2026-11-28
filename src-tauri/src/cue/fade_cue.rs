@@ -1338,6 +1338,12 @@ impl Cue for FadeCue {
     fn set_temporary_target(&mut self, id: Option<CueId>) { self.temporary_target = id; }
     fn temporary_target(&self) -> Option<CueId> { self.temporary_target }
 
+    fn target_cue_id(&self) -> Option<CueId> { self.target_cue_ids.first().copied() }
+    fn set_target_cue(&mut self, id: CueId, label: Option<String>) {
+        self.target_cue_ids = vec![id];
+        self.target_cue_numbers = vec![label.unwrap_or_default()];
+    }
+
     fn fade_specification(&self) -> Option<FadeAction> {
         Some(FadeAction {
             target_cue_ids: self.temporary_target.map(|id| vec![id]).unwrap_or_else(|| self.target_cue_ids.clone()),
