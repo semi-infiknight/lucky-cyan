@@ -140,6 +140,10 @@ pub enum AudioStatus {
     OutputWithdrawn { voice_id: VoiceId },
     /// A voice has naturally reached the end of its audio data and stopped.
     Completed { voice_id: VoiceId },
+    /// A devamped voice crossed the end of its current slice (its Devamp
+    /// released the loop); the voice keeps playing into the next slice unless
+    /// it also stopped.
+    SliceBoundary { voice_id: VoiceId },
     /// Current playback position of a voice in samples (for UI time display).
     Position {
         voice_id: VoiceId,

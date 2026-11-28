@@ -2433,6 +2433,13 @@ fn fill_buffer(
                         crate::engine::voice::DEVAMP_NONE,
                         std::sync::atomic::Ordering::Relaxed,
                     );
+                    if req != crate::engine::voice::DEVAMP_NONE {
+                        // The devamped slice ended — notify even when the
+                        // voice continues into the next slice, so a boundary
+                        // successor can fire at the slice end.
+                        let _ = status_prod
+                            .try_push(AudioStatus::SliceBoundary { voice_id: voice.id });
+                    }
                     if req == crate::engine::voice::DEVAMP_STOP || end <= seg.start_frame {
                         voice_stopped = true;
                         break end;
@@ -3947,6 +3954,38 @@ mod tests {
         );
         let pos = voice.frame_pos.load(std::sync::atomic::Ordering::Relaxed);
         assert!(pos <= 200, "must not play past the slice boundary, got {pos}");
+    }
+
+    #[test]
+    fn devamp_continue_emits_slice_boundary_while_the_voice_keeps_playing() {
+        // Infinite vamp slice followed by a long tail slice: a continue-Devamp
+        // must emit SliceBoundary at the vamp's end while the voice plays on
+        // into the next slice instead of stopping.
+        let voice = make_voice(1000, 2, 48_000, 1.0);
+        set_slices(&voice, &[(0, 100, u32::MAX), (100, 1000, u32::MAX)]);
+        let id = voice.id;
+        let pool = rt_pool(vec![Arc::clone(&voice)]);
+        run_block(&pool, None); // establish the vamp in slice 0
+
+        let statuses = run_block(&pool, Some(AudioCommand::Devamp { voice_id: id, stop_at_end: false }));
+        assert!(
+            statuses.iter().any(|s| matches!(s, AudioStatus::SliceBoundary { voice_id } if *voice_id == id)),
+            "continue-Devamp must emit SliceBoundary at the slice end"
+        );
+        assert_eq!(voice.voice_state(), VoiceState::Playing, "voice must continue into the next slice");
+        assert!(
+            !statuses.iter().any(|s| matches!(s, AudioStatus::Completed { voice_id } if *voice_id == id)),
+            "continue must not complete the voice"
+        );
+        let pos = voice.frame_pos.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(pos >= 100, "must have advanced past the boundary, got {pos}");
+
+        // The boundary fires once per Devamp, not on every later pass.
+        let statuses = run_block(&pool, None);
+        assert!(
+            !statuses.iter().any(|s| matches!(s, AudioStatus::SliceBoundary { .. })),
+            "no repeat SliceBoundary without a new Devamp"
+        );
     }
 
     #[test]

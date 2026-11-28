@@ -576,6 +576,7 @@ struct PendingPlayback {
     withdrawn: Vec<CueId>,
     resets: HashSet<CueId>,
     video_durations: Vec<(CueId, Duration)>,
+    slice_boundaries: Vec<CueId>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -635,6 +636,9 @@ fn tick(
             AudioStatus::Completed { voice_id } => {
                 output_engine.finish_required_soundtrack(voice_id);
                 pending_playback.completed.push(voice_id);
+            }
+            AudioStatus::SliceBoundary { voice_id } => {
+                pending_playback.slice_boundaries.push(voice_id);
             }
             AudioStatus::MasterLevels { peak_l, peak_r } => {
                 master_peak_l = master_peak_l.max(peak_l);
@@ -712,6 +716,7 @@ fn tick(
         withdrawn: withdrawn_voice_ids,
         resets: exact_output_withdrawals,
         video_durations: video_duration_updates,
+        slice_boundaries: slice_boundary_voice_ids,
     } = std::mem::take(pending_playback);
     let emit_workspace_modified = !video_duration_updates.is_empty();
 
@@ -946,11 +951,15 @@ fn tick(
                     .playing_voice_id()
                     .map(|vid| completed_voice_ids.contains(&vid))
                     .unwrap_or(false);
-                // A Whole-cue Devamp waiting on a released voice completes when
-                // that voice reaches its natural pass end.
+                // A Devamp waiting on a released boundary voice completes when
+                // that voice reaches its natural pass end — or, for a slice
+                // Devamp, when the voice crosses the end of the devamped slice
+                // (the voice may keep playing into the next slice).
                 let devamp_boundary_done = cue
                     .devamp_boundary_voice()
-                    .map(|vid| completed_voice_ids.contains(&vid))
+                    .map(|vid| {
+                        completed_voice_ids.contains(&vid) || slice_boundary_voice_ids.contains(&vid)
+                    })
                     .unwrap_or(false);
                 let time_done = cue.is_time_complete();
                 let group_done = cue.is_complete();
