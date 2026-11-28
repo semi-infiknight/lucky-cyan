@@ -273,6 +273,9 @@ pub(crate) enum NetworkCueAction {
     SetPostWait(f64),
     SetArmed(bool),
     SetQName(String),
+    /// QLab `/cue/{n}/qNumber {string}`: saved write of the cue number
+    /// (an empty string clears it).
+    SetNumber(String),
     SetContinueMode(ContinueMode),
     /// QLab `/cue/{n}/notes {string}`.
     SetNotes(String),
@@ -306,6 +309,7 @@ impl NetworkCueAction {
                 | NetworkCueAction::SetPostWait(_)
                 | NetworkCueAction::SetArmed(_)
                 | NetworkCueAction::SetQName(_)
+                | NetworkCueAction::SetNumber(_)
                 | NetworkCueAction::SetContinueMode(_)
                 | NetworkCueAction::SetNotes(_)
                 | NetworkCueAction::SetColor(_)
@@ -727,6 +731,12 @@ fn write_edit(action: &NetworkCueAction) -> Option<CueEdit<'_>> {
         NetworkCueAction::SetQName(name) => {
             let name = name.clone();
             Some(Box::new(move |cue| cue.set_name(name)))
+        }
+        NetworkCueAction::SetNumber(number) => {
+            let number = number.clone();
+            Some(Box::new(move |cue| {
+                cue.set_number(if number.is_empty() { None } else { Some(number) })
+            }))
         }
         NetworkCueAction::SetContinueMode(mode) => {
             let mode = *mode;

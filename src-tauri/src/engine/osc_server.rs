@@ -1470,6 +1470,13 @@ fn cue_write_action(verb: &str, args: &[rosc::OscType]) -> Option<NetworkCueActi
             }
             _ => None,
         },
+        // QLab `/cue/{n}/qNumber {string}`: saved cue-number write; an empty
+        // string clears the number.
+        "qNumber" => match &args[0] {
+            rosc::OscType::String(number) if number.len() <= MAX_CUE_ADDRESS_NUMBER_BYTES =>
+                Some(NetworkCueAction::SetNumber(number.clone())),
+            _ => None,
+        },
         "continueMode" => match &args[0] {
             rosc::OscType::String(mode) => serde_json::from_str::<crate::cue::types::ContinueMode>(
                 &serde_json::to_string(mode).ok()?,
@@ -1519,7 +1526,7 @@ fn parse_qlab_address<'a>(addr: &'a str, args: &[rosc::OscType]) -> OscAction<'a
                 | "opacity" | "layer" | "blendMode" | "saturation" | "scale" | "rotation"
                 | "translateX" | "translateY" | "infiniteLoop" | "sliceMarker" | "duration"
                 | "tempCueTargetNumber" | "tempCueTargetID" | "move"
-                | "cueTargetNumber" | "cueTargetID")
+                | "cueTargetNumber" | "cueTargetID" | "qNumber")
         });
     let updates_arg = addr == "/updates" || addr.ends_with("/updates")
         || addr == "/alwaysReply" || addr.ends_with("/alwaysReply")
@@ -2370,7 +2377,7 @@ impl<'a> CueQuery<'a> {
         let (kind, address) = path.split_once('/')?;
         let (key, property) = address.split_once('/')?;
         let property = match property {
-            "number" => CueQueryProperty::Number,
+            "number" | "qNumber" => CueQueryProperty::Number,
             "uniqueID" => CueQueryProperty::UniqueId,
             "isRunning" => CueQueryProperty::Running,
             "isPaused" => CueQueryProperty::Paused,
@@ -3619,6 +3626,38 @@ mod tests {
         assert!(matches!(resolve_action(&message.addr, &message.args),
             OscAction::AddressedCue { action: NetworkCueAction::Move { position: 2, target: None }, .. }));
         assert!(parse_text_message(b"/cue/5/move 3 9b2f").is_none());
+    }
+
+    #[test]
+    fn qlab_q_number_write_parses_and_queries_alias_number() {
+        use crate::cue::wait_cue::WaitCue;
+        let s = |t: &str| rosc::OscType::String(t.into());
+        // Write: one string argument (empty clears the number); allowlisted.
+        assert!(matches!(resolve_action("/cue/5/qNumber", &[s("LX 12")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetNumber(n), .. } if n == "LX 12"));
+        assert!(matches!(resolve_action("/cue/5/qNumber", &[s("")]),
+            OscAction::AddressedCue { action: NetworkCueAction::SetNumber(n), .. } if n.is_empty()));
+        assert!(matches!(resolve_action("/cue/5/qNumber", &[]), OscAction::Unmatched));
+        assert!(matches!(resolve_action("/cue/5/qNumber", &[rosc::OscType::Int(5)]), OscAction::Unmatched));
+        assert!(matches!(authorized_action("/cue/5/qNumber", &[s("7")], false), OscAction::Unmatched));
+        assert!(NetworkCueAction::SetNumber("7".into()).is_write());
+        assert!(matches!(resolve_action("/cue/*/qNumber", &[s("7")]),
+            OscAction::AddressedCuePattern { action: NetworkCueAction::SetNumber(_), .. }));
+        // Query: qNumber is an alias of number.
+        for address in ["/cue/5/qNumber", "/cue/5/number"] {
+            let message = query_message(address);
+            assert!(matches!(CueQuery::parse(&message).unwrap().kind,
+                CueQueryKind::Cue { property: CueQueryProperty::Number, .. }));
+        }
+        let mut workspace = Workspace::new("Blue");
+        let mut wait = WaitCue::new();
+        wait.set_number(Some("5".into()));
+        workspace.active_cue_list_mut().unwrap().push(Box::new(wait));
+        let message = query_message("/cue/5/qNumber");
+        assert_eq!(
+            CueQuery::parse(&message).unwrap().read(&workspace, peer(), 0).unwrap(),
+            serde_json::json!("5")
+        );
     }
 
     #[test]
