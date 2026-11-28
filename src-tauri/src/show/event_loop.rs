@@ -677,6 +677,9 @@ fn tick(
             OutputStatus::Duration { voice_id, duration_ms } => {
                 pending_playback.video_durations.push((voice_id, Duration::from_millis(duration_ms)));
             }
+            OutputStatus::SliceBoundary { voice_id } => {
+                pending_playback.slice_boundaries.push(voice_id);
+            }
             OutputStatus::Error { voice_id, message } => {
                 log::warn!("Output voice {voice_id} error: {message}");
                 crate::media_usage::output_error(voice_id, &message);

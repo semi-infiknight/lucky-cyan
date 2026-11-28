@@ -653,6 +653,9 @@ pub enum OutputStatus {
     Withdrawn { voice_id: VoiceId },
     /// File metadata loaded; total duration is now known.
     Duration { voice_id: VoiceId, duration_ms: u64 },
+    /// A devamped voice crossed the end of its current slice and advanced to
+    /// the next one (the slice's loop was released; playback continues).
+    SliceBoundary { voice_id: VoiceId },
     /// A fatal playback error removed the voice from its slot.
     Error { voice_id: VoiceId, message: String },
 }

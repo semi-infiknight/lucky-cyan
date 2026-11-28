@@ -256,6 +256,14 @@ pub(super) struct SlicePlan {
     pub current: usize,
     /// Devamp "stop at end of current slice" armed.
     pub stop_at_end: bool,
+    /// A Devamp released the current slice's loop; the next crossed boundary
+    /// reports `OutputStatus::SliceBoundary` once.
+    pub devamp_released: bool,
+}
+
+enum SliceAction {
+    Advance((f64, f64, u32)),
+    Stop,
 }
 
 struct SaturationPreview {
@@ -267,6 +275,38 @@ struct SaturationPreview {
 const SATURATION: usize = PictureColorParameter::Saturation as usize;
 
 impl SlotState {
+    /// Decide what to do when playback `time` reached the current slice's end.
+    /// Returns the action plus the voice to report when a devamped slice
+    /// boundary was crossed (reported once, then the flag clears).
+    fn advance_slice_plan(&mut self, time: f64) -> (Option<SliceAction>, Option<VoiceId>) {
+        let voice_id = self.voice_id;
+        let Some(plan) = self.slice_plan.as_mut() else { return (None, None) };
+        let (_, end, _) = plan.segments[plan.current];
+        if time < end - 0.010 {
+            return (None, None);
+        }
+        if plan.stop_at_end {
+            return (Some(SliceAction::Stop), None);
+        }
+        if plan.current + 1 >= plan.segments.len() {
+            return (None, None); // Last segment — natural EOF completes the cue.
+        }
+        let boundary_voice = if plan.devamp_released {
+            plan.devamp_released = false;
+            voice_id
+        } else {
+            None
+        };
+        // Skip every boundary the clock already passed (a slow event must not
+        // re-program a stale segment).
+        while plan.current + 1 < plan.segments.len()
+            && time >= plan.segments[plan.current].1 - 0.010
+        {
+            plan.current += 1;
+        }
+        (Some(SliceAction::Advance(plan.segments[plan.current])), boundary_voice)
+    }
+
     pub(super) fn preview_saturation(&mut self, voice: VoiceId, token: Uuid, value: f32, expires_at: Instant) -> bool {
         if self.voice_id != Some(voice) || self.preloaded || self.pending_unload
             || self.pending_reveal.is_some() || !self.first_frame_ready || self.anim.current <= 0.0
@@ -1093,7 +1133,7 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) -> Result<()
         st.slice_plan = if load.slices.is_empty() {
             None
         } else {
-            Some(SlicePlan { segments: load.slices.clone(), current: 0, stop_at_end: false })
+            Some(SlicePlan { segments: load.slices.clone(), current: 0, stop_at_end: false, devamp_released: false })
         };
         st.preloaded = load.preload;
         st.first_frame_ready = false;
@@ -1849,35 +1889,14 @@ fn slot_event_loop(slot: Arc<VideoSlot>) {
                 }
                 let time = unsafe { *(prop.data as *const f64) };
 
-                enum SliceAction {
-                    Advance((f64, f64, u32)),
-                    Stop,
-                }
-                let action = {
+                let (action, boundary_voice) = {
                     let Ok(mut st) = slot.state.lock() else { continue };
                     if st.first_frame_ready && time.is_finite() && time >= 0.0 {
                         if let Some(speed) = st.silent_speed.as_mut().filter(|speed| speed.file_loaded) {
                             speed.position_ms = Some((time * 1000.0) as u64);
                         }
                     }
-                    let Some(plan) = st.slice_plan.as_mut() else { continue };
-                    let (_, end, _) = plan.segments[plan.current];
-                    if time < end - 0.010 {
-                        None
-                    } else if plan.stop_at_end {
-                        Some(SliceAction::Stop)
-                    } else if plan.current + 1 < plan.segments.len() {
-                        // Skip every boundary the clock already passed (a slow
-                        // event must not re-program a stale segment).
-                        while plan.current + 1 < plan.segments.len()
-                            && time >= plan.segments[plan.current].1 - 0.010
-                        {
-                            plan.current += 1;
-                        }
-                        Some(SliceAction::Advance(plan.segments[plan.current]))
-                    } else {
-                        None // Last segment — natural EOF completes the cue.
-                    }
+                    st.advance_slice_plan(time)
                 };
                 match action {
                     Some(SliceAction::Advance(seg)) => {
@@ -1887,6 +1906,9 @@ fn slot_event_loop(slot: Arc<VideoSlot>) {
                             slot.index, seg.0, seg.1,
                             if seg.2 == u32::MAX { "∞".into() } else { seg.2.to_string() },
                         );
+                        if let Some(vid) = boundary_voice {
+                            slot.send_status(OutputStatus::SliceBoundary { voice_id: vid });
+                        }
                     }
                     Some(SliceAction::Stop) => {
                         log::info!("[slot {}] devamp stop at slice boundary", slot.index);
@@ -2205,6 +2227,7 @@ pub(super) fn devamp_slot(slot: &Arc<VideoSlot>, stop_at_end: bool) {
     {
         let Ok(mut st) = slot.state.lock() else { return };
         let Some(plan) = st.slice_plan.as_mut() else { return };
+        plan.devamp_released = true;
         if stop_at_end {
             plan.stop_at_end = true;
         }
@@ -2261,6 +2284,34 @@ pub(super) fn position_ms(slot: &Arc<VideoSlot>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn devamped_slice_boundary_advances_and_reports_the_voice_once() {
+        let voice = Uuid::new_v4();
+        let mut state = SlotState::idle();
+        state.voice_id = Some(voice);
+        state.slice_plan = Some(SlicePlan {
+            segments: vec![(0.0, 1.0, u32::MAX), (1.0, 5.0, u32::MAX)],
+            current: 0,
+            stop_at_end: false,
+            devamp_released: true,
+        });
+        // Before the boundary: no action, no report.
+        assert!(matches!(state.advance_slice_plan(0.5), (None, None)));
+        // Crossing the devamped boundary: advance and report the voice once.
+        let (action, boundary) = state.advance_slice_plan(1.02);
+        assert!(matches!(action, Some(SliceAction::Advance((s, _, _))) if s == 1.0));
+        assert_eq!(boundary, Some(voice));
+        // Inside the new segment: no repeat report.
+        assert!(matches!(state.advance_slice_plan(1.5), (None, None)));
+        // Crossing the last segment's end: natural EOF, no action, no report.
+        let (action, boundary) = state.advance_slice_plan(5.0);
+        assert!(action.is_none() && boundary.is_none());
+        // Stop-at-end devamp wins over the boundary report.
+        state.slice_plan.as_mut().unwrap().stop_at_end = true;
+        let (action, boundary) = state.advance_slice_plan(5.0);
+        assert!(matches!(action, Some(SliceAction::Stop)) && boundary.is_none());
+    }
 
     #[test]
     fn timecode_positioned_entry_waits_for_the_requested_frame_and_respects_pause() {
