@@ -149,7 +149,7 @@ Load to Time temporarily prepares only the selected cue. DSP starts with the cho
 3. Start the Video cue. The desk waits for the positioned frame before revealing the picture and releasing its soundtrack. Check both against the intended beat, then stop and start the cue again to verify the normal opening.
 4. For a repeatable rehearsal, add a **Load** cue, enable **Load at a specified time** and choose the Video cue as its target. Save the show, then run the Load and the target as separate calls. A change to the clip boundaries requires a fresh Load or **Clear**.
 
-The staged entrance applies to one start. Group and cue-sequence preparation remain open. [QLab Load to Time](https://qlab.app/docs/v5/tools/tools-menu/#load-to-time)
+The staged entrance applies to one start. A Load cue aimed at a Group prepares every media child (nested groups recurse); per-cue Load-to-Time on children remains open. [QLab Load to Time](https://qlab.app/docs/v5/tools/tools-menu/#load-to-time)
 
 ## Mark cues that have played
 

@@ -593,6 +593,26 @@ fn recorded_stop_fades(log: &common::CallLog) -> Vec<u32> {
 }
 
 #[test]
+fn load_on_a_group_prepares_every_media_child() {
+    use inkue_lib::cue::audio_cue::AudioCue;
+
+    let (ctx, _rx, _log) = recording_context();
+    let mut audio = AudioCue::new();
+    let (samples, ch, sr, dur) = silence(3000);
+    audio.accept_preloaded_audio(samples, ch, sr, dur);
+    let audio_id = audio.id();
+    let mut group = GroupCue::new();
+    group.children.push(Box::new(audio));
+    group.children.push(WaitCueFactory.create());
+
+    group.preload(&ctx).unwrap();
+    let children = group.child_cues().unwrap();
+    let prepared = children.iter().find(|c| c.id() == audio_id).unwrap();
+    assert!(prepared.has_prepared_media(), "Load on a group prepares the audio child");
+    assert_eq!(prepared.state(), CueState::Paused);
+}
+
+#[test]
 fn audio_cue_leaves_natural_completion_and_fade_to_pcm_playback() {
     use inkue_lib::cue::audio_cue::AudioCue;
     use inkue_lib::cue::types::{FadeCurve, FadeSpec};

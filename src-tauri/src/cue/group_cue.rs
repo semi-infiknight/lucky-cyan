@@ -1701,6 +1701,23 @@ impl Cue for GroupCue {
         self.children.iter().flat_map(|c| c.visual_voice_ids()).collect()
     }
 
+    fn preload(&mut self, context: &crate::cue::context::CueContext) -> Result<()> {
+        // A Load cue on a Group prepares every child (nested groups recurse),
+        // matching QLab. Try them all; report the first failure.
+        let mut first_err = None;
+        for child in &mut self.children {
+            if let Err(error) = child.preload(context) {
+                if first_err.is_none() {
+                    first_err = Some(error);
+                }
+            }
+        }
+        match first_err {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     fn child_cues(&self) -> Option<&[Box<dyn Cue>]> {
         Some(&self.children)
     }
