@@ -257,6 +257,12 @@ export interface GroupTimelineOwner {
 
 export type PlaylistSecondTrigger = "ignore" | "next" | "previous";
 export type SecondTrigger = "ignore" | "panic" | "stop" | "hard_stop" | "hard_stop_and_restart" | "devamp";
+export interface CueLiveLevels {
+  peak_db_l: number;
+  peak_db_r: number;
+  rms_db_l: number;
+  rms_db_r: number;
+}
 
 export interface PlaylistTriggerSetting {
   workspace_id: string;

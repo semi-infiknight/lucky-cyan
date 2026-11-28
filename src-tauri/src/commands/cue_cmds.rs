@@ -381,6 +381,39 @@ fn summarise(
 // ---------------------------------------------------------------------------
 
 /// Return a compact summary of every cue in the active cue list.
+/// Live per-voice output levels of a running cue, in dB (floored at -120),
+/// for the desk's per-cue meter. `None` when the cue has no running voice.
+#[derive(Serialize)]
+pub struct CueLiveLevels {
+    pub peak_db_l: f32,
+    pub peak_db_r: f32,
+    pub rms_db_l: f32,
+    pub rms_db_r: f32,
+}
+
+fn level_db(level: f32) -> f32 {
+    if level > 0.0 { (20.0 * level.log10()).max(-120.0) } else { -120.0 }
+}
+
+#[tauri::command]
+pub fn cue_live_levels(cue_id: String, state: State<'_, AppState>) -> Result<Option<CueLiveLevels>, String> {
+    let id = cue_id.parse::<uuid::Uuid>().map_err(|_| "Invalid cue ID".to_string())?;
+    let ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    let Some((_, cue)) = crate::engine::osc_server::unique_workspace_cue(&ws, |cue| cue.id() == id) else {
+        return Ok(None);
+    };
+    let Some(voice) = cue.playing_voice_id() else { return Ok(None) };
+    let audio_voice = if cue.is_visual() { state.output_engine.video_audio_voice(voice) } else { Some(voice) };
+    let Some(audio_voice) = audio_voice else { return Ok(None) };
+    let Some((peak, rms)) = state.audio_engine.voice_levels(audio_voice) else { return Ok(None) };
+    Ok(Some(CueLiveLevels {
+        peak_db_l: level_db(peak[0]),
+        peak_db_r: level_db(peak[1]),
+        rms_db_l: level_db(rms[0]),
+        rms_db_r: level_db(rms[1]),
+    }))
+}
+
 #[tauri::command]
 pub fn get_all_cues(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<Vec<CueSummary>, String> {
     let ws = state.workspace.lock().map_err(|e| e.to_string())?;
@@ -2660,6 +2693,14 @@ pub fn remove_cue_from_group(
 #[cfg(test)]
 mod tests {
     use super::{compute_waveform_bins, set_file_path_resetting_clip};
+
+    #[test]
+    fn level_db_converts_linear_to_db_with_floor() {
+        assert!((super::level_db(1.0) - 0.0).abs() < 1e-6);
+        assert!((super::level_db(0.5) - (-6.0206)).abs() < 1e-3);
+        assert_eq!(super::level_db(0.0), -120.0);
+        assert_eq!(super::level_db(1e-9), -120.0);
+    }
 
     #[test]
     fn scoped_audition_uses_the_requested_list_and_open_workspace() {

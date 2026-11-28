@@ -31,7 +31,7 @@ use commands::{
     cue_find_cmds::find_cues,
     cue_cmds::{
         add_cue, add_cue_to_group, cancel_picture_saturation_preview, duplicate_cue, duplicate_cues,
-        get_all_cues, get_cue, get_playhead, reset_cue_colors, set_cue_flag, set_second_cue_color,
+        get_all_cues, get_cue, get_playhead, cue_live_levels, reset_cue_colors, set_cue_flag, set_second_cue_color,
         get_output_window_visible, get_waveform_peaks, get_normalize_db,
         set_live_level, set_live_crosspoint, preview_point_mix,
         get_media_thumbnail, get_video_filmstrip, get_video_filmstrip_range, group_cues, identify_output_screen,
@@ -563,6 +563,7 @@ pub fn run() {
             set_master_volume,
             // Cues
             get_all_cues,
+            cue_live_levels,
             find_cues,
             get_cue,
             set_cue_flag,

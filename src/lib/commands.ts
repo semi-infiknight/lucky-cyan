@@ -24,6 +24,7 @@ import type {
   CueValidation,
   MachineAudioConfig,
   CueId,
+  CueLiveLevels,
   CueEffect,
   CueListMode,
   CueListSummary,
@@ -100,6 +101,7 @@ export const armWallClockTrigger = (workspaceId: string, listId: string, cueId: 
 export const setSecondTrigger = (workspaceId: string, listId: string, cueId: CueId, trigger: SecondTrigger | null) =>
   invoke<void>("set_second_trigger", { workspaceId, listId, cueId, trigger });
 export const goCue = (cueId: CueId) => invoke<void>("go_cue", { cueId });
+export const cueLiveLevels = (cueId: CueId) => invoke<CueLiveLevels | null>("cue_live_levels", { cueId });
 export const setMasterVolume = (db: number) => invoke<void>("set_master_volume", { db });
 export const stopAll = () => invoke<void>("stop_all");
 export const hardStopBlackout = (workspaceId: string) => invoke<void>("hard_stop_blackout", { workspaceId });

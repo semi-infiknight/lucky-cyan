@@ -1,10 +1,12 @@
 // Panel showing all currently running or paused cues, always visible while active.
 
 import { cueAccent } from "../../lib/cueColors";
+import { useEffect, useState } from "react";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useTimingStore } from "../../stores/timingStore";
 import type { CueSummary } from "../../lib/types";
-import { stopCue } from "../../lib/commands";
+import { cueLiveLevels, stopCue } from "../../lib/commands";
+import type { CueLiveLevels } from "../../lib/types";
 import { cueTimeline, formatClock, timelinePosition } from "../../lib/timeline";
 import { ActiveCueProgress } from "./ActiveCueProgress";
 
@@ -23,7 +25,48 @@ function flattenActive(cues: CueSummary[]): CueSummary[] {
   return result;
 }
 
-function ActiveCueRow({ cue }: { cue: CueSummary }) {
+/** Poll the live per-voice levels of the running cues (RMS, dB) for the meter. */
+function useCueLevels(ids: string[]): Record<string, CueLiveLevels> {
+  const [levels, setLevels] = useState<Record<string, CueLiveLevels>>({});
+  const key = ids.join(",");
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      const entries = await Promise.all(
+        key.split(",").filter(Boolean).map(async (id) => [id, await cueLiveLevels(id).catch(() => null)] as const),
+      );
+      if (!cancelled) {
+        const next: Record<string, CueLiveLevels> = {};
+        for (const [id, v] of entries) if (v !== null) next[id] = v;
+        setLevels(next);
+      }
+    };
+    void tick();
+    const timer = setInterval(() => void tick(), 300);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [key]);
+  return levels;
+}
+
+function CueLevelMeter({ levels }: { levels?: CueLiveLevels }) {
+  if (!levels) return null;
+  const bar = (db: number) => Math.max(0, Math.min(1, (db + 60) / 60));
+  const color = (db: number) => (db > -3 ? "#ef4444" : db > -18 ? "#facc15" : "#22c55e");
+  return (
+    <span
+      title={`L ${levels.rms_db_l.toFixed(1)} dB · R ${levels.rms_db_r.toFixed(1)} dB (RMS)`}
+      style={{ display: "inline-flex", gap: 2, flexShrink: 0, alignItems: "flex-end", height: 12 }}
+    >
+      {[levels.rms_db_l, levels.rms_db_r].map((db, i) => (
+        <span key={i} style={{ width: 4, height: 12, background: "var(--wc-border)", position: "relative", overflow: "hidden", borderRadius: 1 }}>
+          <span style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: `${bar(db) * 100}%`, background: color(db) }} />
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function ActiveCueRow({ cue, levels }: { cue: CueSummary; levels?: CueLiveLevels }) {
   const timing = useTimingStore((s) => s.timings[cue.id]);
   const isPaused = cue.state === "paused";
   const colorAccent = cueAccent(cue);
@@ -77,6 +120,8 @@ function ActiveCueRow({ cue }: { cue: CueSummary }) {
         {cue.name || "(untitled)"}
       </span>
 
+      <CueLevelMeter levels={levels} />
+
       {cue.output_patch_name && (
         <span style={{
           flexShrink: 0, fontSize: 10, fontWeight: 700,
@@ -126,6 +171,7 @@ function ActiveCueRow({ cue }: { cue: CueSummary }) {
 export function ActiveCuesView() {
   const cues = useWorkspaceStore((s) => s.cues);
   const activeCues = flattenActive(cues);
+  const levels = useCueLevels(activeCues.map((cue) => cue.id));
 
   if (activeCues.length === 0) return null;
 
@@ -157,7 +203,7 @@ export function ActiveCuesView() {
         </span>
       </div>
       {activeCues.map((cue) => (
-        <ActiveCueRow key={cue.id} cue={cue} />
+        <ActiveCueRow key={cue.id} cue={cue} levels={levels[cue.id]} />
       ))}
     </div>
   );

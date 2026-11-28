@@ -184,7 +184,7 @@ A mark specifies the whole mix at one location. Between marks, Inkue interpolate
 3. Change one level in the mark draft. Confirm the physical meters keep showing the currently playing mix. Save the map, select that mark again, and choose **Apply point mix** to hear and meter the revised route. Use the cue’s main level to make a quiet rehearsal adjustment and confirm both outputs follow it.
 4. Stop the cue. The readings should fall below −60 dBFS when the device is quiet. Switch the main output in Preferences to another practice device and check that the map displays an unavailable message. Restore the named interface before continuing.
 
-The calibration meters show peak dBFS for the combined signal sent to each assigned channel of the named main device, after master gain. They can reveal routing and digital overload. The venue interface or console provides downstream confirmation. Cue-specific live levels are queryable over OSC (`/cue/{n}/liveAverageLevel/{channel}`, dB, 0-based channel of the running voice); a cue-specific VU widget in the desk and auxiliary-device meters remain open. [QLab 5.6 metering changes](https://qlab.app/release-notes/5.6)
+The calibration meters show peak dBFS for the combined signal sent to each assigned channel of the named main device, after master gain. They can reveal routing and digital overload. The venue interface or console provides downstream confirmation. Cue-specific live levels are queryable over OSC (`/cue/{n}/liveAverageLevel/{channel}`, dB, 0-based channel of the running voice) and shown as a per-cue stereo RMS meter in the Active panel while a cue runs; auxiliary-device meters remain open. [QLab 5.6 metering changes](https://qlab.app/release-notes/5.6)
 
 ### Check an audio map from Show Mode
 
