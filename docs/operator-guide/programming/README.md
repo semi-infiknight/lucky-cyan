@@ -35,7 +35,7 @@ Assign keys to top-level cues or to direct children of a top-level Sequential gr
 
 1. Put two silent Wait cues on a practice cart. Select the first pad in **Edit layout**, open **Triggers**, and press **Capture key**. Press **4** on the top row or on a number pad with **Num Lock** on. The inspector records the key and the cart stays idle.
 2. Switch to **Trigger pads** and focus the second pad. Press **4** to run the first pad. Hold the key briefly to check that there is only one start. Both number keys share the same assignment on a list.
-3. Stop playback, return to the first cue, and clear the key with **Unassigned**. Undo restores the assignment and keeps the current standby and armed wall-clock schedules. To leave Capture without an edit, tab away. **Escape** remains the desk stop shortcut. [QLab Hotkey Trigger](https://qlab.app/docs/v5/fundamentals/inspector/#hotkey-trigger)
+3. Stop playback, return to the first cue, and clear the key with **Unassigned**. Undo restores the assignment and keeps the current standby and armed wall-clock schedules. To leave Capture without an edit, tab away. **Escape** remains the desk stop shortcut. Every cue also has a **Second trigger** setting (Triggers tab): what happens when a start signal reaches the cue while it is already running — does nothing (default), panics, stops, hard stops, hard stops & restarts, or devamps. It applies to addressed starts such as `/cue/{n}/start`, wall-clock and timecode-independent triggers; playhead GO keeps its existing chaining rules. [QLab Hotkey Trigger](https://qlab.app/docs/v5/fundamentals/inspector/#hotkey-trigger)
 
 ## Call a cue from the local clock
 

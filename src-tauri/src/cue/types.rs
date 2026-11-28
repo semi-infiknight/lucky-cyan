@@ -454,6 +454,20 @@ pub enum PlaylistSecondTrigger {
     Previous,
 }
 
+/// What a second start signal does to a cue that is already running or paused
+/// (QLab's "second trigger" inspector setting).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecondTrigger {
+    #[default]
+    Ignore,
+    Panic,
+    Stop,
+    HardStop,
+    HardStopAndRestart,
+    Devamp,
+}
+
 /// An absolute cutoff for one stable Audio cue filter.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]

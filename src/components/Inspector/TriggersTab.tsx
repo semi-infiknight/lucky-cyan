@@ -6,6 +6,8 @@ import { getCueTcTrigger, setCueTcTrigger, setPlaylistSecondTrigger } from "../.
 import { Select } from "../common/Select";
 import { CueHotkeySection } from "./CueHotkeySection";
 import { WallClockTriggerSection } from "./WallClockTriggerSection";
+import { setSecondTrigger } from "../../lib/commands";
+import type { SecondTrigger } from "../../lib/types";
 import { MidiTriggerSection } from "./MidiTriggerSection";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 
@@ -31,6 +33,44 @@ const TC_RATE_LABELS: Record<TcRate, string> = {
   "29.97df": "29.97df (NTSC DF)",
   "30": "30 fps",
 };
+
+function SecondTriggerSection({ cue, onSave }: Props) {
+  const workspaceId = useWorkspaceStore(state => state.workspaceInfo?.instance_id);
+  const activeListId = useWorkspaceStore(state => state.activeCueListId);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const value = cue.second_trigger ?? "ignore";
+  const playing = cue.state === "running" || cue.state === "paused";
+  const save = async (trigger: SecondTrigger) => {
+    if (!workspaceId || !activeListId) return;
+    setBusy(true);
+    setError("");
+    try {
+      await setSecondTrigger(workspaceId, activeListId, cue.id, trigger === "ignore" ? null : trigger);
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      await onSave?.();
+      setBusy(false);
+    }
+  };
+
+  return <div style={{ marginBottom: 16 }}>
+    <label>Second trigger{" "}
+      <Select style={inputStyle} value={value} disabled={busy || playing}
+        onChange={event => void save(event.target.value as SecondTrigger)}>
+        <option value="ignore">Does nothing</option>
+        <option value="panic">Panics</option>
+        <option value="stop">Stops</option>
+        <option value="hard_stop">Hard stops</option>
+        <option value="hard_stop_and_restart">Hard stops &amp; restarts</option>
+        <option value="devamp">Devamps</option>
+      </Select>
+    </label>
+    <p>What happens when a start signal reaches this cue while it is already running. {playing && "Stop the cue to change this setting."}</p>
+    {error && <p role="alert">{error}</p>}
+  </div>;
+}
 
 function PlaylistSecondTriggerSection({ cue, onSave }: Props) {
   const workspaceId = useWorkspaceStore(state => state.workspaceInfo?.instance_id);
@@ -124,6 +164,7 @@ export function TriggersTab({ cue, onSave }: Props) {
       <CueHotkeySection key={[cue.cue_list_owner?.workspace_id, cue.cue_list_owner?.list_id, cue.id].join(":")}
         cue={cue} onSave={onSave} />
       <WallClockTriggerSection key={cue.id} cue={cue} onSave={onSave} />
+      <SecondTriggerSection key={cue.id} cue={cue} onSave={onSave} />
       <PlaylistSecondTriggerSection
         key={[cue.playlist_second_trigger?.workspace_id, cue.playlist_second_trigger?.list_id, cue.id].join(":")}
         cue={cue} onSave={onSave} />

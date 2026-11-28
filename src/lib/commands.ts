@@ -17,6 +17,7 @@ import type {
   AudioPreferences,
   CameraDeviceInfo,
   PlaylistSecondTrigger,
+  SecondTrigger,
   PlaylistTriggerSetting,
   CollectReport,
   CueColor,
@@ -96,6 +97,8 @@ export const setWallClockTrigger = (workspaceId: string, listId: string, cueId: 
   invoke<void>("set_wall_clock_trigger", { workspaceId, listId, cueId, trigger });
 export const armWallClockTrigger = (workspaceId: string, listId: string, cueId: CueId, armed: boolean) =>
   invoke<void>("arm_wall_clock_trigger", { workspaceId, listId, cueId, armed });
+export const setSecondTrigger = (workspaceId: string, listId: string, cueId: CueId, trigger: SecondTrigger | null) =>
+  invoke<void>("set_second_trigger", { workspaceId, listId, cueId, trigger });
 export const goCue = (cueId: CueId) => invoke<void>("go_cue", { cueId });
 export const setMasterVolume = (db: number) => invoke<void>("set_master_volume", { db });
 export const stopAll = () => invoke<void>("stop_all");

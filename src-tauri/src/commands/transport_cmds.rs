@@ -1333,6 +1333,42 @@ pub fn set_wall_clock_trigger(
     Ok(())
 }
 
+/// Save or remove a cue's QLab "second trigger" behavior (what an addressed
+/// start does while the cue is running or paused).
+#[tauri::command]
+pub fn set_second_trigger(
+    workspace_id: uuid::Uuid,
+    list_id: uuid::Uuid,
+    cue_id: uuid::Uuid,
+    trigger: Option<crate::cue::types::SecondTrigger>,
+    state: State<'_, AppState>,
+    handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    if ws.instance_id != workspace_id || ws.active_cue_list_id != list_id {
+        return Err("Active show or list changed".into());
+    }
+    let list = ws.active_cue_list_mut().ok_or("No active cue list")?;
+    if list.get_recursive(&cue_id).is_none() {
+        return Err("Cue no longer exists".into());
+    }
+    let trigger = trigger.filter(|t| *t != crate::cue::types::SecondTrigger::Ignore);
+    if list.second_triggers.get(&cue_id) == trigger.as_ref() {
+        return Ok(());
+    }
+    state.undo_stack.lock().map_err(|e| e.to_string())?
+        .push_action(list_id, super::undo_cmds::take_snapshot(list));
+    if let Some(trigger) = trigger {
+        list.second_triggers.insert(cue_id, trigger);
+    } else {
+        list.second_triggers.remove(&cue_id);
+    }
+    ws.mark_modified();
+    let _ = handle.emit("workspace-modified", ());
+    let _ = handle.emit("cue-list-refresh", ());
+    Ok(())
+}
+
 /// Require a local desk action after opening or recovering a show.
 #[tauri::command]
 pub fn arm_wall_clock_trigger(
@@ -1953,7 +1989,7 @@ mod tests {
     #[test]
     fn native_pause_and_resume_use_independent_playback_without_moving_standby() {
         let (context, _, _) = crate::test_support::recording_context();
-        let transport = Transport::new(context.clone());
+        let mut transport = Transport::new(context.clone());
         let mut workspace = Workspace::new("Pause rehearsal");
         let numbers = ["101", "102", "103"].map(|number| {
             let mut cue = WaitCue::new();

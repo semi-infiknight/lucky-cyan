@@ -1554,7 +1554,7 @@ fn addressed_go_on_a_disarmed_mark_leaves_the_playhead_and_next_cue_alone() {
 fn independent_start_keeps_standby_and_respects_arming_and_continue_mode() {
     let registry = full_registry();
     let (context, _events) = test_context();
-    let transport = Transport::new(context);
+    let mut transport = Transport::new(context);
     let standby = registry.create(&CueType::Wait).unwrap();
     let scheduled = registry.create(&CueType::Wait).unwrap();
     let following = registry.create(&CueType::Wait).unwrap();

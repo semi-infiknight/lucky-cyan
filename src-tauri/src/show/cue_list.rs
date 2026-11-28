@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::cart_layout::{CartEdit, CartLayout};
 use super::wall_clock::{Observation, WallClockSession, WallClockTrigger};
-use crate::cue::{control_cue::ControlAction, registry::CueRegistry, traits::Cue, types::{ContinueMode, CueColor, CueId, CueType, GroupMode}};
+use crate::cue::{control_cue::ControlAction, registry::CueRegistry, traits::Cue, types::{ContinueMode, CueColor, CueId, CueType, GroupMode, SecondTrigger}};
 use crate::cue::group_cue::GroupCue;
 use super::timecode_loss::ClockCue;
 use crate::engine::midi_trigger::MidiTrigger;
@@ -231,6 +231,10 @@ pub struct CueList {
     pub flagged_cues: BTreeSet<CueId>,
     pub second_colors: BTreeMap<CueId, CueColor>,
     pub wall_clock_triggers: BTreeMap<CueId, WallClockTrigger>,
+    /// QLab "second trigger": what an addressed start does to a cue that is
+    /// already running or paused. Stored on the list like the other per-cue
+    /// trigger maps.
+    pub second_triggers: BTreeMap<CueId, SecondTrigger>,
     pub(crate) wall_clock_session: WallClockSession,
     /// Playback launched without a list advance. A live edit cannot enable a follow on this run.
     pub(crate) independent_runs: BTreeSet<CueId>,
@@ -280,6 +284,7 @@ impl CueList {
             flagged_cues: BTreeSet::new(),
             second_colors: BTreeMap::new(),
             wall_clock_triggers: BTreeMap::new(),
+            second_triggers: BTreeMap::new(),
             wall_clock_session: WallClockSession::default(),
             independent_runs: BTreeSet::new(),
             auto_renumber: false,
@@ -326,6 +331,11 @@ impl CueList {
                 })
                 && !cue.fade_specification().is_some_and(|fade| fade.crossfade_into.is_some())
         })
+    }
+
+    /// The cue's QLab "second trigger" behavior (default: ignore).
+    pub fn second_trigger_of(&self, id: &CueId) -> SecondTrigger {
+        self.second_triggers.get(id).copied().unwrap_or_default()
     }
 
     pub(crate) fn collect_wall_clock(&mut self, now: Observation) -> Vec<CueId> {
@@ -1426,6 +1436,8 @@ impl CueList {
             "second_colors": self.second_colors.iter().filter(|(id, _)| live_ids.contains(id)).collect::<BTreeMap<_, _>>(),
             "wall_clock_triggers": self.wall_clock_triggers.iter()
                 .filter(|(id, _)| live_ids.contains(id)).collect::<BTreeMap<_, _>>(),
+            "second_triggers": self.second_triggers.iter()
+                .filter(|(id, _)| live_ids.contains(id)).collect::<BTreeMap<_, _>>(),
             "tc_triggers": self.tc_triggers.iter()
                 .filter(|(id, _)| live_ids.contains(id))
                 .map(|(id, t)| serde_json::json!({ "cue_id": id, "trigger": t }))
@@ -1542,6 +1554,10 @@ impl CueList {
             Some(saved) => serde_json::from_value(saved.clone())?,
             None => BTreeMap::new(),
         };
+        let second_triggers: BTreeMap<CueId, SecondTrigger> = match value.get("second_triggers") {
+            Some(saved) => serde_json::from_value(saved.clone())?,
+            None => BTreeMap::new(),
+        };
         for trigger in wall_clock_triggers.values() {
             trigger.validate()?;
         }
@@ -1571,12 +1587,14 @@ impl CueList {
             flagged_cues: BTreeSet::new(),
             second_colors: BTreeMap::new(),
             wall_clock_triggers,
+            second_triggers,
             wall_clock_session: WallClockSession::default(),
             independent_runs: BTreeSet::new(),
             auto_renumber: false,
         };
         list.restore_enter_standby_child(playhead_child_id);
         let live = list.all_cue_ids();
+        list.second_triggers.retain(|id, _| live.contains(id));
         if let Some(saved) = value["flagged_cues"].as_array() {
             list.flagged_cues = saved.iter().filter_map(|id| id.as_str()?.parse().ok())
                 .filter(|id| live.contains(id)).collect();
@@ -2470,6 +2488,32 @@ mod tests {
         assert!(list.check_hotkey(b, Some("4")).is_err());
         let numeric = CueList::from_json(list.to_json(), &registry).unwrap();
         assert_eq!(numeric.hotkeys.get(&a).map(String::as_str), Some("4"));
+    }
+
+    #[test]
+    fn second_trigger_persists_and_drops_deleted_ids() {
+        use crate::cue::memo_cue::MemoCueFactory;
+
+        let mut registry = CueRegistry::new();
+        registry.register(CueType::Memo, Box::new(MemoCueFactory));
+        let mut list = CueList::new("Second trigger");
+        let cue = memo();
+        let id = cue.id();
+        list.push(cue);
+        assert_eq!(list.second_trigger_of(&id), SecondTrigger::Ignore);
+        list.second_triggers.insert(id, SecondTrigger::HardStopAndRestart);
+        assert_eq!(list.second_trigger_of(&id), SecondTrigger::HardStopAndRestart);
+        let document = list.to_json();
+        let reopened = CueList::from_json(document.clone(), &registry).unwrap();
+        assert_eq!(reopened.second_trigger_of(&id), SecondTrigger::HardStopAndRestart);
+        // Unknown enum values are rejected, stale ids are dropped.
+        let mut bad = document.clone();
+        bad["second_triggers"][id.to_string()] = serde_json::json!("explode");
+        assert!(CueList::from_json(bad, &registry).is_err());
+        let mut stale = document;
+        stale["second_triggers"][Uuid::new_v4().to_string()] = serde_json::json!("stop");
+        let reopened = CueList::from_json(stale, &registry).unwrap();
+        assert_eq!(reopened.second_triggers.len(), 1);
     }
 
     #[test]

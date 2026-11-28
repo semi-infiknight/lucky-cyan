@@ -1150,7 +1150,7 @@ fn tick(
 
     if ws.cue_lists.iter().any(|list| list.wall_clock_session.has_armed()) {
         let now = super::wall_clock::Observation::now();
-        let transport = Transport::new(tick_ctx.clone());
+        let mut transport = Transport::new(tick_ctx.clone());
         for list in &mut ws.cue_lists {
             for cue_id in list.collect_wall_clock(now) {
                 if !now.is_fresh() {
@@ -1966,6 +1966,37 @@ mod tests {
     }
 
     #[test]
+    fn second_trigger_runs_on_a_restart_while_the_cue_is_running() {
+        use crate::cue::{types::{ContinueMode, SecondTrigger}, wait_cue::WaitCue};
+        let (ctx, _, _) = crate::test_support::recording_context();
+        let mut transport = Transport::new(ctx);
+        let mut list = CueList::new("Second trigger");
+        list.auto_renumber = false;
+        let mut wait = WaitCue::new();
+        wait.set_continue_mode(ContinueMode::DoNotContinue);
+        let id = wait.id();
+        list.push(Box::new(wait));
+
+        // First start runs the cue; default second trigger ignores the re-start.
+        assert_eq!(transport.start_independent(&mut list, id).unwrap().triggered, [id]);
+        assert!(list.get(&id).unwrap().is_running());
+        assert!(transport.start_independent(&mut list, id).unwrap().triggered.is_empty());
+        assert!(list.get(&id).unwrap().is_running());
+
+        // Hard stop on the second signal: the cue stops and stays stopped.
+        list.second_triggers.insert(id, SecondTrigger::HardStop);
+        assert!(transport.start_independent(&mut list, id).unwrap().triggered.is_empty());
+        assert!(!list.get(&id).unwrap().is_running());
+
+        // Hard stop & restart: the second signal re-fires the cue.
+        list.second_triggers.insert(id, SecondTrigger::HardStopAndRestart);
+        assert_eq!(transport.start_independent(&mut list, id).unwrap().triggered, [id]);
+        assert!(list.get(&id).unwrap().is_running());
+        assert_eq!(transport.start_independent(&mut list, id).unwrap().triggered, [id]);
+        assert!(list.get(&id).unwrap().is_running());
+    }
+
+    #[test]
     fn enter_boundary_post_wait_dispatches_once_or_drops_the_captured_successor() {
         for (post, cancel) in [(2, false), (8, false), (8, true)] {
             let (ctx, _, _) = crate::test_support::recording_context();
@@ -2155,7 +2186,7 @@ mod tests {
 
         let (mut context, _, calls) = crate::test_support::recording_context();
         let frames = crate::test_support::record_audio_launch_positions(&mut context, &calls);
-        let transport = Transport::new(context);
+        let mut transport = Transport::new(context);
         let mut list = CueList::new("Rehearsal video");
         let standby = WaitCue::new();
         let parked = standby.id();
@@ -2195,7 +2226,7 @@ mod tests {
 
         let (mut context, _, calls) = crate::test_support::recording_context();
         let launched = crate::test_support::record_audio_launch_positions(&mut context, &calls);
-        let transport = Transport::new(context.clone());
+        let mut transport = Transport::new(context.clone());
         let mut list = CueList::new("Rehearsal locate");
         list.tc_config.enabled = true;
         list.tc_config.rate = TcRate::Fps25;

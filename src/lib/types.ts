@@ -256,6 +256,7 @@ export interface GroupTimelineOwner {
 }
 
 export type PlaylistSecondTrigger = "ignore" | "next" | "previous";
+export type SecondTrigger = "ignore" | "panic" | "stop" | "hard_stop" | "hard_stop_and_restart" | "devamp";
 
 export interface PlaylistTriggerSetting {
   workspace_id: string;
@@ -326,6 +327,7 @@ export interface CueSummary {
   playlist_loop?: boolean;
   playlist_advance_playhead?: boolean;
   playlist_second_trigger?: PlaylistTriggerSetting;
+  second_trigger?: SecondTrigger;
   playlist_auto_shuffle?: boolean;
   /** Direct child IDs in the current Playlist run's playback order. */
   playlist_run_order?: CueId[];

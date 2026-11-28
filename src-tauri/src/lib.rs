@@ -107,6 +107,7 @@ use commands::{
     },
     transport_cmds::{
         go, go_cue, fire_cue_hotkey, set_cue_hotkey, arm_wall_clock_trigger, set_wall_clock_trigger,
+        set_second_trigger,
         hard_stop_all, hard_stop_blackout, load_media_to_time, pause_cue, reset_workspace_transport, resume_cue, seek_cue,
         set_master_volume, stop_all, stop_cue,
     },
@@ -549,6 +550,7 @@ pub fn run() {
             set_cue_hotkey,
             arm_wall_clock_trigger,
             set_wall_clock_trigger,
+            set_second_trigger,
             stop_all,
             hard_stop_all,
             reset_workspace_transport,

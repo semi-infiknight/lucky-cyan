@@ -10,6 +10,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 
 use crate::cue::{
+    types::SecondTrigger,
     context::CueContext,
     audio_cue::AudioCue,
     control_cue::{ControlAction, ControlCue},
@@ -567,7 +568,7 @@ impl Transport {
 
     /// Enter an eligible cue partway through from a newly acquired clock,
     /// without parking or advancing the operator's playhead.
-    pub(crate) fn join_from_timecode(&self, list: &mut CueList, id: CueId, elapsed: Duration) -> Result<GoResult> {
+    pub(crate) fn join_from_timecode(&mut self, list: &mut CueList, id: CueId, elapsed: Duration) -> Result<GoResult> {
         let skipped = GoResult::default();
         let Some(cue) = list.get_mut(&id) else { return Ok(skipped) };
         if cue.is_disabled() || cue.state() != CueState::Standby
@@ -617,17 +618,48 @@ impl Transport {
         result
     }
 
+    /// QLab "second trigger": what an addressed start does to a cue that is
+    /// already running or paused. Returns `Ok(true)` when the cue should be
+    /// (re)started afterwards (HardStopAndRestart); `Ok(false)` otherwise.
+    fn apply_second_trigger(&mut self, cue_list: &mut CueList, cue_id: CueId) -> Result<bool> {
+        match cue_list.second_trigger_of(&cue_id) {
+            SecondTrigger::Ignore => Ok(false),
+            // Panic fades out like a soft stop at transport level.
+            SecondTrigger::Panic | SecondTrigger::Stop => {
+                self.stop_cue(cue_list, &cue_id)?;
+                Ok(false)
+            }
+            SecondTrigger::HardStop => {
+                self.hard_stop_cue(cue_list, &cue_id)?;
+                Ok(false)
+            }
+            SecondTrigger::HardStopAndRestart => {
+                self.hard_stop_cue(cue_list, &cue_id)?;
+                Ok(true)
+            }
+            SecondTrigger::Devamp => {
+                self.devamp_cue(cue_list, cue_id)?;
+                Ok(false)
+            }
+        }
+    }
+
     /// Start one addressed action without shifting the desk's standby cue.
     /// Constrain starts to actions independent of list sequencing.
-    pub fn start_independent(&self, list: &mut CueList, id: CueId) -> Result<GoResult> {
+    pub fn start_independent(&mut self, list: &mut CueList, id: CueId) -> Result<GoResult> {
         let mut result = GoResult::default();
         if !list.can_start_independently(id) || !list.cue_with_arming(&id).is_some_and(|(_, armed)| armed) {
             return Ok(result);
         }
-        let cue = list.get(&id).ok_or_else(|| anyhow!("Cue {id} no longer exists"))?;
-        if cue.is_running() || cue.is_paused() {
-            return Ok(result);
+        let running = list.get(&id).is_some_and(|c| c.is_running() || c.is_paused());
+        if running {
+            // QLab "second trigger": a re-start on a live cue is not a no-op
+            // when the cue is programmed to panic/stop/hard-stop/devamp.
+            if !self.apply_second_trigger(list, id)? {
+                return Ok(result);
+            }
         }
+        let cue = list.get(&id).ok_or_else(|| anyhow!("Cue {id} no longer exists"))?;
         let replacement = list.target_destination(cue)?;
         let fired = self.fire_cue(list, id, replacement, false, &mut result);
         if fired.is_ok() {

@@ -53,6 +53,7 @@ pub struct CueSummary {
     pub cue_list_owner: Option<GroupTimelineOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_clock_trigger: Option<crate::show::wall_clock::WallClockTrigger>,
+    pub second_trigger: crate::cue::types::SecondTrigger,
     #[serde(default)]
     pub wall_clock_armed: bool,
     pub id: String,
@@ -325,6 +326,7 @@ fn summarise(
         hotkey: list.hotkeys.get(&cue.id()).cloned(),
         cue_list_owner: Some(owner),
         wall_clock_trigger: list.wall_clock_triggers.get(&cue.id()).copied(),
+        second_trigger: list.second_trigger_of(&cue.id()),
         wall_clock_armed: list.wall_clock_session.is_armed(cue.id()),
         output_patch_name: patches.name_for(cue),
         id: cue.id().to_string(),
