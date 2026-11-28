@@ -162,6 +162,12 @@ pub fn update_cue(workspace_id: Uuid, cue_id: Uuid) -> (String, Vec<rosc::OscTyp
     (format!("/update/workspace/{workspace_id}/cue_id/{cue_id}"), Vec::new())
 }
 
+/// Convenience: the workspace went away — QLab's
+/// `/update/workspace/{id}/disconnect`, telling subscribers to drop it.
+pub fn update_workspace_disconnect(workspace_id: Uuid) -> (String, Vec<rosc::OscType>) {
+    (format!("/update/workspace/{workspace_id}/disconnect"), Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +226,6 @@ mod tests {
         let (_addr, args) = update_playback_position(ws, list, None);
         assert!(args.is_empty());
         assert_eq!(update_cue(ws, cue).0, format!("/update/workspace/{ws}/cue_id/{cue}"));
+        assert_eq!(update_workspace_disconnect(ws).0, format!("/update/workspace/{ws}/disconnect"));
     }
 }

@@ -41,6 +41,11 @@ fn collect_media_cues(
 }
 
 fn retire_workspace(state: &AppState, workspace: &mut Workspace) -> Result<(), String> {
+    // QLab tells /updates subscribers the old workspace is gone.
+    if crate::engine::osc_updates::has_subscribers() {
+        let old_id = workspace.instance_id;
+        crate::engine::osc_updates::push(&[crate::engine::osc_updates::update_workspace_disconnect(old_id)]);
+    }
     state.audio_engine.stop_audition(None);
     state.agent.lock().map_err(|e| e.to_string())?.disconnect();
     let context = super::transport_cmds::workspace_context(state, workspace);
